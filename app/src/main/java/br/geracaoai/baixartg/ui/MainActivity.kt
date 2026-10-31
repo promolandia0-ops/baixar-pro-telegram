@@ -97,6 +97,9 @@ fun HomeScreen(shared: MutableState<String?>) {
     LaunchedEffect(Unit) { perms.launch(Manifest.permission.POST_NOTIFICATIONS) }
     LaunchedEffect(shared.value) { shared.value?.let { url = it; shared.value = null } }
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
+    var query by remember { mutableStateOf("") }
+    val qWords = remember(query) { NameFilter.words(query) }
+    val shown = remember(items, qWords) { if (qWords.isEmpty()) items else items.filter { NameFilter.matches(it.f, qWords) } }
     val sel = items.count { it.sel }
 
     Scaffold(topBar = {
@@ -155,6 +158,21 @@ fun HomeScreen(shared: MutableState<String?>) {
                     FilledTonalButton({ Jobs.selectAll(true) }, enabled = editable && sel < items.size, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
                     OutlinedButton({ Jobs.selectAll(false) }, enabled = editable && sel > 0, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Desmarcar", maxLines = 1) }
                 }
+                Spacer(Modifier.height(10.dp))
+                OutlinedTextField(query, { query = it }, label = { Text("Filtrar por nome") }, placeholder = { Text("ex.: Aline Faria") }, singleLine = true,
+                    leadingIcon = { Icon(Icons.Rounded.FilterList, null) },
+                    trailingIcon = { if (query.isNotEmpty()) IconButton({ query = "" }) { Icon(Icons.Rounded.Close, "Limpar filtro") } },
+                    modifier = Modifier.fillMaxWidth())
+                if (qWords.isNotEmpty()) {
+                    val ids = shown.map { it.id }.toSet()
+                    Text("${shown.size} encontrados • ${shown.count { it.sel }} marcados", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 4.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
+                        val pad = PaddingValues(horizontal = 10.dp)
+                        Button({ Jobs.onlySel(ids) }, enabled = editable && shown.isNotEmpty(), contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Marcar só esses", maxLines = 1) }
+                        FilledTonalButton({ Jobs.setSel(ids, true) }, enabled = editable && shown.any { !it.sel }, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Marcar +", maxLines = 1) }
+                        OutlinedButton({ Jobs.setSel(ids, false) }, enabled = editable && shown.any { it.sel }, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Desmarcar esses", maxLines = 1) }
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton({ copy(ctx, items.joinToString("\n") { linkOf(it.f) }, "${items.size} links copiados") }, Modifier.weight(1f)) {
@@ -162,7 +180,7 @@ fun HomeScreen(shared: MutableState<String?>) {
                     if (phase == Phase.LIST) OutlinedButton({ Jobs.clear() }) { Text("Limpar") }
                 }
             }
-            items(items, key = { it.id }) { ItemRow(it, phase != Phase.RUNNING) }
+            items(shown, key = { it.id }) { ItemRow(it, phase != Phase.RUNNING) }
             if (phase == Phase.IDLE && items.isEmpty()) item { HowTo() }
         }
     }

@@ -31,6 +31,10 @@ object Jobs {
     private fun set(id: Int, f: (Item) -> Item) = items.update { l -> if (id !in l.indices) l else l.toMutableList().also { it[id] = f(it[id]) } }
     fun toggle(id: Int) = set(id) { it.copy(sel = !it.sel) }
     fun selectAll(v: Boolean) = items.update { l -> l.map { if (it.sel == v) it else it.copy(sel = v) } }
+    /** Marca/desmarca só os ids informados (ex.: resultado do filtro por nome). */
+    fun setSel(ids: Set<Int>, v: Boolean) = items.update { l -> l.map { if (it.id in ids && it.sel != v) it.copy(sel = v) else it } }
+    /** Deixa marcados SOMENTE esses ids. */
+    fun onlySel(ids: Set<Int>) = items.update { l -> l.map { val v = it.id in ids; if (it.sel != v) it.copy(sel = v) else it } }
     /** Marca os próximos N ainda não marcados (e não enviados). */
     fun markNext(n: Int) = items.update { l -> var left = n; l.map { if (left > 0 && !it.sel && it.st != St.DONE) { left--; it.copy(sel = true) } else it } }
     fun clear() { if (job?.isActive == true) return; items.value = emptyList(); phase.value = Phase.IDLE; status.value = "" }
