@@ -22,7 +22,7 @@ class LiveTest {
         val dir = File("build/dltest").apply { mkdirs() }
         val f1 = Downloader.direct("https://www.w3schools.com/html/mov_bbb.mp4", "https://www.w3schools.com/html/html5_video.asp", dir, "bbb") { _, _ -> }
         println("direct: ${f1.name} ${f1.length()}"); check(f1.length() > 100_000)
-        val f2 = Downloader.hls("https://test-streams.mux.dev/x36xhzz/url_0/193039199_mp4_h264_aac_hd_7.m3u8".let { "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" }, null, File(dir, "hls.ts")) { a, b -> }
+        val f2 = Downloader.hls("https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8", null, dir, "hls", { _, _ -> })
         println("hls: ${f2.name} ${f2.length()}"); check(f2.length() > 1_000_000)
     }
     @Test fun server() = runBlocking {

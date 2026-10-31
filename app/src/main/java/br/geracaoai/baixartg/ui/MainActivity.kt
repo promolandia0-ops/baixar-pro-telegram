@@ -14,6 +14,8 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -144,10 +146,16 @@ fun HomeScreen(shared: MutableState<String?>) {
                     Text(status, Modifier.padding(14.dp), style = MaterialTheme.typography.bodyMedium) }
             }
             if (items.isNotEmpty()) item {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("${items.size} vídeos • $sel marcados", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                    TextButton({ Jobs.selectAll(sel < items.size) }, enabled = phase != Phase.RUNNING) { Text(if (sel < items.size) "Marcar todos" else "Desmarcar") }
+                val editable = phase != Phase.RUNNING
+                Text("$sel de ${items.size} marcados", fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(6.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val pad = PaddingValues(horizontal = 10.dp)
+                    FilledTonalButton({ Jobs.markNext(100) }, enabled = editable && sel < items.size, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Marcar 100", maxLines = 1) }
+                    FilledTonalButton({ Jobs.selectAll(true) }, enabled = editable && sel < items.size, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
+                    OutlinedButton({ Jobs.selectAll(false) }, enabled = editable && sel > 0, contentPadding = pad, modifier = Modifier.weight(1f)) { Text("Desmarcar", maxLines = 1) }
                 }
+                Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton({ copy(ctx, items.joinToString("\n") { linkOf(it.f) }, "${items.size} links copiados") }, Modifier.weight(1f)) {
                         Icon(Icons.Rounded.ContentCopy, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar todos os links") }
@@ -172,7 +180,8 @@ fun ItemRow(it: Item, editable: Boolean) {
                 Text(it.f.url, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val (txt, color) = when (it.st) {
                     St.WAIT -> it.f.label to MaterialTheme.colorScheme.onSurfaceVariant
-                    St.DOWN -> ("Baixando " + (if (it.total > 0) "${(it.prog * 100).toInt()}% de ${fmtBytes(it.total)}" else fmtBytes(it.bytes))) to MaterialTheme.colorScheme.primary
+                    St.DOWN -> (it.msg.ifBlank { "Baixando " + (if (it.total > 0) "${(it.prog * 100).toInt()}% de ${fmtBytes(it.total)}" else fmtBytes(it.bytes)) + (if (it.speed > 0) " • ${fmtBytes(it.speed)}/s" else "") }) to MaterialTheme.colorScheme.primary
+                    St.READY -> "Baixado (${fmtBytes(it.total)}) • na fila para enviar" to MaterialTheme.colorScheme.primary
                     St.UP -> "Enviando pro Telegram ${(it.prog * 100).toInt()}%" to MaterialTheme.colorScheme.primary
                     St.DONE -> "✓ Enviado para Mensagens Salvas" to MaterialTheme.colorScheme.tertiary
                     St.ERR -> "Erro: ${it.msg}" to MaterialTheme.colorScheme.error
@@ -203,9 +212,11 @@ fun SettingsSheet(onClose: () -> Unit) {
     var pages by remember { mutableStateOf(Prefs.maxPages.toString()) }
     var probe by remember { mutableStateOf(Prefs.probe) }
     var server by remember { mutableStateOf(Prefs.server) }
+    var pd by remember { mutableFloatStateOf(Prefs.parDown.toFloat()) }
+    var pu by remember { mutableFloatStateOf(Prefs.parUp.toFloat()) }
     val scope = rememberCoroutineScope()
-    ModalBottomSheet({ Prefs.depth = depth.toInt(); Prefs.maxPages = pages.toIntOrNull()?.coerceIn(1, 5000) ?: 500; Prefs.probe = probe; Prefs.server = server.trim().ifBlank { Downloader.DEFAULT_SERVER }; onClose() }) {
-        Column(Modifier.padding(20.dp, 0.dp, 20.dp, 32.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+    ModalBottomSheet({ Prefs.depth = depth.toInt(); Prefs.maxPages = pages.toIntOrNull()?.coerceIn(1, 5000) ?: 500; Prefs.probe = probe; Prefs.parDown = pd.toInt(); Prefs.parUp = pu.toInt(); Prefs.server = server.trim().ifBlank { Downloader.DEFAULT_SERVER }; onClose() }) {
+        Column(Modifier.padding(20.dp, 0.dp, 20.dp, 32.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Ajustes", style = MaterialTheme.typography.titleLarge)
             Text("Profundidade dos links: ${depth.toInt()}")
             Slider(depth, { depth = it }, valueRange = 0f..20f, steps = 19)
@@ -214,6 +225,10 @@ fun SettingsSheet(onClose: () -> Unit) {
                 Column(Modifier.weight(1f)) { Text("Usar servidor (yt-dlp) em todas as páginas"); Text("Acha vídeos de players difíceis. Mais lento.", style = MaterialTheme.typography.bodySmall) }
                 Switch(probe, { probe = it })
             }
+            Text("Downloads ao mesmo tempo: ${pd.toInt()}")
+            Slider(pd, { pd = it }, valueRange = 1f..6f, steps = 4)
+            Text("Envios ao Telegram ao mesmo tempo: ${pu.toInt()}")
+            Slider(pu, { pu = it }, valueRange = 1f..3f, steps = 1)
             OutlinedTextField(server, { server = it }, label = { Text("Servidor yt-dlp") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             HorizontalDivider()
             OutlinedButton({ scope.launch { try { Td.send(TdApi.LogOut()) } catch (_: Exception) {} }; onClose() }, Modifier.fillMaxWidth()) { Text("Sair do Telegram") }

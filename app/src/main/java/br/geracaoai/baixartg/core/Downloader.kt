@@ -1,6 +1,9 @@
 package br.geracaoai.baixartg.core
 
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.Dispatchers
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -25,16 +28,22 @@ object Downloader {
         if (ref != null) header("Referer", ref)
     }.build()
 
-    suspend fun download(f: Found, dir: File, server: String, progress: (Long, Long) -> Unit): File =
-        if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
-        Kind.DIRECT -> try { retry { direct(f.url, f.page, dir, f.title, progress) } } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            // Fallback: o servidor abre a página com a mesma sessão (tokens presos a cookie/IP)
-            if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
+    suspend fun download(f: Found, dir: File, server: String, progress: (Long, Long) -> Unit): File {
+        val ref = f.ref ?: f.page
+        return if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
+            Kind.DIRECT -> try { retry { direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                // Fallback: o servidor abre a página com a mesma sessão (tokens presos a cookie/IP)
+                if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
+            }
+            Kind.HLS -> hls(f.url, ref, dir, f.title, progress)
+            Kind.SERVER -> viaServer(f.url, dir, server, progress)
         }
-        Kind.HLS -> hls(f.url, f.page, File(dir, safe(f.title) + "_" + System.nanoTime() + ".ts"), progress)
-        Kind.SERVER -> viaServer(f.url, dir, server, progress)
     }
+
+    /** Arquivo vindo de HLS precisa ser remuxado (.ts/fMP4 -> MP4) sem recodificar. Áudio separado fica em "<arquivo>.audio". */
+    fun isHlsOutput(f: File) = f.name.contains(".hls.")
+    fun audioOf(f: File) = File(f.path + ".audio")
 
     /** Bunkr: resolve a página /f/ (ou assina a URL do CDN) e baixa com Referer do site; 3 tentativas com token novo. */
     suspend fun bunkr(f: Found, dir: File, progress: (Long, Long) -> Unit): File {
@@ -43,8 +52,8 @@ object Downloader {
             try {
                 val m = when {
                     Bunkr.isBunkrPage(f.url) -> Bunkr.resolve(f.url)
-                    Bunkr.isBunkrPage(f.page) -> Bunkr.resolve(f.page)
-                    else -> Bunkr.Media(Bunkr.sign(f.url, referer = f.page), Bunkr.origin(f.page), f.title)
+                    Bunkr.isCdn(f.url) && (attempt == 1 || !Bunkr.isBunkrPage(f.page)) -> Bunkr.Media(Bunkr.sign(f.url, referer = f.page), Bunkr.origin(f.page), f.title)
+                    else -> Bunkr.resolve(f.page)
                 }
                 return direct(m.url, m.referer, dir, m.title.ifBlank { f.title }, progress)
             } catch (e: Exception) {
@@ -55,7 +64,7 @@ object Downloader {
         throw last ?: DlException("Bunkr: falhou")
     }
 
-    fun safe(t: String) = t.replace(Regex("""\.(mp4|webm|mov|mkv|m4v|ts)$""", RegexOption.IGNORE_CASE), "").replace(Regex("""[^\p{L}\p{N}\-_. ]+"""), "").trim().take(60).ifBlank { "video" }
+    fun safe(t: String) = t.replace(Regex("""\.(mp4|webm|mov|mkv|m4v|ts|m3u8)$""", RegexOption.IGNORE_CASE), "").replace(Regex("""[^\p{L}\p{N}\-_. ]+"""), "").trim().take(60).ifBlank { "video" }
 
     private fun extOf(url: String, ct: String?): String {
         val e = Regex("""\.(mp4|webm|mov|m4v|mkv)(?:$|[?#/])""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.lowercase()
@@ -132,20 +141,53 @@ object Downloader {
         if (!r.isSuccessful) throw DlException("HTTP ${r.code} no segmento"); r.body!!.bytes()
     }
 
-    /** HLS simples: escolhe a maior qualidade, junta os segmentos (suporta AES-128 e EXT-X-MAP). */
-    suspend fun hls(url: String, referer: String?, out: File, progress: (Long, Long) -> Unit): File {
-        var plUrl = url; var pl = text(plUrl, referer)
-        if (pl.contains("#EXT-X-STREAM-INF")) {
-            val lines = pl.lines(); var best = -1L; var bestUrl: String? = null
-            for (i in lines.indices) if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
-                val bw = Regex("""BANDWIDTH=(\d+)""").find(lines[i])?.groupValues?.get(1)?.toLong() ?: 0
-                val u = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") } ?: continue
-                if (bw > best) { best = bw; bestUrl = Extract.abs(plUrl, u.trim()) }
-            }
-            plUrl = bestUrl ?: throw DlException("Playlist sem variantes"); pl = text(plUrl, referer)
+    class Variant(val url: String, val bw: Long, val pixels: Long, val audio: String?)
+
+    /** Escolhe SEMPRE a maior qualidade (resolução, depois bitrate). */
+    fun pickVariant(plUrl: String, pl: String): Variant? {
+        val lines = pl.lines(); var best: Variant? = null
+        for (i in lines.indices) if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
+            val l = lines[i]
+            val bw = Regex("""[^-]BANDWIDTH=(\d+)""").find(",$l")?.groupValues?.get(1)?.toLong() ?: 0
+            val px = Regex("""RESOLUTION=(\d+)x(\d+)""").find(l)?.let { it.groupValues[1].toLong() * it.groupValues[2].toLong() } ?: 0
+            val au = Regex("""AUDIO="([^"]+)"""").find(l)?.groupValues?.get(1)
+            val u = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
+            val v = Variant(Extract.abs(plUrl, u) ?: continue, bw, px, au)
+            if (best == null || v.pixels > best.pixels || (v.pixels == best.pixels && v.bw > best.bw)) best = v
         }
-        if (pl.contains("#EXT-X-KEY") && Regex("""METHOD=(SAMPLE-AES)""").containsMatchIn(pl)) throw DlException("Vídeo protegido (DRM)")
-        data class Seg(val url: String, val key: String?, val iv: ByteArray?, val seq: Long)
+        return best
+    }
+
+    /** Faixa de áudio separada (EXT-X-MEDIA TYPE=AUDIO com URI) do grupo da variante. */
+    fun audioRendition(plUrl: String, pl: String, group: String?): String? {
+        if (group == null) return null
+        val media = pl.lines().filter { it.startsWith("#EXT-X-MEDIA:") && it.contains("TYPE=AUDIO") && it.contains("GROUP-ID=\"$group\"") && it.contains("URI=") }
+        val pick = media.firstOrNull { it.contains("DEFAULT=YES") } ?: media.firstOrNull() ?: return null
+        return Regex("""URI="([^"]+)"""").find(pick)?.groupValues?.get(1)?.let { Extract.abs(plUrl, it) }
+    }
+
+    /** HLS: maior qualidade, segmentos em paralelo (ordem preservada), AES-128 e EXT-X-MAP. Sem recodificar. */
+    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8): File {
+        var plUrl = url; var pl = text(plUrl, referer)
+        var audioUrl: String? = null
+        if (pl.contains("#EXT-X-STREAM-INF")) {
+            val v = pickVariant(plUrl, pl) ?: throw DlException("Playlist sem variantes")
+            audioUrl = audioRendition(plUrl, pl, v.audio)
+            plUrl = v.url; pl = text(plUrl, referer)
+        }
+        val base = File(dir, safe(title) + "_" + System.nanoTime())
+        val video = media(plUrl, pl, referer, base.path + ".hls", parallel, progress)
+        if (audioUrl != null) {
+            val a = media(audioUrl, text(audioUrl, referer), referer, base.path + ".a.hls", parallel) { _, _ -> }
+            if (!a.renameTo(audioOf(video))) { a.copyTo(audioOf(video), true); a.delete() }
+        }
+        return video
+    }
+
+    private class Seg(val url: String, val key: String?, val iv: ByteArray?, val seq: Long)
+
+    private suspend fun media(plUrl: String, pl: String, referer: String?, outBase: String, parallel: Int, progress: (Long, Long) -> Unit): File = coroutineScope {
+        if (Regex("""METHOD=SAMPLE-AES""").containsMatchIn(pl)) throw DlException("Vídeo protegido (DRM)")
         val segs = ArrayList<Seg>(); var key: String? = null; var iv: ByteArray? = null; var seq = 0L; var mapUrl: String? = null
         for (l in pl.lines().map { it.trim() }) when {
             l.startsWith("#EXT-X-MEDIA-SEQUENCE:") -> seq = l.substringAfter(':').toLongOrNull() ?: 0
@@ -161,27 +203,37 @@ object Downloader {
         }
         if (segs.isEmpty()) throw DlException("Playlist vazia")
         val keys = HashMap<String, ByteArray>()
-        var out2 = out
-        if (mapUrl != null) out2 = File(out.path.removeSuffix(".ts") + ".mp4")
+        segs.mapNotNull { it.key }.distinct().forEach { keys[it] = retry { bytes(it, referer) } }
+        val out = File(outBase + if (mapUrl != null) ".mp4" else ".ts")
         try {
-            out2.outputStream().buffered().use { os ->
-                mapUrl?.let { os.write(bytes(it, referer)) }
-                var total = 0L
-                segs.forEachIndexed { i, s ->
+            out.outputStream().buffered(1 shl 20).use { os ->
+                mapUrl?.let { os.write(retry { bytes(it, referer) }) }
+                var total = 0L; var n = 0
+                // janela deslizante: até `parallel` segmentos em voo, gravados na ordem
+                val window = ArrayDeque<kotlinx.coroutines.Deferred<ByteArray>>()
+                val it = segs.iterator()
+                fun launchNext() { if (it.hasNext()) { val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer) } } }
+                repeat(parallel.coerceAtLeast(1)) { launchNext() }
+                while (window.isNotEmpty()) {
                     coroutineContext.ensureActive()
-                    var data = retry { bytes(s.url, referer) }
-                    if (s.key != null) {
-                        val k = keys.getOrPut(s.key) { bytes(s.key, referer) }
-                        val ivb = s.iv ?: ByteArray(16).also { b -> var v = s.seq; for (j in 15 downTo 8) { b[j] = (v and 0xff).toByte(); v = v shr 8 } }
-                        data = Cipher.getInstance("AES/CBC/PKCS5Padding").apply { init(Cipher.DECRYPT_MODE, SecretKeySpec(k, "AES"), IvParameterSpec(ivb)) }.doFinal(data)
-                    }
-                    os.write(data); total += data.size
-                    // total estimado pela média dos segmentos
-                    progress(total, total / (i + 1) * segs.size)
+                    val data = window.removeFirst().await()
+                    launchNext()
+                    os.write(data); total += data.size; n++
+                    progress(total, total / n * segs.size)
                 }
             }
-        } catch (e: Throwable) { out2.delete(); throw e }
-        return out2
+        } catch (e: Throwable) { out.delete(); throw e }
+        out
+    }
+
+    private suspend fun fetchSeg(s: Seg, keys: Map<String, ByteArray>, referer: String?): ByteArray {
+        var data = retry { bytes(s.url, referer) }
+        if (s.key != null) {
+            val k = keys[s.key]!!
+            val ivb = s.iv ?: ByteArray(16).also { b -> var v = s.seq; for (j in 15 downTo 8) { b[j] = (v and 0xff).toByte(); v = v shr 8 } }
+            data = Cipher.getInstance("AES/CBC/PKCS5Padding").apply { init(Cipher.DECRYPT_MODE, SecretKeySpec(k, "AES"), IvParameterSpec(ivb)) }.doFinal(data)
+        }
+        return data
     }
 
     private suspend fun <T> retry(n: Int = 3, f: suspend () -> T): T {

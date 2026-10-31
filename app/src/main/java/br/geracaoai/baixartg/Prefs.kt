@@ -14,5 +14,7 @@ object Prefs {
     var depth: Int get() = p.getInt("depth", 10); set(v) = p.edit().putInt("depth", v).apply()
     var maxPages: Int get() = p.getInt("pages", 500); set(v) = p.edit().putInt("pages", v).apply()
     var probe: Boolean get() = p.getBoolean("probe", false); set(v) = p.edit().putBoolean("probe", v).apply()
+    var parDown: Int get() = p.getInt("pdown", 3); set(v) = p.edit().putInt("pdown", v).apply()
+    var parUp: Int get() = p.getInt("pup", 2); set(v) = p.edit().putInt("pup", v).apply()
     var lastUrl: String get() = p.getString("url", "")!!; set(v) = p.edit().putString("url", v).apply()
 }

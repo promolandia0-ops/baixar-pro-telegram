@@ -16,6 +16,8 @@ object Net {
     val http: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(30, TimeUnit.SECONDS).readTimeout(90, TimeUnit.SECONDS)
         .followRedirects(true).followSslRedirects(true)
+        .dispatcher(okhttp3.Dispatcher().apply { maxRequests = 96; maxRequestsPerHost = 24 })
+        .connectionPool(okhttp3.ConnectionPool(32, 5, TimeUnit.MINUTES))
         .addInterceptor { ch ->
             val r = ch.request()
             val b = r.newBuilder()
