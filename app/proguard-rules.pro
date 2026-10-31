@@ -1,0 +1,6 @@
+-keep class org.drinkless.tdlib.** { *; }
+-dontwarn org.drinkless.tdlib.**
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-dontwarn org.jspecify.**
+-dontwarn com.google.re2j.**
