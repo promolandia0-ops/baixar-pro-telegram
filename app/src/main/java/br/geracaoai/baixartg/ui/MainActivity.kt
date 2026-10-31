@@ -149,7 +149,7 @@ fun HomeScreen(shared: MutableState<String?>) {
                     TextButton({ Jobs.selectAll(sel < items.size) }, enabled = phase != Phase.RUNNING) { Text(if (sel < items.size) "Marcar todos" else "Desmarcar") }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton({ copy(ctx, items.joinToString("\n") { it.f.url }, "${items.size} links copiados") }, Modifier.weight(1f)) {
+                    OutlinedButton({ copy(ctx, items.joinToString("\n") { linkOf(it.f) }, "${items.size} links copiados") }, Modifier.weight(1f)) {
                         Icon(Icons.Rounded.ContentCopy, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar todos os links") }
                     if (phase == Phase.LIST) OutlinedButton({ Jobs.clear() }) { Text("Limpar") }
                 }
@@ -181,7 +181,7 @@ fun ItemRow(it: Item, editable: Boolean) {
                 Text(txt, style = MaterialTheme.typography.labelMedium, color = color)
                 if (it.st == St.DOWN || it.st == St.UP) LinearProgressIndicator(progress = { it.prog }, Modifier.fillMaxWidth().padding(top = 4.dp))
             }
-            IconButton({ copy(ctx, it.f.url, "Link copiado") }) { Icon(Icons.Rounded.ContentCopy, "Copiar link") }
+            IconButton({ copy(ctx, linkOf(it.f), "Link copiado") }) { Icon(Icons.Rounded.ContentCopy, "Copiar link") }
         }
     }
 }
@@ -220,3 +220,6 @@ fun SettingsSheet(onClose: () -> Unit) {
         }
     }
 }
+
+/** Bunkr: a URL do CDN só vale com token; copia a página /f/, que sempre abre. */
+fun linkOf(f: Found) = if (Bunkr.applies(f) && f.page != f.url) f.page else f.url

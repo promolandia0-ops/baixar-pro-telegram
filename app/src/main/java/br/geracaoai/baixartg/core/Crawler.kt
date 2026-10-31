@@ -63,6 +63,11 @@ object Extract {
             doc.select("a[href]").map { it.attr("href") } +
             doc.select("meta[property=og:video], meta[property=og:video:url], meta[name=twitter:player]").map { it.attr("content") })
             .mapNotNull { abs(pageUrl, it) }.filter { YTDLP_HOSTS.containsMatchIn(it) }.forEach { server += it }
+        if (Bunkr.isBunkrPage(pageUrl)) {
+            val cdn = media.firstOrNull { Bunkr.isCdn(it) }
+            return PageResult(if (cdn != null) listOf(Found(cdn, pageUrl, title.substringBefore(" | "), Kind.DIRECT)) else emptyList(),
+                doc.select("a[href]").mapNotNull { abs(pageUrl, it.attr("href")) }.filter { !skipPage(it) }.distinct(), title)
+        }
         val links = doc.select("a[href], link[rel=next]").mapNotNull { abs(pageUrl, it.attr("href")) }.filter { !skipPage(it) }.distinct()
         val vids = ArrayList<Found>()
         media.filterNot { it.contains("preview", true) && media.size > 1 }.ifEmpty { media.toList() }.forEach { vids += Found(it, pageUrl, title, if (isHls(it)) Kind.HLS else Kind.DIRECT) }

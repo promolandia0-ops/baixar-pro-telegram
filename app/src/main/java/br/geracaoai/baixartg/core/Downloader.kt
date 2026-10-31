@@ -21,11 +21,13 @@ object Downloader {
     const val DEFAULT_SERVER = "https://baixar-video-ezck.onrender.com"
 
     private fun req(url: String, referer: String?) = Request.Builder().url(url).header("Accept", "*/*").apply {
-        if (referer != null && referer != url) { header("Referer", referer); try { val u = java.net.URI(referer); header("Origin", "${u.scheme}://${u.authority}") } catch (_: Exception) {} }
+        val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
+        if (ref != null) header("Referer", ref)
     }.build()
 
-    suspend fun download(f: Found, dir: File, server: String, progress: (Long, Long) -> Unit): File = when (f.kind) {
-        Kind.DIRECT -> try { direct(f.url, f.page, dir, f.title, progress) } catch (e: Exception) {
+    suspend fun download(f: Found, dir: File, server: String, progress: (Long, Long) -> Unit): File =
+        if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
+        Kind.DIRECT -> try { retry { direct(f.url, f.page, dir, f.title, progress) } } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             // Fallback: o servidor abre a página com a mesma sessão (tokens presos a cookie/IP)
             if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
@@ -34,7 +36,26 @@ object Downloader {
         Kind.SERVER -> viaServer(f.url, dir, server, progress)
     }
 
-    fun safe(t: String) = t.replace(Regex("""[^\p{L}\p{N}\-_. ]+"""), "").trim().take(60).ifBlank { "video" }
+    /** Bunkr: resolve a página /f/ (ou assina a URL do CDN) e baixa com Referer do site; 3 tentativas com token novo. */
+    suspend fun bunkr(f: Found, dir: File, progress: (Long, Long) -> Unit): File {
+        var last: Exception? = null
+        for (attempt in 1..3) {
+            try {
+                val m = when {
+                    Bunkr.isBunkrPage(f.url) -> Bunkr.resolve(f.url)
+                    Bunkr.isBunkrPage(f.page) -> Bunkr.resolve(f.page)
+                    else -> Bunkr.Media(Bunkr.sign(f.url, referer = f.page), Bunkr.origin(f.page), f.title)
+                }
+                return direct(m.url, m.referer, dir, m.title.ifBlank { f.title }, progress)
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                last = e; kotlinx.coroutines.delay(1500L * attempt)
+            }
+        }
+        throw last ?: DlException("Bunkr: falhou")
+    }
+
+    fun safe(t: String) = t.replace(Regex("""\.(mp4|webm|mov|mkv|m4v|ts)$""", RegexOption.IGNORE_CASE), "").replace(Regex("""[^\p{L}\p{N}\-_. ]+"""), "").trim().take(60).ifBlank { "video" }
 
     private fun extOf(url: String, ct: String?): String {
         val e = Regex("""\.(mp4|webm|mov|m4v|mkv)(?:$|[?#/])""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.lowercase()
