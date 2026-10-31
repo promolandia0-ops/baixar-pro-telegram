@@ -12,7 +12,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 enum class St { WAIT, DOWN, READY, UP, DONE, ERR, STOPPED }
-data class Item(val id: Int, val f: Found, val sel: Boolean = true, val st: St = St.WAIT, val prog: Float = 0f, val bytes: Long = 0, val total: Long = -1, val msg: String = "", val speed: Long = 0)
+data class Item(val id: Int, val f: Found, val sel: Boolean = true, val st: St = St.WAIT, val prog: Float = 0f, val bytes: Long = 0, val total: Long = -1, val msg: String = "", val speed: Long = 0, val sent: Boolean = false)
 enum class Phase { IDLE, CRAWLING, LIST, RUNNING }
 
 object Jobs {
@@ -25,18 +25,20 @@ object Jobs {
     val stopping = MutableStateFlow(false)
     @Volatile private var job: Job? = null
 
-    fun init(c: Context) { app = c.applicationContext }
+    fun init(c: Context) { app = c.applicationContext; Sent.init(app.filesDir) }
 
     /** id == posição na lista, então a atualização é O(1) por índice (rápido com 5000 itens). */
     private fun set(id: Int, f: (Item) -> Item) = items.update { l -> if (id !in l.indices) l else l.toMutableList().also { it[id] = f(it[id]) } }
     fun toggle(id: Int) = set(id) { it.copy(sel = !it.sel) }
-    fun selectAll(v: Boolean) = items.update { l -> l.map { if (it.sel == v) it else it.copy(sel = v) } }
+    /** "Marcar" nunca pega os já enviados (dá pra marcar um por um na mão). */
+    private fun canAuto(it: Item) = !it.sent && it.st != St.DONE
+    fun selectAll(v: Boolean) = items.update { l -> l.map { val nv = v && canAuto(it); if (it.sel == nv) it else it.copy(sel = nv) } }
     /** Marca/desmarca só os ids informados (ex.: resultado do filtro por nome). */
-    fun setSel(ids: Set<Int>, v: Boolean) = items.update { l -> l.map { if (it.id in ids && it.sel != v) it.copy(sel = v) else it } }
+    fun setSel(ids: Set<Int>, v: Boolean) = items.update { l -> l.map { if (it.id in ids && it.sel != v && (!v || canAuto(it))) it.copy(sel = v) else it } }
     /** Deixa marcados SOMENTE esses ids. */
-    fun onlySel(ids: Set<Int>) = items.update { l -> l.map { val v = it.id in ids; if (it.sel != v) it.copy(sel = v) else it } }
+    fun onlySel(ids: Set<Int>) = items.update { l -> l.map { val v = it.id in ids && canAuto(it); if (it.sel != v) it.copy(sel = v) else it } }
     /** Marca os próximos N ainda não marcados (e não enviados). */
-    fun markNext(n: Int) = items.update { l -> var left = n; l.map { if (left > 0 && !it.sel && it.st != St.DONE) { left--; it.copy(sel = true) } else it } }
+    fun markNext(n: Int) = items.update { l -> var left = n; l.map { if (left > 0 && !it.sel && canAuto(it)) { left--; it.copy(sel = true) } else it } }
     fun clear() { if (job?.isActive == true) return; items.value = emptyList(); phase.value = Phase.IDLE; status.value = "" }
 
     fun startCrawl(url: String) {
@@ -52,7 +54,7 @@ object Jobs {
             val buf = ArrayList<Item>(); var n = 0; var lastFlush = 0L
             fun flush() { if (buf.isNotEmpty()) { val add = buf.toList(); buf.clear(); items.update { it + add } } }
             try {
-                val total = c.run(u, { crawl.value = it; val now = System.currentTimeMillis(); if (now - lastFlush > 400) { lastFlush = now; flush() } }) { f -> buf += Item(n++, f) }
+                val total = c.run(u, { crawl.value = it; val now = System.currentTimeMillis(); if (now - lastFlush > 400) { lastFlush = now; flush() } }) { f -> val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s) }
                 flush()
                 status.value = if (total == 0) "Nenhum vídeo encontrado. Tente ativar “Usar servidor (yt-dlp) em todas as páginas”." else "Busca concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos."
             } catch (e: CancellationException) { flush(); status.value = "Busca parada. ${items.value.size} vídeos encontrados até agora."
@@ -127,11 +129,54 @@ object Jobs {
             set(t.id) { it.copy(st = St.UP, prog = 0f) }
             val cap = t.f.title + "\n" + t.f.page + (if (t.f.url != t.f.page && !Bunkr.isCdn(t.f.url)) "\n" + t.f.url else "")
             Uploader.upload(file, cap) { p -> set(t.id) { it.copy(prog = p) } }
-            set(t.id) { it.copy(st = St.DONE, prog = 1f, msg = "") }; return true
+            Sent.markSent(t.f)
+            set(t.id) { it.copy(st = St.DONE, prog = 1f, msg = "", sent = true) }; return true
         } catch (e: CancellationException) { set(t.id) { it.copy(st = St.STOPPED, msg = "Parado") }; throw e
         } catch (e: Exception) { set(t.id) { it.copy(st = St.ERR, msg = e.message?.take(160) ?: "Erro") }; return false
         } finally { withContext(NonCancellable) { file.delete(); Downloader.audioOf(file).delete() } }
     }
+
+    // ---------- Histórico x Telegram ----------
+    val syncStatus = MutableStateFlow("")
+    @Volatile private var syncJob: Job? = null
+
+    /** Lê as legendas das Mensagens Salvas e importa os links já enviados (inclusive de versões antigas). */
+    fun syncTelegram(auto: Boolean = false) {
+        if (syncJob?.isActive == true) return
+        if (auto && Prefs.synced) return
+        syncJob = scope.launch {
+            try {
+                if (!Td.awaitReady(60_000)) { syncStatus.value = "Telegram não conectado"; return@launch }
+                syncStatus.value = "Lendo Mensagens Salvas…"
+                val chat = Uploader.savedChat()
+                var from = 0L; var read = 0; var added = 0; var empty = 0
+                while (isActive) {
+                    val r = Td.send(org.drinkless.tdlib.TdApi.GetChatHistory(chat, from, 0, 100, false))
+                    if (r.messages.isEmpty()) { if (++empty >= 3) break; delay(700); continue }
+                    empty = 0
+                    val caps = r.messages.mapNotNull { m -> when (val c = m.content) {
+                        is org.drinkless.tdlib.TdApi.MessageVideo -> c.caption.text
+                        is org.drinkless.tdlib.TdApi.MessageDocument -> c.caption.text
+                        is org.drinkless.tdlib.TdApi.MessageText -> c.text.text
+                        else -> null } }
+                    added += Sent.importCaptions(caps); read += r.messages.size
+                    from = r.messages.last().id
+                    syncStatus.value = "Lidas $read mensagens • $added links novos no histórico"
+                }
+                Prefs.synced = true
+                syncStatus.value = "Sincronizado: $read mensagens lidas, ${Sent.size} chaves no histórico."
+                refreshSent()
+            } catch (e: CancellationException) { throw e } catch (e: Exception) { syncStatus.value = "Erro ao sincronizar: ${e.message}" }
+        }
+    }
+
+    /** Reaplica o histórico na lista atual (desmarca o que já foi enviado). */
+    fun refreshSent() {
+        if (phase.value == Phase.RUNNING) return
+        items.update { l -> l.map { val s = Sent.isSent(it.f); if (s && !it.sent) it.copy(sent = true, sel = false) else if (!s && it.sent) it.copy(sent = false) else it } }
+    }
+
+    fun clearHistory() { Sent.clear(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Histórico apagado." }
 
     fun stop() { stopping.value = true; job?.cancel() }
     val busy get() = job?.isActive == true

@@ -95,6 +95,7 @@ fun HomeScreen(shared: MutableState<String?>) {
     var settings by remember { mutableStateOf(false) }
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) { perms.launch(Manifest.permission.POST_NOTIFICATIONS) }
+    LaunchedEffect(Unit) { Jobs.syncTelegram(auto = true) }
     LaunchedEffect(shared.value) { shared.value?.let { url = it; shared.value = null } }
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     var query by remember { mutableStateOf("") }
@@ -150,7 +151,8 @@ fun HomeScreen(shared: MutableState<String?>) {
             }
             if (items.isNotEmpty()) item {
                 val editable = phase != Phase.RUNNING
-                Text("$sel de ${items.size} marcados", fontWeight = FontWeight.SemiBold)
+                val sentN = items.count { it.sent }
+                Text("$sel de ${items.size} marcados" + (if (sentN > 0) " • $sentN já enviados" else ""), fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.height(6.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     val pad = PaddingValues(horizontal = 10.dp)
@@ -194,7 +196,11 @@ fun ItemRow(it: Item, editable: Boolean) {
         Row(Modifier.clickable(enabled = editable) { Jobs.toggle(it.id) }.padding(start = 4.dp, end = 4.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(it.sel, { _ -> Jobs.toggle(it.id) }, enabled = editable)
             Column(Modifier.weight(1f)) {
-                Text(it.f.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (it.sent) Surface(color = MaterialTheme.colorScheme.tertiaryContainer, shape = MaterialTheme.shapes.small, modifier = Modifier.padding(end = 6.dp)) {
+                        Text("Já enviado", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onTertiaryContainer, modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)) }
+                    Text(it.f.title, maxLines = 1, overflow = TextOverflow.Ellipsis, fontWeight = FontWeight.Medium)
+                }
                 Text(it.f.url, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 val (txt, color) = when (it.st) {
                     St.WAIT -> it.f.label to MaterialTheme.colorScheme.onSurfaceVariant
@@ -248,6 +254,16 @@ fun SettingsSheet(onClose: () -> Unit) {
             Text("Envios ao Telegram ao mesmo tempo: ${pu.toInt()}")
             Slider(pu, { pu = it }, valueRange = 1f..3f, steps = 1)
             OutlinedTextField(server, { server = it }, label = { Text("Servidor yt-dlp") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+            HorizontalDivider()
+            val sync by Jobs.syncStatus.collectAsState()
+            var hist by remember { mutableIntStateOf(Sent.size) }
+            Text("Histórico de enviados: $hist chaves", fontWeight = FontWeight.Medium)
+            Text("Vídeos já enviados aparecem desmarcados com “Já enviado”.", style = MaterialTheme.typography.bodySmall)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton({ Jobs.syncTelegram() }, Modifier.weight(1f)) { Icon(Icons.Rounded.Sync, null); Spacer(Modifier.width(6.dp)); Text("Sincronizar com Telegram", maxLines = 1) }
+                OutlinedButton({ Jobs.clearHistory(); hist = 0 }) { Text("Limpar histórico") }
+            }
+            if (sync.isNotBlank()) { Text(sync, style = MaterialTheme.typography.bodySmall); LaunchedEffect(sync) { hist = Sent.size } }
             HorizontalDivider()
             OutlinedButton({ scope.launch { try { Td.send(TdApi.LogOut()) } catch (_: Exception) {} }; onClose() }, Modifier.fillMaxWidth()) { Text("Sair do Telegram") }
         }
