@@ -72,6 +72,11 @@ object Jobs {
             var stopped = false
             try {
                 for (u in urls) {
+                    if (Mega.isMegaLink(u)) { // MEGA: arquivos criptografados, lista via API oficial
+                        crawl.value = crawl.value.copy(current = u)
+                        Mega.resolvePublic(u).forEach { (f, sz) -> if (seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
+                        pagesBefore++; flush(); continue
+                    }
                     val c = Crawler(opts) { p -> Downloader.probe(server, p) }
                     c.run(u, { p -> crawl.value = p.copy(pagesDone = pagesBefore + p.pagesDone, queued = p.queued + (urls.size - urls.indexOf(u) - 1))
                         val now = System.currentTimeMillis(); if (now - lastFlush > 400) { lastFlush = now; flush() } }) { f ->
@@ -99,6 +104,19 @@ object Jobs {
     private suspend fun fetchSizes() = coroutineScope {
         val sem = kotlinx.coroutines.sync.Semaphore(6)
         items.value.filter { it.f.kind == Kind.DIRECT }.map { t -> launch { sem.acquire(); try { val sz = Downloader.sizeOf(t.f); if (sz > 0) set(t.id) { it.copy(total = sz) } } finally { sem.release() } } }.joinAll()
+    }
+
+    /** Itens vindos de fora da varredura (MEGA): entram na lista com o tamanho já conhecido. */
+    fun addExternal(list: List<Pair<Found, Long>>, start: Boolean): Boolean {
+        if (job?.isActive == true || list.isEmpty()) return false
+        mode.value = Mode.LINKS
+        val base = if (phase.value == Phase.LIST || phase.value == Phase.IDLE) items.value else emptyList()
+        val have = base.map { it.f.url }.toHashSet()
+        val add = list.filter { it.first.url !in have }.mapIndexed { i, (f, sz) -> val s = Sent.isSent(f); Item(base.size + i, f, sel = true, sent = s, total = sz) }
+        items.value = base + add
+        phase.value = Phase.LIST; status.value = "${add.size} vídeo(s) do MEGA adicionados."
+        if (start) startTransfer(add.map { it.id }.toSet())
+        return true
     }
 
     /** Reenvia um vídeo do histórico (baixa de novo do site e manda pro Telegram). */
@@ -196,7 +214,7 @@ object Jobs {
     private suspend fun uploadOne(t: Item, file: File): Boolean {
         try {
             set(t.id) { it.copy(st = St.UP, prog = 0f) }
-            val cap = t.f.title + "\n" + t.f.page + (if (t.f.url != t.f.page && !Bunkr.isCdn(t.f.url)) "\n" + t.f.url else "")
+            val cap = t.f.title + "\n" + t.f.page + (if (t.f.url != t.f.page && !Bunkr.isCdn(t.f.url) && t.f.kind != Kind.MEGA) "\n" + t.f.url else "")
             Uploader.upload(file, cap) { p -> set(t.id) { it.copy(prog = p) } }
             Sent.markSent(t.f); History.add(t.f, file.length())
             set(t.id) { it.copy(st = St.DONE, prog = 1f, msg = "", sent = true) }; return true

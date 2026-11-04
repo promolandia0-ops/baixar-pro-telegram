@@ -30,6 +30,7 @@ object Downloader {
 
     suspend fun download(f: Found, dir: File, server: String, maxHeight: Int = 0, progress: (Long, Long) -> Unit): File {
         val ref = f.ref ?: f.page
+        if (f.kind == Kind.MEGA) return Mega.download(f, dir, progress)
         return if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
             Kind.DIRECT -> try { retry { direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -38,6 +39,7 @@ object Downloader {
             }
             Kind.HLS -> hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight)
             Kind.SERVER -> viaServer(f.url, dir, server, progress)
+            Kind.MEGA -> Mega.download(f, dir, progress)
         }
     }
 
@@ -107,7 +109,7 @@ object Downloader {
     suspend fun viaServer(pageUrl: String, dir: File, server: String, progress: (Long, Long) -> Unit): File {
         val base = server.trimEnd('/')
         val json = "application/json".toMediaType()
-        val body = JSONObject().put("url", pageUrl).put("mode", "video").toString().toRequestBody(json)
+        val body = session(JSONObject().put("url", pageUrl).put("mode", "video"), pageUrl).toString().toRequestBody(json)
         val r = Net.slow.newCall(Request.Builder().url("$base/api/download").post(body).build()).await()
         r.use {
             val ct = r.header("Content-Type") ?: ""
@@ -118,7 +120,7 @@ object Downloader {
                 return when (j.optString("method")) {
                     "redirect" -> direct(j.getString("url"), pageUrl, dir, title, progress)
                     "proxy" -> {
-                        val pb = JSONObject().put("page_url", pageUrl).toString().toRequestBody(json)
+                        val pb = session(JSONObject().put("page_url", pageUrl), pageUrl).toString().toRequestBody(json)
                         Net.slow.newCall(Request.Builder().url("$base/api/proxy").post(pb).build()).await().use { p ->
                             if (!p.isSuccessful) throw DlException("Servidor: " + (p.body?.string()?.let { s -> try { JSONObject(s).optString("error") } catch (_: Exception) { s } } ?: "HTTP ${p.code}").take(200))
                             val out = File(dir, safe(title) + "_" + System.nanoTime() + ".mp4"); save(p, out, progress); out
@@ -249,9 +251,17 @@ object Downloader {
         throw last!!
     }
 
+    /** Envia a sessão do navegador ao servidor (campos "cookies"/"user_agent"/"referer").
+     *  Obs.: o backend baixar-video atual ainda ignora esses campos; ficam prontos para quando ele aceitar. */
+    fun session(j: JSONObject, pageUrl: String): JSONObject {
+        val c = try { Net.cookies?.cookieFor(pageUrl) } catch (_: Exception) { null }
+        if (!c.isNullOrBlank()) j.put("cookies", c)
+        return j.put("user_agent", Net.userAgent).put("referer", Net.originOf(pageUrl) ?: pageUrl)
+    }
+
     /** Pergunta ao servidor se ele (yt-dlp) acha vídeo na página. Retorna o título ou null. */
     suspend fun probe(server: String, pageUrl: String): String? {
-        val body = JSONObject().put("url", pageUrl).toString().toRequestBody("application/json".toMediaType())
+        val body = session(JSONObject().put("url", pageUrl), pageUrl).toString().toRequestBody("application/json".toMediaType())
         Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/info").post(body).build()).await().use { r ->
             val j = try { JSONObject(r.body?.string() ?: "") } catch (_: Exception) { return null }
             if (!j.optBoolean("ok")) return null

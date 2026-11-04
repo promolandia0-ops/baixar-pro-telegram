@@ -10,11 +10,11 @@ import org.jsoup.nodes.Document
 import java.net.URI
 import kotlin.coroutines.coroutineContext
 
-enum class Kind { DIRECT, HLS, SERVER }
+enum class Kind { DIRECT, HLS, SERVER, MEGA }
 
 /** ref = Referer a usar no download (ex.: página do player embutido); se null usa page. */
 data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null) {
-    val label get() = when (kind) { Kind.DIRECT -> "Arquivo direto"; Kind.HLS -> "Stream HLS (m3u8)"; Kind.SERVER -> "Via servidor (yt-dlp)" }
+    val label get() = when (kind) { Kind.DIRECT -> "Arquivo direto"; Kind.HLS -> "Stream HLS (m3u8)"; Kind.SERVER -> "Via servidor (yt-dlp)"; Kind.MEGA -> "MEGA (descriptografado no celular)" }
 }
 
 data class CrawlOpts(val maxDepth: Int = 10, val maxPages: Int = 500, val probeServer: Boolean = false, val parallel: Int = 6)

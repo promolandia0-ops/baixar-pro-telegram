@@ -10,3 +10,9 @@ Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 - Varrer tudo: varre o site (mesmo domínio, limite de páginas/profundidade) e baixa tudo automaticamente.
 - Filtrar: só os vídeos de uma página, listados com tamanho e já marcados.
 - Fila com progresso/status, Histórico com Reenviar, tamanho antes de baixar, Testar conexão, qualidade e envio automático.
+
+## 1.6.0
+- **Navegador** (ícone de globo): WebView com barra de endereço, voltar/avançar/recarregar e barra de carregamento. Entre na sua conta do site normalmente; os cookies ficam salvos (CookieManager). Botão **“Usar esta página no app”** manda o link para Filtrar ou Varrer tudo.
+- Todas as requisições (Varrer tudo, Filtrar, Início, tamanho dos arquivos, downloads, segmentos HLS) enviam os cookies do domínio, o mesmo User-Agent do WebView e Referer. O servidor yt-dlp recebe `cookies`/`user_agent`/`referer` no JSON (o backend atual ainda ignora esses campos).
+- **Configurações → Contas logadas**: lista os sites com sessão, “Sair” de cada um e “Sair de todas”.
+- **MEGA** (ícone de nuvem): login na sua conta (API oficial, com prova de trabalho X-Hashcash e 2FA), navegar nas pastas, ver vídeos com tamanho, marcar um ou todos, baixar e descriptografar no celular em qualidade original e enviar ao Telegram. Também aceita links públicos de arquivo/pasta (com chave), inclusive colados no Início/Filtrar. A senha nunca é guardada; só a sessão, criptografada com o Android Keystore.

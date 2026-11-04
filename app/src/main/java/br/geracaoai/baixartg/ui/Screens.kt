@@ -54,6 +54,8 @@ enum class Tab(val label: String, val icon: ImageVector) {
 fun MainShell(shared: MutableState<String?>) {
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var settings by rememberSaveable { mutableStateOf(false) }
+    var browser by rememberSaveable { mutableStateOf(false) }
+    var mega by rememberSaveable { mutableStateOf(false) }
     val homeText = rememberSaveable { mutableStateOf("") }
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) { perms.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -64,12 +66,16 @@ fun MainShell(shared: MutableState<String?>) {
     val active = items.count { it.st == St.DOWN || it.st == St.UP }
 
     if (settings) { BackHandler { settings = false }; SettingsScreen { settings = false }; return }
+    if (browser) { BrowserScreen({ browser = false }) { u, site -> if (site) { Handoff.site.value = u; tab = Tab.SITE } else { Handoff.page.value = u; tab = Tab.PAGE }; browser = false }; return }
+    if (mega) { MegaScreen({ mega = false }) { mega = false; tab = Tab.QUEUE }; return }
     Scaffold(
         topBar = {
             TopAppBar(title = {
                 Column { Text(tab.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text("Baixar pro Telegram", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-                actions = { IconButton({ settings = true }) { Icon(Icons.Rounded.Settings, "Configurações") } },
+                actions = { IconButton({ mega = true }) { Icon(Icons.Rounded.Cloud, "MEGA") }
+                    IconButton({ browser = true }) { Icon(Icons.Rounded.Public, "Navegador") }
+                    IconButton({ settings = true }) { Icon(Icons.Rounded.Settings, "Configurações") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
         },
         bottomBar = {
@@ -203,6 +209,8 @@ fun HowTo() {
         Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados.")
         Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "percorre o site inteiro e baixa todos os vídeos.")
         Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega só os vídeos de uma página, sem abrir outras.")
+        Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta do site; os downloads usam essa sessão.")
+        Tip(Icons.Rounded.Cloud, "MEGA", "entre na sua conta MEGA ou cole um link público e envie os vídeos.")
         Tip(Icons.Rounded.Lock, "Segundo plano", "pode bloquear a tela; “Parar” interrompe na hora.")
     } }
 }
@@ -217,6 +225,7 @@ fun SiteTab(goQueue: () -> Unit) {
     val phase by Jobs.phase.collectAsState(); val mode by Jobs.mode.collectAsState(); val status by Jobs.status.collectAsState(); val items by Jobs.items.collectAsState()
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     var url by rememberSaveable { mutableStateOf(Prefs.lastUrl) }
+    LaunchedEffect(Handoff.site.value) { Handoff.site.value?.let { url = it; Handoff.site.value = null } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Section("Varrer o site inteiro", "Abre todas as páginas do mesmo site ligadas a este link, encontra todos os vídeos e baixa tudo automaticamente.", Icons.Rounded.TravelExplore) }
         item { LinkField(url, { url = it }, !busy, label = "Link do site") }
@@ -242,6 +251,7 @@ fun PageTab() {
     val phase by Jobs.phase.collectAsState(); val mode by Jobs.mode.collectAsState(); val status by Jobs.status.collectAsState()
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     var url by rememberSaveable { mutableStateOf("") }
+    LaunchedEffect(Handoff.page.value) { Handoff.page.value?.let { url = it; Handoff.page.value = null } }
     val query = rememberSaveable { mutableStateOf("") }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         item { Section("Só os vídeos desta página", "Cole o link de uma página. O app lista apenas os vídeos dela (não abre outras páginas), todos já marcados.", Icons.Rounded.FilterAlt) }
@@ -486,6 +496,7 @@ fun SettingsScreen(onClose: () -> Unit) {
                 Text("Conta restrita? Deixe envios em 1.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(server, { server = it }, label = { Text("Servidor yt-dlp") }, singleLine = true, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth())
             }
+            LoggedAccountsGroup()
             SettingsGroup("Histórico de enviados", Icons.Rounded.History) {
                 val sync by Jobs.syncStatus.collectAsState()
                 var hist by remember { mutableIntStateOf(Sent.size) }

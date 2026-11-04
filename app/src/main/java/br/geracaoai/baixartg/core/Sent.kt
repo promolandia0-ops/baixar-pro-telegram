@@ -49,7 +49,7 @@ object Sent {
         k += "v:" + norm(f.url)
         k += bunkrKeys(f.url)
         if (Bunkr.applies(f)) k += bunkrKeys(f.page)
-        if (norm(f.url) == norm(f.page)) k += "p:" + norm(f.page)
+        if (norm(f.url) == norm(f.page) || f.kind == Kind.MEGA) k += "p:" + norm(f.page)
         return k
     }
 
