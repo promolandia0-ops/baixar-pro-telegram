@@ -28,7 +28,7 @@ object Downloader {
         if (ref != null) header("Referer", ref)
     }.build()
 
-    suspend fun download(f: Found, dir: File, server: String, progress: (Long, Long) -> Unit): File {
+    suspend fun download(f: Found, dir: File, server: String, maxHeight: Int = 0, progress: (Long, Long) -> Unit): File {
         val ref = f.ref ?: f.page
         return if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
             Kind.DIRECT -> try { retry { direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
@@ -36,7 +36,7 @@ object Downloader {
                 // Fallback: o servidor abre a página com a mesma sessão (tokens presos a cookie/IP)
                 if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
             }
-            Kind.HLS -> hls(f.url, ref, dir, f.title, progress)
+            Kind.HLS -> hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight)
             Kind.SERVER -> viaServer(f.url, dir, server, progress)
         }
     }
@@ -141,21 +141,28 @@ object Downloader {
         if (!r.isSuccessful) throw DlException("HTTP ${r.code} no segmento"); r.body!!.bytes()
     }
 
-    class Variant(val url: String, val bw: Long, val pixels: Long, val audio: String?)
+    class Variant(val url: String, val bw: Long, val pixels: Long, val audio: String?, val height: Int = 0)
 
-    /** Escolhe SEMPRE a maior qualidade (resolução, depois bitrate). */
-    fun pickVariant(plUrl: String, pl: String): Variant? {
-        val lines = pl.lines(); var best: Variant? = null
+    /** Escolhe a maior qualidade (resolução, depois bitrate). maxHeight > 0 limita a altura (ajuste "Qualidade"). */
+    fun pickVariant(plUrl: String, pl: String, maxHeight: Int = 0): Variant? {
+        val all = allVariants(plUrl, pl)
+        if (maxHeight > 0) { val ok = all.filter { it.height in 1..maxHeight }; if (ok.isNotEmpty()) return best(ok) }
+        return best(all)
+    }
+    private fun best(l: List<Variant>) = l.maxWithOrNull(compareBy<Variant>({ it.pixels }, { it.bw }))
+    private fun allVariants(plUrl: String, pl: String): List<Variant> {
+        val lines = pl.lines(); val out = ArrayList<Variant>()
         for (i in lines.indices) if (lines[i].startsWith("#EXT-X-STREAM-INF")) {
             val l = lines[i]
             val bw = Regex("""[^-]BANDWIDTH=(\d+)""").find(",$l")?.groupValues?.get(1)?.toLong() ?: 0
-            val px = Regex("""RESOLUTION=(\d+)x(\d+)""").find(l)?.let { it.groupValues[1].toLong() * it.groupValues[2].toLong() } ?: 0
+            val res = Regex("""RESOLUTION=(\d+)x(\d+)""").find(l)
+            val px = res?.let { it.groupValues[1].toLong() * it.groupValues[2].toLong() } ?: 0
+            val ht = res?.groupValues?.get(2)?.toInt() ?: 0
             val au = Regex("""AUDIO="([^"]+)"""").find(l)?.groupValues?.get(1)
             val u = lines.drop(i + 1).firstOrNull { it.isNotBlank() && !it.startsWith("#") }?.trim() ?: continue
-            val v = Variant(Extract.abs(plUrl, u) ?: continue, bw, px, au)
-            if (best == null || v.pixels > best.pixels || (v.pixels == best.pixels && v.bw > best.bw)) best = v
+            out += Variant(Extract.abs(plUrl, u) ?: continue, bw, px, au, ht)
         }
-        return best
+        return out
     }
 
     /** Faixa de áudio separada (EXT-X-MEDIA TYPE=AUDIO com URI) do grupo da variante. */
@@ -167,11 +174,11 @@ object Downloader {
     }
 
     /** HLS: maior qualidade, segmentos em paralelo (ordem preservada), AES-128 e EXT-X-MAP. Sem recodificar. */
-    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8): File {
+    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8, maxHeight: Int = 0): File {
         var plUrl = url; var pl = text(plUrl, referer)
         var audioUrl: String? = null
         if (pl.contains("#EXT-X-STREAM-INF")) {
-            val v = pickVariant(plUrl, pl) ?: throw DlException("Playlist sem variantes")
+            val v = pickVariant(plUrl, pl, maxHeight) ?: throw DlException("Playlist sem variantes")
             audioUrl = audioRendition(plUrl, pl, v.audio)
             plUrl = v.url; pl = text(plUrl, referer)
         }
@@ -252,5 +259,19 @@ object Downloader {
             if (ex.equals("generic", true)) return null // genérico já foi coberto pelo rastreador
             return j.optString("title", pageUrl)
         }
+    }
+
+    /** Tamanho do arquivo antes de baixar (HEAD, ou GET Range 0-0). -1 = desconhecido (HLS/servidor/sem cabeçalho). */
+    suspend fun sizeOf(f: Found): Long {
+        if (f.kind != Kind.DIRECT || Bunkr.applies(f)) return -1
+        val ref = f.ref ?: f.page
+        return try {
+            val r0 = req(f.url, ref)
+            val h = Net.http.newCall(r0.newBuilder().head().build()).await().use { r ->
+                val ct = r.header("Content-Type") ?: ""
+                if (r.isSuccessful && !ct.contains("text/html", true)) r.header("Content-Length")?.toLongOrNull() ?: -1 else -1 }
+            if (h > 0) h else Net.http.newCall(r0.newBuilder().header("Range", "bytes=0-0").build()).await().use { r ->
+                r.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1 }
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; -1 }
     }
 }

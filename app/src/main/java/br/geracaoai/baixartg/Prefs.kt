@@ -17,5 +17,9 @@ object Prefs {
     var parDown: Int get() = p.getInt("pdown", 3); set(v) = p.edit().putInt("pdown", v).apply()
     var parUp: Int get() = p.getInt("pup", 2); set(v) = p.edit().putInt("pup", v).apply()
     var synced: Boolean get() = p.getBoolean("synced", false); set(v) = p.edit().putBoolean("synced", v).apply()
+    var botToken: String get() = p.getString("bot", "")!!; set(v) = p.edit().putString("bot", v).apply()
+    /** 0 = original (máxima). Senão altura máxima (só afeta streams HLS com várias qualidades). */
+    var quality: Int get() = p.getInt("quality", 0); set(v) = p.edit().putInt("quality", v).apply()
+    var autoSend: Boolean get() = p.getBoolean("auto", true); set(v) = p.edit().putBoolean("auto", v).apply()
     var lastUrl: String get() = p.getString("url", "")!!; set(v) = p.edit().putString("url", v).apply()
 }
