@@ -159,7 +159,7 @@ fun MegaScreen(onClose: () -> Unit, goQueue: () -> Unit) {
                         scope.launch { try { val l = withContext(Dispatchers.IO) { Mega.resolvePublic(link) }
                             if (l.isEmpty()) msg = "Nenhum vídeo nesse link." else if (Jobs.addExternal(l, start = false)) goQueue() else msg = "Há uma tarefa em andamento." }
                             catch (e: Exception) { msg = e.message ?: "Erro" }; loading = false } },
-                        Modifier.fillMaxWidth(), enabled = !loading && Mega.isMegaLink(link), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Search, null); Spacer(Modifier.width(8.dp)); Text("Listar vídeos do link") }
+                        Modifier.fillMaxWidth(), enabled = !loading && (Mega.isMegaLink(link) || Mega.looksLikeMega(link)), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Search, null); Spacer(Modifier.width(8.dp)); Text("Listar vídeos do link") }
                 } }
             }
             if (msg.isNotBlank()) item { InfoCard(msg, Icons.Rounded.ErrorOutline, 1) }

@@ -49,14 +49,15 @@ object Jobs {
     @Volatile private var autoAfter = false
 
     fun parseLinks(text: String): List<String> = text.split(Regex("""[\s,;]+""")).map { it.trim() }.filter { it.isNotEmpty() }
-        .map { if (it.startsWith("http", true)) it else "https://$it" }.filter { Extract.abs(it, it) != null }.distinct()
+        .map { if (it.startsWith("http", true) || it.startsWith("mega:", true)) it else "https://$it" }
+        .filter { Mega.looksLikeMega(it) || Mega.isMegaLink(it) || Extract.abs(it, it) != null }.distinct()
 
     fun startCrawl(url: String) = startScan(listOf(url), Mode.SITE, false)
 
     /** Só roda quando o usuário toca no botão (nunca ao digitar). */
     fun startScan(urls0: List<String>, m: Mode, auto: Boolean) {
         if (job?.isActive == true) return
-        val urls = urls0.map { u -> u.trim().let { if (it.startsWith("http", true)) it else "https://$it" } }.filter { it.length > 8 }.distinct()
+        val urls = urls0.map { u -> u.trim().let { if (it.startsWith("http", true) || it.startsWith("mega:", true)) it else "https://$it" } }.filter { it.length > 8 }.distinct()
         if (urls.isEmpty()) return
         Prefs.lastUrl = urls.first()
         mode.value = m; autoAfter = auto
@@ -70,11 +71,17 @@ object Jobs {
             val seen = HashSet<String>()
             fun flush() { if (buf.isNotEmpty()) { val add = buf.toList(); buf.clear(); items.update { it + add } } }
             var stopped = false
+            val errors = ArrayList<String>()
             try {
                 for (u in urls) {
-                    if (Mega.isMegaLink(u)) { // MEGA: arquivos criptografados, lista via API oficial
+                    if (Mega.looksLikeMega(u) || Mega.isMegaLink(u)) { // MEGA: não varrer a página (a chave # se perderia)
                         crawl.value = crawl.value.copy(current = u)
-                        Mega.resolvePublic(u).forEach { (f, sz) -> if (seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
+                        try {
+                            val found = Mega.resolvePublic(u)
+                            if (found.isEmpty()) errors += "Nenhum vídeo encontrado neste link do MEGA."
+                            found.forEach { (f, sz) -> if (seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { errors += e.message ?: "Erro no MEGA" }
                         pagesBefore++; flush(); continue
                     }
                     val c = Crawler(opts) { p -> Downloader.probe(server, p) }
@@ -89,10 +96,12 @@ object Jobs {
                     fetchSizes()
                 }
             } catch (e: CancellationException) { stopped = true; flush(); status.value = "Busca parada. ${items.value.size} vídeos encontrados até agora."
-            } catch (e: Exception) { flush(); status.value = "Erro na busca: ${e.message}" }
+            } catch (e: Exception) { flush(); errors += e.message ?: "Erro na busca" }
             val total = items.value.size
             if (!stopped) status.value = when {
+                total == 0 && errors.isNotEmpty() -> errors.joinToString("\n")
                 total == 0 -> if (m == Mode.SITE) "Nenhum vídeo encontrado. Tente ativar “Usar servidor (yt-dlp) em todas as páginas” em Ajustes." else "Nenhum vídeo encontrado nesta página."
+                errors.isNotEmpty() -> (if (m == Mode.SITE) "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos." else "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")) + " " + errors.joinToString(" ")
                 m == Mode.SITE -> "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos."
                 else -> "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")
             }

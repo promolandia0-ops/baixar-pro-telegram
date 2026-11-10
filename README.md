@@ -11,6 +11,11 @@ Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 - Filtrar: só os vídeos de uma página, listados com tamanho e já marcados.
 - Fila com progresso/status, Histórico com Reenviar, tamanho antes de baixar, Testar conexão, qualidade e envio automático.
 
+## 1.6.1
+- Correção do download de links públicos do MEGA (Início, Varrer tudo e Filtrar): a busca não esconde mais o erro real atrás de “Nenhum vídeo encontrado”.
+- Mensagens claras em português para falhas do MEGA, inclusive cota de transferência esgotada (HTTP 509 / EOVERQUOTA / erro -17).
+- Parser de links mais tolerante: `mega.io`/`mega.app`, `/embed/`, `#` escrito como `%23`, chave em base64 clássico (`+`, `/`, `=`) e arquivo dentro de pasta.
+
 ## 1.6.0
 - **Navegador** (ícone de globo): WebView com barra de endereço, voltar/avançar/recarregar e barra de carregamento. Entre na sua conta do site normalmente; os cookies ficam salvos (CookieManager). Botão **“Usar esta página no app”** manda o link para Filtrar ou Varrer tudo.
 - Todas as requisições (Varrer tudo, Filtrar, Início, tamanho dos arquivos, downloads, segmentos HLS) enviam os cookies do domínio, o mesmo User-Agent do WebView e Referer. O servidor yt-dlp recebe `cookies`/`user_agent`/`referer` no JSON (o backend atual ainda ignora esses campos).

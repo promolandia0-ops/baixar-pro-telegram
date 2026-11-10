@@ -66,4 +66,69 @@ class V16Test {
         val c = javax.crypto.Cipher.getInstance("AES/CBC/NoPadding").apply { init(javax.crypto.Cipher.ENCRYPT_MODE, javax.crypto.spec.SecretKeySpec(Mega.fileKey(k), "AES"), javax.crypto.spec.IvParameterSpec(ByteArray(16))) }
         assertEquals("vídeo.mp4", Mega.decAttr(Mega.b64e(c.doFinal(plain)), k))
     }
+
+    @Test fun parseMegaLinkFormats() {
+        val key32 = Mega.b64e(ByteArray(32) { it.toByte() })
+        val key16 = Mega.b64e(ByteArray(16))
+        // domínio mega.io / embed / query / %23
+        for (u in listOf(
+            "https://mega.io/file/AbCdEfGh#$key32",
+            "https://mega.app/file/AbCdEfGh#$key32",
+            "https://mega.nz/embed/AbCdEfGh#$key32",
+            "https://mega.nz/file/AbCdEfGh?_tid=1#$key32",
+            "https://mega.nz/file/AbCdEfGh%23$key32",
+            "mega:https://mega.nz/file/AbCdEfGh#$key32",
+            "<https://mega.nz/file/AbCdEfGh#$key32>"
+        )) {
+            val l = Mega.parseLink(u)
+            assertNotNull(u, l)
+            assertFalse(u, l!!.folder)
+            assertEquals(u, "AbCdEfGh", l.id)
+            assertEquals(u, 32, l.key.size)
+        }
+        // chave em base64 clássico (+ / =) não pode ser truncada
+        val classic = "qk9THHhx+akddRmt/tLR8OhInexzVCpPPG6M6feFfZg="
+        val c = Mega.parseLink("https://mega.nz/file/YfNngDKR#$classic")!!
+        assertArrayEquals(Mega.b64d(classic), c.key)
+        // sub-arquivo na pasta
+        val sub = Mega.parseLink("https://mega.nz/folder/XyZ12345#$key16/file/AbCdEfGh")!!
+        assertTrue(sub.folder); assertEquals("AbCdEfGh", sub.sub)
+        assertTrue(Mega.looksLikeMega("https://mega.nz/file/AbCdEfGh"))
+        assertTrue(Mega.missingKeyMsg("https://mega.nz/file/AbCdEfGh").contains("incompleto"))
+        assertNull(Mega.parseLink("https://mega.nz/file/AbCdEfGh"))
+        // Início: parseLinks deve manter o fragmento (#chave)
+        val full = "https://mega.nz/file/AbCdEfGh#$key32"
+        val parsed = Jobs.parseLinks(full)
+        assertEquals(listOf(full), parsed)
+        assertTrue(Mega.isMegaLink(parsed.single()))
+        // Extract.abs tira o #, mas o Início não pode usar esse resultado
+        assertFalse(Extract.abs(full, full)!!.contains("#"))
+    }
+
+    @Test fun parseCsQuotaAndErrors() {
+        fun fail(http: Int, body: String): MegaException {
+            try { Mega.parseCsBody(http, body); throw AssertionError("deveria falhar: $http $body") }
+            catch (e: MegaException) { return e }
+        }
+        val q1 = fail(509, "")
+        assertEquals(-17, q1.code); assertTrue(q1.message!!.contains("limite de transferência"))
+        val q2 = fail(200, "EOVERQUOTA")
+        assertEquals(-17, q2.code)
+        val q3 = fail(200, "-17")
+        assertEquals(-17, q3.code)
+        val q4 = fail(200, "[-17]")
+        assertEquals(-17, q4.code)
+        val q5 = fail(200, """[{"e":-17,"s":10}]""")
+        assertEquals(-17, q5.code)
+        assertEquals(-9, fail(200, "-9").code)
+        assertNull(Mega.parseCsBody(503, ""))
+        assertNull(Mega.parseCsBody(200, "-3"))
+        val ok = Mega.parseCsBody(200, """[{"s":11,"g":"https://g.example/dl"}]""") as org.json.JSONObject
+        assertEquals("https://g.example/dl", Mega.downloadUrlOf(ok))
+        // g ausente ou null
+        assertEquals("", Mega.downloadUrlOf(org.json.JSONObject("""{"s":11}""")))
+        assertEquals("", Mega.downloadUrlOf(org.json.JSONObject().put("g", org.json.JSONObject.NULL)))
+        assertTrue(Mega.errMsg(-17).contains("MEGA PRO"))
+        assertTrue(Mega.errMsg(509).contains("limite de transferência"))
+    }
 }

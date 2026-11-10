@@ -60,23 +60,109 @@ object Mega {
 
     // ---------- links públicos ----------
     data class Link(val folder: Boolean, val id: String, val key: ByteArray, val sub: String? = null)
+    private val MEGA_HOST = Regex("""(?:^|[\./])mega(?:\.co)?\.nz|(?:^|[\./])mega\.io|(?:^|[\./])mega\.app""", RegexOption.IGNORE_CASE)
+
+    /** É um link do MEGA (arquivo/pasta/embed), mesmo que a chave # esteja faltando. */
+    fun looksLikeMega(u: String): Boolean {
+        val s = u.trim().replace("%23", "#", ignoreCase = true)
+        if (!MEGA_HOST.containsMatchIn(s)) return false
+        return Regex("""/(file|folder|embed)/""", RegexOption.IGNORE_CASE).containsMatchIn(s)
+            || s.contains("#!") || s.contains("#F!", ignoreCase = true) || '#' in s
+    }
+
+    /** Normaliza o texto colado: mega: prefixo, %23 → #, pontuação no fim. */
+    private fun normalizeShare(u: String): String {
+        var s = u.trim().replace("&amp;", "&").replace("%23", "#", ignoreCase = true)
+        if (s.startsWith("mega:", ignoreCase = true) && !s.startsWith("mega://", ignoreCase = true)) s = s.substring(5)
+        return s.trim().trimStart('<', '"', '\'').trimEnd('>', '"', '\'', '.', ',', ')', ']')
+    }
+
     fun parseLink(u: String): Link? {
-        val s = u.trim()
-        Regex("""mega(?:\.co)?\.nz/(file|folder)/([\w-]+)#([\w-]+)(?:/(?:file|folder)/([\w-]+))?""").find(s)?.let { m ->
-            return try { Link(m.groupValues[1] == "folder", m.groupValues[2], b64d(m.groupValues[3]), m.groupValues[4].ifBlank { null }) } catch (_: Exception) { null } }
-        Regex("""mega(?:\.co)?\.nz/#(F?)!([\w-]+)!([\w-]+)""").find(s)?.let { m ->
-            return try { Link(m.groupValues[1] == "F", m.groupValues[2], b64d(m.groupValues[3])) } catch (_: Exception) { null } }
+        val s = normalizeShare(u)
+        if (!MEGA_HOST.containsMatchIn(s)) return null
+        Regex("""/(file|folder|embed)/([A-Za-z0-9_-]+)(?:\?[^#]*)?#([^\s#]+)""", RegexOption.IGNORE_CASE).find(s)?.let { m ->
+            val folder = m.groupValues[1].equals("folder", ignoreCase = true)
+            val id = m.groupValues[2]
+            var rest = m.groupValues[3].trim().trimEnd('.', ',', ')', ']')
+            var sub: String? = null
+            Regex("""^(.*?)/(file|folder)/([A-Za-z0-9_-]+)$""", RegexOption.IGNORE_CASE).find(rest)?.let {
+                rest = it.groupValues[1]; sub = it.groupValues[3]
+            }
+            if (rest.isEmpty()) return null
+            return try { Link(folder, id, b64d(rest), sub) } catch (_: Exception) { null }
+        }
+        Regex("""/#(F?)!([A-Za-z0-9_-]+)!([A-Za-z0-9_+\-/=]+)""", RegexOption.IGNORE_CASE).find(s)?.let { m ->
+            return try { Link(m.groupValues[1].equals("F", ignoreCase = true), m.groupValues[2], b64d(m.groupValues[3])) } catch (_: Exception) { null }
+        }
         return null
     }
     fun isMegaLink(u: String) = parseLink(u) != null
 
+    fun missingKeyMsg(url: String): String {
+        val s = normalizeShare(url)
+        return if (looksLikeMega(s) && '#' !in s)
+            "Link do MEGA incompleto: falta a chave depois do #. Copie o link inteiro da barra de endereço (incluindo a parte depois do #)."
+        else "Link do MEGA inválido (precisa da chave depois do #)."
+    }
+
     // ---------- API ----------
-    private fun errMsg(c: Int) = when (c) {
-        -2 -> "MEGA: pedido inválido"; -3 -> "MEGA: servidor ocupado, tente de novo"; -9 -> "MEGA: arquivo/pasta não encontrado (link ou chave errada?)"
-        -11 -> "MEGA: acesso negado"; -13 -> "MEGA: incompleto"; -14 -> "MEGA: chave de descriptografia errada"; -15 -> "MEGA: sessão expirada, entre de novo"
-        -16 -> "MEGA: conta ou arquivo bloqueado"; -17 -> "MEGA: limite de transferência atingido"; -18 -> "MEGA: temporariamente indisponível"
-        -26 -> "MEGA: digite o código de verificação em duas etapas"; -9999 -> "MEGA: e-mail ou senha incorretos"
+    fun errMsg(c: Int) = when (c) {
+        -1 -> "MEGA: erro interno do servidor"
+        -2 -> "MEGA: pedido inválido"
+        -3 -> "MEGA: servidor ocupado, tente de novo"
+        -4 -> "MEGA: muitas tentativas, espere um pouco e tente de novo"
+        -9 -> "MEGA: arquivo/pasta não encontrado (link ou chave errada?)"
+        -11 -> "MEGA: acesso negado"
+        -13 -> "MEGA: incompleto"
+        -14 -> "MEGA: chave de descriptografia errada"
+        -15 -> "MEGA: sessão expirada, entre de novo"
+        -16 -> "MEGA: conta ou arquivo bloqueado"
+        -17, 509 -> "MEGA: limite de transferência atingido (cota gratuita desta conexão). Espere algumas horas ou entre com uma conta MEGA PRO."
+        -18 -> "MEGA: temporariamente indisponível"
+        -19 -> "MEGA: muitas conexões ao mesmo tempo"
+        -26 -> "MEGA: digite o código de verificação em duas etapas"
+        -9999 -> "MEGA: e-mail ou senha incorretos"
         else -> "MEGA: erro $c" }
+
+    fun isOverQuotaText(t: String): Boolean {
+        val s = t.trim()
+        return s.equals("EOVERQUOTA", true) || s.equals("OVERQUOTA", true) || s.contains("EOVERQUOTA", true)
+    }
+
+    /**
+     * Interpreta o corpo de /cs. null = vale a pena tentar de novo (ocupado / vazio / 5xx).
+     * Erros permanentes (incluindo cota -17 / HTTP 509 / EOVERQUOTA) lançam MegaException.
+     */
+    fun parseCsBody(http: Int, body: String): Any? {
+        val t = body.trim()
+        if (http == 509 || isOverQuotaText(t)) throw MegaException(-17, errMsg(-17))
+        if (http == 500 || http == 503 || t.isEmpty()) return null
+        val asNum = when {
+            t.startsWith("-") -> t.toIntOrNull()
+            t.startsWith("[-") -> try { JSONArray(t).optInt(0) } catch (_: Exception) { null }
+            else -> null
+        }
+        if (asNum != null) {
+            if (asNum == -3) return null
+            if (asNum < 0) throw MegaException(asNum, errMsg(asNum))
+        }
+        if (t.startsWith("[")) {
+            val res = JSONArray(t).get(0)
+            val n = (res as? Number)?.toInt()
+            if (n != null && n < 0) {
+                if (n == -3) return null
+                throw MegaException(n, errMsg(n))
+            }
+            if (res is JSONObject) {
+                val rawE = res.opt("e")
+                val e = if (rawE is Number) rawE.toInt() else 0
+                if (e < 0) throw MegaException(e, errMsg(e))
+            }
+            return res
+        }
+        if (http !in 200..299) throw MegaException(-3, "MEGA: HTTP $http")
+        throw MegaException(-2, "MEGA: resposta inválida do servidor")
+    }
 
     /** Faz uma chamada à API e devolve o primeiro resultado (JSONObject, JSONArray ou número). */
     suspend fun api(cmd: JSONObject, sid: String? = null, folder: String? = null): Any {
@@ -86,23 +172,18 @@ object Mega {
             if (sid != null) url += "&sid=$sid"
             if (folder != null) url += "&n=$folder"
             val body = JSONArray().put(cmd).toString().toRequestBody("application/json".toMediaType())
-            var hc: String? = null; var txt: String? = null
+            var hc: String? = null; var txt: String? = null; var httpCode = 0
             for (pass in 0..1) {
                 val rb = Request.Builder().url(url).post(body); if (hc != null) rb.header("X-Hashcash", hc)
                 val (code, chal, t) = Net.http.newCall(rb.build()).await().use { r -> Triple(r.code, r.header("X-Hashcash"), r.body?.string() ?: "") }
                 if (code == 402 && chal != null && pass == 0) { hc = hashcash(chal); continue } // prova de trabalho exigida pelo MEGA no login
-                txt = if (code == 500 || code == 503 || t.isBlank()) null else t; break
+                httpCode = code; txt = t; break
             }
-            if (txt != null) {
-                val t = txt.trim()
-                val code = if (t.startsWith("-")) t.toIntOrNull() else if (t.startsWith("[-")) JSONArray(t).optInt(0) else null
-                if (code != null && code != -3) throw MegaException(code, errMsg(code))
-                if (code == null) {
-                    val res = JSONArray(t).get(0)
-                    if (res is Number && res.toInt() < 0) { if (res.toInt() != -3) throw MegaException(res.toInt(), errMsg(res.toInt())) }
-                    else if (res is JSONObject && res.has("e") && res.opt("e") is Number && res.getInt("e") < 0) throw MegaException(res.getInt("e"), errMsg(res.getInt("e")))
-                    else return res
-                }
+            try {
+                val parsed = parseCsBody(httpCode, txt ?: "")
+                if (parsed != null) return parsed
+            } catch (e: MegaException) {
+                if (e.code != -3) throw e
             }
             delay(wait); wait *= 2
         }
@@ -241,9 +322,12 @@ object Mega {
 
     /** Resolve um link público para a lista de vídeos (arquivo único ou todos os vídeos da pasta, com subpastas). */
     suspend fun resolvePublic(url: String): List<Pair<Found, Long>> {
-        val l = parseLink(url) ?: throw MegaException(-2, "Link do MEGA inválido (precisa da chave depois do #)")
+        val l = parseLink(url) ?: throw MegaException(-2, missingKeyMsg(url))
         if (!l.folder) { val n = fileInfo(l); return listOf(toFound(n, 'p', page = url) to n.size) }
         val nodes = folderNodes(l)
+        // Link direto para um arquivo dentro da pasta: devolve esse arquivo (mesmo sem extensão de vídeo).
+        l.sub?.let { sub -> nodes.firstOrNull { it.h == sub && !it.isFolder }?.let { n ->
+            return listOf(toFound(n, 'f', l.id, page = url) to n.size) } }
         val start = l.sub ?: nodes.firstOrNull { n -> n.isFolder && nodes.none { it.h == n.parent } }?.h
         val keep = if (start == null) nodes else { val ok = HashSet<String>().apply { add(start) }
             var changed = true; while (changed) { changed = false; for (n in nodes) if (n.isFolder && n.parent in ok && ok.add(n.h)) changed = true }
@@ -262,15 +346,20 @@ object Mega {
             "f" -> api(cmd.put("n", h), folder = ctx)
             else -> { val s = session ?: throw DlException("Entre na sua conta MEGA de novo (aba MEGA)"); api(cmd.put("n", h), s.sid) }
         } as JSONObject
-        val dl = r.optString("g").ifBlank { throw DlException("MEGA não liberou o download (limite de transferência?)") }
+        val rawE = r.opt("e")
+        if (rawE is Number && rawE.toInt() < 0) throw MegaException(rawE.toInt(), errMsg(rawE.toInt()))
+        val dl = downloadUrlOf(r).ifBlank { throw DlException(errMsg(-17)) }
         val total = r.optLong("s", -1)
-        val name = decAttr(r.optString("at"), key) ?: f.title
+        val name = decAttr(jsonStr(r, "at"), key) ?: f.title
         val ext = name.substringAfterLast('.', "mp4").lowercase().take(5)
         val out = File(dir.apply { mkdirs() }, Downloader.safe(name) + "_" + System.nanoTime() + "." + ext)
         val c = Cipher.getInstance("AES/CTR/NoPadding").apply { init(Cipher.DECRYPT_MODE, SecretKeySpec(fileKey(key), "AES"), IvParameterSpec(fileIv(key))) }
         Net.http.newCall(Request.Builder().url(dl).build()).await().use { resp ->
-            if (resp.code == 509) throw DlException("MEGA: limite de transferência atingido. Tente mais tarde ou use uma conta PRO.")
-            if (!resp.isSuccessful) throw DlException("MEGA: HTTP ${resp.code} ao baixar")
+            if (!resp.isSuccessful) {
+                val hint = try { resp.body?.string()?.take(200) } catch (_: Exception) { null }
+                if (resp.code == 509 || isOverQuotaText(hint ?: "")) throw DlException(errMsg(-17))
+                throw DlException("MEGA: HTTP ${resp.code} ao baixar")
+            }
             val ins = resp.body!!.byteStream(); val buf = ByteArray(256 * 1024); var got = 0L; var last = 0L
             try {
                 out.outputStream().buffered(1 shl 20).use { os ->
@@ -284,5 +373,22 @@ object Mega {
             if (total > 0 && got < total) { out.delete(); throw DlException("Download do MEGA incompleto") }
         }
         return out
+    }
+
+    /** g pode vir como string, array de URLs, ou null (cota). optString no Android devolve "null" para JSON null. */
+    fun downloadUrlOf(r: JSONObject): String {
+        val v = r.opt("g") ?: return ""
+        val s = when (v) {
+            is String -> v
+            is JSONArray -> v.optString(0)
+            else -> v.toString()
+        }
+        return s.takeIf { it.isNotBlank() && it != "null" && it.startsWith("http") } ?: ""
+    }
+    fun jsonStr(o: JSONObject, key: String): String {
+        if (!o.has(key) || o.isNull(key)) return ""
+        val v = o.opt(key) ?: return ""
+        val s = v as? String ?: v.toString()
+        return s.takeIf { it.isNotBlank() && it != "null" } ?: ""
     }
 }
