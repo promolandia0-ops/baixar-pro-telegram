@@ -1,6 +1,8 @@
 package br.geracaoai.baixartg.ui
 
 import android.annotation.SuppressLint
+import android.app.Activity
+import android.content.ContextWrapper
 import android.content.Context
 import android.graphics.Bitmap
 import android.os.Message
@@ -48,46 +50,71 @@ object Handoff { val page = mutableStateOf<String?>(null); val site = mutableSta
 // ---------------- Navegador ----------------
 
 
-/** Um único WebView persistente: o perfil (cookies, cache, localStorage) e o histórico ficam no aparelho. */
+/** Um único WebView persistente: o perfil (cookies, cache, localStorage) e o histórico ficam no aparelho.
+ *  O WebView é criado com o Context da Activity (nunca Application) — Application estoura na hora em vários aparelhos. */
 object BrowserHolder {
     @Volatile private var view: WebView? = null
+
+    /** Context com tema de Activity, se houver; nunca o Application sozinho. */
+    fun activityContext(ctx: Context): Context {
+        var c: Context? = ctx
+        while (c is ContextWrapper) {
+            if (c is Activity) return c
+            c = c.baseContext
+        }
+        return ctx
+    }
+
     fun get(ctx: Context): WebView {
-        view?.let { return it }
+        val act = activityContext(ctx)
+        view?.let { existing ->
+            val old = existing.context
+            val dead = (old as? Activity)?.let { it.isDestroyed || it.isFinishing } == true
+            if (!dead) return existing
+            try { (existing.parent as? ViewGroup)?.removeView(existing); existing.destroy() } catch (_: Exception) {}
+            view = null
+        }
         synchronized(this) {
             view?.let { return it }
-            AdBlock.warm(ctx.applicationContext)
-            val w = WebView(ctx.applicationContext).apply { configureBrowser() }
+            try { AdBlock.warm(ctx.applicationContext) } catch (_: Exception) {}
+            val w = WebView(act).apply { configureBrowser() }
             view = w
             return w
         }
     }
     fun detach() {
         view?.let { v ->
-            (v.parent as? ViewGroup)?.removeView(v)
-            WebCookies.persist()
+            try { (v.parent as? ViewGroup)?.removeView(v) } catch (_: Exception) {}
+            try { WebCookies.persist() } catch (_: Exception) {}
         }
+    }
+    fun destroyForTest() {
+        view?.let { v -> try { (v.parent as? ViewGroup)?.removeView(v); v.destroy() } catch (_: Exception) {} }
+        view = null
     }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
 fun WebView.configureBrowser() {
-    settings.javaScriptEnabled = true
-    settings.domStorageEnabled = true
-    settings.databaseEnabled = true
-    settings.cacheMode = WebSettings.LOAD_DEFAULT
-    settings.loadsImagesAutomatically = true
-    settings.loadWithOverviewMode = true
-    settings.useWideViewPort = true
-    settings.setSupportZoom(true)
-    settings.builtInZoomControls = true
-    settings.displayZoomControls = false
-    settings.setSupportMultipleWindows(true)
-    settings.javaScriptCanOpenWindowsAutomatically = false
-    settings.mediaPlaybackRequiresUserGesture = true
-    settings.userAgentString = Net.userAgent
-    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
-    CookieManager.getInstance().setAcceptCookie(true)
-    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+    try {
+        settings.javaScriptEnabled = true
+        settings.domStorageEnabled = true
+        try { settings.databaseEnabled = true } catch (_: Exception) {}
+        settings.cacheMode = WebSettings.LOAD_DEFAULT
+        settings.loadsImagesAutomatically = true
+        settings.loadWithOverviewMode = true
+        settings.useWideViewPort = true
+        settings.setSupportZoom(true)
+        settings.builtInZoomControls = true
+        settings.displayZoomControls = false
+        settings.setSupportMultipleWindows(true)
+        settings.javaScriptCanOpenWindowsAutomatically = false
+        settings.mediaPlaybackRequiresUserGesture = true
+        settings.userAgentString = Net.userAgent
+        settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        CookieManager.getInstance().setAcceptCookie(true)
+        CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+    } catch (_: Exception) {}
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -131,22 +158,25 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
             w.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             w.webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
-                    val u = request.url?.toString() ?: return super.shouldInterceptRequest(v, request)
-                    if (AdBlock.shouldBlock(u, request.isForMainFrame, v.url)) return AdBlock.emptyResponse
-                    return super.shouldInterceptRequest(v, request)
+                    return try {
+                        val u = request.url?.toString() ?: return super.shouldInterceptRequest(v, request)
+                        if (AdBlock.shouldBlock(u, request.isForMainFrame, v.url)) AdBlock.emptyResponse
+                        else super.shouldInterceptRequest(v, request)
+                    } catch (_: Exception) { super.shouldInterceptRequest(v, request) }
                 }
                 override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean {
-                    val u = request.url?.toString() ?: return false
-                    if (AdBlock.shouldBlock(u, true, v.url)) return true
-                    // redirecionamento automático (sem toque) para outro domínio de anúncio/rastreador
-                    if (!request.hasGesture() && !AdBlock.sameSite(v.url, u) && AdBlock.shouldBlock(u, false, v.url)) return true
-                    return false
+                    return try {
+                        val u = request.url?.toString() ?: return false
+                        if (AdBlock.shouldBlock(u, true, v.url)) true
+                        else if (!request.hasGesture() && !AdBlock.sameSite(v.url, u) && AdBlock.shouldBlock(u, false, v.url)) true
+                        else false
+                    } catch (_: Exception) { false }
                 }
                 override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
                 override fun onPageFinished(v: WebView, url: String) {
                     current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward()
-                    v.evaluateJavascript(AdBlock.injectScript(), null)
-                    WebCookies.remember(url)
+                    try { v.evaluateJavascript(AdBlock.injectScript(), null) } catch (_: Exception) {}
+                    try { WebCookies.remember(url) } catch (_: Exception) {}
                 }
                 override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
             }

@@ -53,7 +53,11 @@ object AdBlock {
     )
 
     val emptyResponse: WebResourceResponse
-        get() = WebResourceResponse("text/plain", "utf-8", 403, "Blocked", emptyMap(), ByteArrayInputStream(ByteArray(0)))
+        get() = try {
+            WebResourceResponse("text/plain", "utf-8", 403, "Blocked", hashMapOf<String, String>(), ByteArrayInputStream(ByteArray(0)))
+        } catch (_: Exception) {
+            WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+        }
 
     fun warm(ctx: Context) {
         if (ready || !loading.compareAndSet(false, true)) {
@@ -79,6 +83,7 @@ object AdBlock {
     }
 
     fun shouldBlock(url: String, mainFrame: Boolean = false, pageUrl: String? = null): Boolean {
+        return try {
         val u = try { java.net.URI(url) } catch (_: Exception) { return false }
         val scheme = (u.scheme ?: "").lowercase()
         if (scheme !in setOf("http", "https")) return false
@@ -94,6 +99,7 @@ object AdBlock {
             return true
         }
         return false
+        } catch (_: Exception) { false }
     }
 
     fun isProtectedHost(host: String): Boolean {

@@ -4,7 +4,7 @@ val ks = Properties().apply { val f = rootProject.file("keystore/keystore.proper
 android {
   namespace = "br.geracaoai.baixartg"
   compileSdk = 35
-  defaultConfig { applicationId = "br.geracaoai.baixartg"; minSdk = 30; targetSdk = 35; versionCode = 11; versionName = "1.6.4"
+  defaultConfig { applicationId = "br.geracaoai.baixartg"; minSdk = 30; targetSdk = 35; versionCode = 12; versionName = "1.6.5"
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") } }
   signingConfigs { create("release") { if (ks.isNotEmpty()) { storeFile = rootProject.file(ks["storeFile"] as String); storePassword = ks["storePassword"] as String; keyAlias = ks["keyAlias"] as String; keyPassword = ks["keyPassword"] as String } } }
   buildTypes { release { isMinifyEnabled = true; isShrinkResources = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"); signingConfig = signingConfigs.getByName("release") } }
@@ -13,6 +13,7 @@ android {
   buildFeatures { compose = true; buildConfig = true }
   packaging { jniLibs { useLegacyPackaging = false } }
   lint { checkReleaseBuilds = false; abortOnError = false }
+  testOptions { unitTests.isIncludeAndroidResources = true }
 }
 dependencies {
   val bom = platform("androidx.compose:compose-bom:2024.09.00")
@@ -29,4 +30,5 @@ dependencies {
   implementation("org.jsoup:jsoup:1.18.1")
   testImplementation("junit:junit:4.13.2")
   testImplementation("org.json:json:20240303")
+  testImplementation("org.robolectric:robolectric:4.14.1")
 }

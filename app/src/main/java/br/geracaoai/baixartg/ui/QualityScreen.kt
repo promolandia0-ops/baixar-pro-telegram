@@ -84,7 +84,7 @@ fun QualityTab(goQueue: () -> Unit) {
             }
         }
         item { BigButton("Buscar", Icons.Rounded.Search, !busy && (q.isNotBlank() || link.isNotBlank())) { QualitySearch.search() } }
-        if (loading) item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) { CircularProgressIndicator() } }
+        if (loading) item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) { CircularProgressIndicator(); Text("Buscando… o servidor pode demorar um pouco para acordar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         if (err.isNotBlank() && raw.isEmpty()) item { Text(err, color = MaterialTheme.colorScheme.error) }
         if (status.isNotBlank() && !loading) item { Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (visible.isNotEmpty()) item {

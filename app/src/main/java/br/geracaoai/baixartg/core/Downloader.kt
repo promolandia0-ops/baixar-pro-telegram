@@ -461,45 +461,63 @@ object Downloader {
     data class QualityPage(val ok: Boolean, val error: String = "", val query: String = "", val page: Int = 1, val hasMore: Boolean = false, val results: List<Found> = emptyList())
 
     /** Busca ampla em melhor qualidade (/api/quality). Envia cookies só nesta requisição. */
+    fun parseQuality(raw: String, code: Int, query: String, page: Int): QualityPage {
+        val j = try { JSONObject(raw) } catch (_: Exception) {
+            val msg = when (code) {
+                404 -> "O servidor ainda não tem a busca em 4K (atualize o baixar-video)."
+                502, 503, 429 -> "O servidor está acordando ou ocupado (HTTP $code). Tente de novo em instantes."
+                0 -> "Servidor: resposta vazia ou inválida."
+                else -> "Servidor: resposta inválida (HTTP $code)."
+            }
+            return QualityPage(false, msg)
+        }
+        if (!j.optBoolean("ok")) {
+            return QualityPage(false, j.optString("error").ifBlank { "Busca em qualidade falhou (HTTP $code)" }.take(300), query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"))
+        }
+        val arr = j.optJSONArray("results")
+        val out = ArrayList<Found>()
+        if (arr != null) for (i in 0 until arr.length()) {
+            val e = arr.optJSONObject(i) ?: continue
+            val u = e.optString("url")
+            if (u.isBlank()) continue
+            val title = e.optString("title", u)
+            val thumb = e.optString("thumbnail").ifBlank { null }
+            val prev = e.optString("preview").ifBlank { null }
+            val dur = e.optDouble("duration", 0.0)
+            out += Found(
+                u, u, title, Kind.SERVER, thumb = thumb,
+                height = e.optInt("height"), duration = if (dur.isNaN()) 0 else dur.toInt(),
+                size = e.optLong("filesize", -1), site = e.optString("site"),
+                preview = prev, bestQuality = true
+            )
+        }
+        return QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), results = out)
+    }
+
     suspend fun qualitySearch(server: String, query: String, url: String = "", page: Int = 1): QualityPage {
         lastProbeError = null
         val pageUrl = url.ifBlank { "https://www.youtube.com/" }
         val body = session(JSONObject().put("query", query).put("url", url).put("page", page), pageUrl, withJar = true).toString().toRequestBody("application/json".toMediaType())
-        return try {
-            Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/quality").post(body).build()).await().use { r ->
-                val raw = r.body?.string() ?: ""
-                val j = try { JSONObject(raw) } catch (_: Exception) {
-                    lastProbeError = if (r.code == 404) "O servidor ainda não tem a busca em 4K (atualize o baixar-video)." else "Servidor: resposta inválida (HTTP ${r.code})"
-                    return QualityPage(false, lastProbeError ?: "")
+        val endpoint = server.trimEnd('/') + "/api/quality"
+        var last = QualityPage(false, "Falha na busca.")
+        repeat(2) { attempt ->
+            try {
+                val pageRes = Net.slow.newCall(Request.Builder().url(endpoint).post(body).build()).await().use { r ->
+                    parseQuality(r.body?.string() ?: "", r.code, query, page)
                 }
-                if (!j.optBoolean("ok")) {
-                    lastProbeError = j.optString("error").ifBlank { "Busca em qualidade falhou (HTTP ${r.code})" }.take(300)
-                    return QualityPage(false, lastProbeError ?: "")
-                }
-                val arr = j.optJSONArray("results") ?: return QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"))
-                val out = ArrayList<Found>()
-                for (i in 0 until arr.length()) {
-                    val e = arr.optJSONObject(i) ?: continue
-                    val u = e.optString("url")
-                    if (u.isBlank()) continue
-                    val title = e.optString("title", u)
-                    val thumb = e.optString("thumbnail").ifBlank { null }
-                    val prev = e.optString("preview").ifBlank { null }
-                    val dur = e.optDouble("duration", 0.0)
-                    out += Found(
-                        u, u, title, Kind.SERVER, thumb = thumb,
-                        height = e.optInt("height"), duration = dur.toInt(),
-                        size = e.optLong("filesize", -1), site = e.optString("site"),
-                        preview = prev, bestQuality = true
-                    )
-                }
-                QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), results = out)
+                last = pageRes
+                lastProbeError = if (pageRes.ok) null else pageRes.error
+                val retryable = !pageRes.ok && (pageRes.error.contains("HTTP 502") || pageRes.error.contains("HTTP 503") || pageRes.error.contains("HTTP 429") || pageRes.error.contains("acordando"))
+                if (pageRes.ok || !retryable || attempt == 1) return pageRes
+            } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                lastProbeError = "Não falei com o servidor de qualidade: ${e.message}".take(300)
+                last = QualityPage(false, lastProbeError ?: "")
+                if (attempt == 1) return last
             }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            lastProbeError = "Não falei com o servidor de qualidade: ${e.message}".take(300)
-            QualityPage(false, lastProbeError ?: "")
+            kotlinx.coroutines.delay(2500)
         }
+        return last
     }
 
         /** Tamanho do arquivo antes de baixar (HEAD, ou GET Range 0-0). -1 = desconhecido (HLS/servidor/sem cabeçalho). */

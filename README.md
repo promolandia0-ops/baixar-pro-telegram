@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.6.5
+- Corrige o crash ao abrir o Navegador (globo): o WebView passou a ser criado com o contexto da tela, não com o da aplicação.
+- Busca em 4K: a lista mostra os resultados da busca mesmo quando a sonda de resolução falha. Filtro padrão “Qualquer”; resolução desconhecida não some. Erros reais (servidor ocupado, etc.) aparecem na tela, com nova tentativa se o servidor estiver acordando.
+
 ## 1.6.4
 - Nova aba **Buscar 4K**: busca por texto (tema, nome ou título). Filtros 4K / 1080p+ / Qualquer, lista com miniatura, duração e resolução, prévia muda (se o site oferecer um clipe), rolagem infinita. Toque baixa a melhor qualidade (vídeo+áudio) e envia ao Telegram. Também dá para colar um link e achar o mesmo vídeo em resolução maior.
 - Navegador mais rápido, com bloqueador de anúncios e rastreadores (listas no estilo EasyList + EasyPrivacy, CSS cosmético, sem janelas pop-up). O histórico do WebView permanece sem recarregar a página ao voltar.
