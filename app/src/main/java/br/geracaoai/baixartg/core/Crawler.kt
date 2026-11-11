@@ -15,7 +15,7 @@ enum class Kind { DIRECT, HLS, SERVER, MEGA }
 
 /** ref = Referer a usar no download (ex.: página do player embutido); se null usa page.
  *  extra = texto ao redor (alt, título do link, figcaption, JSON-LD) para o filtro por nome. */
-data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null, val extra: String = "", val thumb: String? = null) {
+data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null, val extra: String = "", val thumb: String? = null, val height: Int = 0, val duration: Int = 0, val size: Long = -1, val site: String = "", val preview: String? = null, val bestQuality: Boolean = false) {
     val label get() = when (kind) { Kind.DIRECT -> "Arquivo direto"; Kind.HLS -> "Stream HLS (m3u8)"; Kind.SERVER -> "Via servidor (yt-dlp)"; Kind.MEGA -> "MEGA (descriptografado no celular)" }
 }
 

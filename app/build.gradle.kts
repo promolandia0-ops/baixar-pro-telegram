@@ -4,7 +4,7 @@ val ks = Properties().apply { val f = rootProject.file("keystore/keystore.proper
 android {
   namespace = "br.geracaoai.baixartg"
   compileSdk = 35
-  defaultConfig { applicationId = "br.geracaoai.baixartg"; minSdk = 30; targetSdk = 35; versionCode = 10; versionName = "1.6.3"
+  defaultConfig { applicationId = "br.geracaoai.baixartg"; minSdk = 30; targetSdk = 35; versionCode = 11; versionName = "1.6.4"
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") } }
   signingConfigs { create("release") { if (ks.isNotEmpty()) { storeFile = rootProject.file(ks["storeFile"] as String); storePassword = ks["storePassword"] as String; keyAlias = ks["keyAlias"] as String; keyPassword = ks["keyPassword"] as String } } }
   buildTypes { release { isMinifyEnabled = true; isShrinkResources = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"); signingConfig = signingConfigs.getByName("release") } }

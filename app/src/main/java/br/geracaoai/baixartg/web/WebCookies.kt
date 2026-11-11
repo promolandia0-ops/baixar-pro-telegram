@@ -12,11 +12,33 @@ import br.geracaoai.baixartg.core.CookieSource
  */
 object WebCookies : CookieSource {
     private lateinit var p: SharedPreferences
-    fun init(c: Context) { p = c.getSharedPreferences("web_domains", Context.MODE_PRIVATE); CookieManager.getInstance().setAcceptCookie(true) }
+    fun init(c: Context) {
+        p = c.getSharedPreferences("web_domains", Context.MODE_PRIVATE)
+        val cm0 = CookieManager.getInstance()
+        cm0.setAcceptCookie(true)
+        cm0.flush()
+    }
     private val cm get() = CookieManager.getInstance()
 
-    override fun cookieFor(url: String): String? = cm.getCookie(url)
-    override fun store(url: String, setCookie: String) { cm.setCookie(url, setCookie) }
+    override fun cookieFor(url: String): String? {
+        val direct = try { cm.getCookie(url) } catch (_: Exception) { null }
+        if (!direct.isNullOrBlank()) return direct
+        val host = hostOf(url) ?: return null
+        for (u in listOf("https://$host/", "https://www.$host/", "http://$host/", "https://m.$host/")) {
+            val c = try { cm.getCookie(u) } catch (_: Exception) { null }
+            if (!c.isNullOrBlank()) return c
+        }
+        return null
+    }
+    override fun store(url: String, setCookie: String) { try { cm.setCookie(url, setCookie) } catch (_: Exception) {} }
+
+    override fun knownHosts(): List<String> {
+        val extra = listOf("youtube.com", "www.youtube.com", "m.youtube.com", "google.com", "www.google.com")
+        return (domains() + extra).distinct().filter { !cookieFor("https://$it/").isNullOrBlank() }
+    }
+
+    /** Grava os cookies no perfil persistente do WebView (disco). */
+    fun persist() { try { cm.flush() } catch (_: Exception) {} }
 
     /** Chamado quando uma página termina de carregar no Navegador. */
     fun remember(url: String) {

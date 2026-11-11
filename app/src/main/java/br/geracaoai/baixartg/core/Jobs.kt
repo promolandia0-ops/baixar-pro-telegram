@@ -134,14 +134,14 @@ object Jobs {
     }
 
     /** Itens vindos de fora da varredura (MEGA): entram na lista com o tamanho já conhecido. */
-    fun addExternal(list: List<Pair<Found, Long>>, start: Boolean): Boolean {
+    fun addExternal(list: List<Pair<Found, Long>>, start: Boolean, label: String = "MEGA"): Boolean {
         if (job?.isActive == true || list.isEmpty()) return false
         mode.value = Mode.LINKS
         val base = if (phase.value == Phase.LIST || phase.value == Phase.IDLE) items.value else emptyList()
         val have = base.map { it.f.url }.toHashSet()
         val add = list.filter { it.first.url !in have }.mapIndexed { i, (f, sz) -> val s = Sent.isSent(f); Item(base.size + i, f, sel = true, sent = s, total = sz) }
         items.value = base + add
-        phase.value = Phase.LIST; status.value = "${add.size} vídeo(s) do MEGA adicionados."
+        phase.value = Phase.LIST; status.value = "${add.size} vídeo(s)" + (if (label.isBlank()) " adicionados." else " de $label adicionados.")
         if (start) startTransfer(add.map { it.id }.toSet())
         return true
     }

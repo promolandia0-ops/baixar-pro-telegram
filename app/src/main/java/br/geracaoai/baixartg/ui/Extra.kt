@@ -1,10 +1,14 @@
 package br.geracaoai.baixartg.ui
 
 import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
+import android.os.Message
 import android.view.ViewGroup
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
@@ -31,6 +35,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import br.geracaoai.baixartg.core.*
+import br.geracaoai.baixartg.web.AdBlock
 import br.geracaoai.baixartg.web.MegaStore
 import br.geracaoai.baixartg.web.WebCookies
 import kotlinx.coroutines.Dispatchers
@@ -42,6 +47,49 @@ object Handoff { val page = mutableStateOf<String?>(null); val site = mutableSta
 
 // ---------------- Navegador ----------------
 
+
+/** Um único WebView persistente: o perfil (cookies, cache, localStorage) e o histórico ficam no aparelho. */
+object BrowserHolder {
+    @Volatile private var view: WebView? = null
+    fun get(ctx: Context): WebView {
+        view?.let { return it }
+        synchronized(this) {
+            view?.let { return it }
+            AdBlock.warm(ctx.applicationContext)
+            val w = WebView(ctx.applicationContext).apply { configureBrowser() }
+            view = w
+            return w
+        }
+    }
+    fun detach() {
+        view?.let { v ->
+            (v.parent as? ViewGroup)?.removeView(v)
+            WebCookies.persist()
+        }
+    }
+}
+
+@SuppressLint("SetJavaScriptEnabled")
+fun WebView.configureBrowser() {
+    settings.javaScriptEnabled = true
+    settings.domStorageEnabled = true
+    settings.databaseEnabled = true
+    settings.cacheMode = WebSettings.LOAD_DEFAULT
+    settings.loadsImagesAutomatically = true
+    settings.loadWithOverviewMode = true
+    settings.useWideViewPort = true
+    settings.setSupportZoom(true)
+    settings.builtInZoomControls = true
+    settings.displayZoomControls = false
+    settings.setSupportMultipleWindows(true)
+    settings.javaScriptCanOpenWindowsAutomatically = false
+    settings.mediaPlaybackRequiresUserGesture = true
+    settings.userAgentString = Net.userAgent
+    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+    CookieManager.getInstance().setAcceptCookie(true)
+    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,12 +100,12 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     var progress by remember { mutableIntStateOf(0) }
     var canBack by remember { mutableStateOf(false) }; var canFwd by remember { mutableStateOf(false) }
     var ask by remember { mutableStateOf(false) }
-    BackHandler { if (web?.canGoBack() == true) web?.goBack() else onClose() }
+    BackHandler { if (web?.canGoBack() == true) web?.goBack() else { WebCookies.persist(); onClose() } }
     fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }
-    DisposableEffect(Unit) { onDispose { CookieManager.getInstance().flush(); web?.destroy() } }
+    DisposableEffect(Unit) { onDispose { WebCookies.persist(); BrowserHolder.detach() } }
     Scaffold(topBar = {
         Column {
-            TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.Rounded.Close, "Fechar") } },
+            TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton({ WebCookies.persist(); onClose() }) { Icon(Icons.Rounded.Close, "Fechar") } },
                 actions = {
                     IconButton({ web?.goBack() }, enabled = canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
                     IconButton({ web?.goForward() }, enabled = canFwd) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
@@ -73,30 +121,48 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         Surface(tonalElevation = 3.dp) { Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
             Button({ ask = true }, Modifier.fillMaxWidth().height(52.dp), enabled = current.startsWith("http"), shape = MaterialTheme.shapes.medium) {
                 Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Usar esta página no app") }
-            Text("Entre na sua conta normalmente. O app usa só os cookies desta sessão; sua senha nunca é lida nem guardada.",
+            Text("Entre na sua conta normalmente. O app guarda a sessão só neste aparelho (cookies do WebView) e reutiliza nos downloads. A senha nunca é lida. Anúncios e rastreadores são bloqueados.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
         } }
     }) { pad ->
-        AndroidView(factory = { c -> WebView(c).apply {
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
-            settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.databaseEnabled = true
-            settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(false)
-            settings.userAgentString = Net.userAgent
-            CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
-            webViewClient = object : WebViewClient() {
+        AndroidView(factory = { c ->
+            val w = BrowserHolder.get(c)
+            (w.parent as? ViewGroup)?.removeView(w)
+            w.layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
+            w.webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
+                    val u = request.url?.toString() ?: return super.shouldInterceptRequest(v, request)
+                    if (AdBlock.shouldBlock(u, request.isForMainFrame, v.url)) return AdBlock.emptyResponse
+                    return super.shouldInterceptRequest(v, request)
+                }
+                override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean {
+                    val u = request.url?.toString() ?: return false
+                    if (AdBlock.shouldBlock(u, true, v.url)) return true
+                    // redirecionamento automático (sem toque) para outro domínio de anúncio/rastreador
+                    if (!request.hasGesture() && !AdBlock.sameSite(v.url, u) && AdBlock.shouldBlock(u, false, v.url)) return true
+                    return false
+                }
                 override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
-                override fun onPageFinished(v: WebView, url: String) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url) }
+                override fun onPageFinished(v: WebView, url: String) {
+                    current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward()
+                    v.evaluateJavascript(AdBlock.injectScript(), null)
+                    WebCookies.remember(url)
+                }
                 override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
             }
-            webChromeClient = object : WebChromeClient() { override fun onProgressChanged(v: WebView, p: Int) { progress = p } }
-            web = this
-            if (address.length > 8) loadUrl(address)
-        } }, modifier = Modifier.fillMaxSize().padding(pad))
+            w.webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(v: WebView, p: Int) { progress = p }
+                override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message?): Boolean = false
+            }
+            web = w
+            if (w.url.isNullOrBlank() && address.length > 8) w.loadUrl(address)
+            w
+        }, modifier = Modifier.fillMaxSize().padding(pad))
     }
     if (ask) AlertDialog(onDismissRequest = { ask = false }, icon = { Icon(Icons.Rounded.Download, null) },
         title = { Text("Usar esta página") }, text = { Text(current, maxLines = 3, overflow = TextOverflow.Ellipsis) },
-        confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
-        dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
+        confirmButton = { TextButton({ ask = false; WebCookies.persist(); onUse(current, false) }) { Text("Filtrar") } },
+        dismissButton = { TextButton({ ask = false; WebCookies.persist(); onUse(current, true) }) { Text("Varrer tudo") } })
 }
 
 // ---------------- Contas logadas (Configurações) ----------------

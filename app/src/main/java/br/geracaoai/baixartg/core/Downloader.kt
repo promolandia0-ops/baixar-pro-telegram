@@ -36,10 +36,10 @@ object Downloader {
             Kind.DIRECT -> try { retry { direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 // Fallback: o servidor abre a página com a mesma sessão (tokens presos a cookie/IP)
-                if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
+                if (f.page != f.url) viaServer(f.page, dir, server, f.bestQuality, progress) else throw e
             }
             Kind.HLS -> hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight)
-            Kind.SERVER -> viaServer(f.url, dir, server, progress)
+            Kind.SERVER -> viaServer(f.url, dir, server, f.bestQuality, progress)
             Kind.MEGA -> Mega.download(f, dir, progress)
         }
     }
@@ -228,10 +228,10 @@ object Downloader {
     }
 
     /** Usa o backend baixar-video (yt-dlp + fallback HTML/KVS). */
-    suspend fun viaServer(pageUrl: String, dir: File, server: String, progress: (Long, Long) -> Unit): File {
+    suspend fun viaServer(pageUrl: String, dir: File, server: String, best: Boolean = false, progress: (Long, Long) -> Unit): File {
         val base = server.trimEnd('/')
         val json = "application/json".toMediaType()
-        val body = session(JSONObject().put("url", pageUrl).put("mode", "video"), pageUrl).toString().toRequestBody(json)
+        val body = session(JSONObject().put("url", pageUrl).put("mode", "video").also { if (best) it.put("quality", "best") }, pageUrl).toString().toRequestBody(json)
         val r = Net.slow.newCall(Request.Builder().url("$base/api/download").post(body).build()).await()
         r.use {
             val ct = r.header("Content-Type") ?: ""
@@ -375,10 +375,24 @@ object Downloader {
 
     /** Envia a sessão do navegador ao servidor (campos "cookies"/"user_agent"/"referer").
      *  O backend passa esses campos ao yt-dlp (cookies da sessão do navegador). */
-    fun session(j: JSONObject, pageUrl: String): JSONObject {
+    fun session(j: JSONObject, pageUrl: String, withJar: Boolean = false): JSONObject {
         val c = try { Net.cookies?.cookieFor(pageUrl) } catch (_: Exception) { null }
         if (!c.isNullOrBlank()) j.put("cookies", c)
-        return j.put("user_agent", Net.userAgent).put("referer", Net.originOf(pageUrl) ?: pageUrl)
+        j.put("user_agent", Net.userAgent).put("referer", Net.originOf(pageUrl) ?: pageUrl)
+        if (withJar) cookieJar()?.let { j.put("cookie_jar", it) }
+        return j
+    }
+
+    /** Cookies da sessão do aparelho, por host. Só viaja no JSON desta requisição; o servidor não guarda. */
+    fun cookieJar(): JSONObject? {
+        val src = Net.cookies ?: return null
+        val j = JSONObject()
+        for (h in src.knownHosts()) {
+            val c = try { src.cookieFor("https://$h/") } catch (_: Exception) { null }
+            if (!c.isNullOrBlank()) j.put(h, c)
+            if (j.length() >= 32) break
+        }
+        return if (j.length() == 0) null else j
     }
 
     /** Último erro do /api/info (para mostrar no lugar de “Nenhum vídeo encontrado”). */
@@ -440,6 +454,51 @@ object Downloader {
             if (e is kotlinx.coroutines.CancellationException) throw e
             lastProbeError = "Não falei com o servidor de busca: ${e.message}".take(300)
             emptyList()
+        }
+    }
+
+
+    data class QualityPage(val ok: Boolean, val error: String = "", val query: String = "", val page: Int = 1, val hasMore: Boolean = false, val results: List<Found> = emptyList())
+
+    /** Busca ampla em melhor qualidade (/api/quality). Envia cookies só nesta requisição. */
+    suspend fun qualitySearch(server: String, query: String, url: String = "", page: Int = 1): QualityPage {
+        lastProbeError = null
+        val pageUrl = url.ifBlank { "https://www.youtube.com/" }
+        val body = session(JSONObject().put("query", query).put("url", url).put("page", page), pageUrl, withJar = true).toString().toRequestBody("application/json".toMediaType())
+        return try {
+            Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/quality").post(body).build()).await().use { r ->
+                val raw = r.body?.string() ?: ""
+                val j = try { JSONObject(raw) } catch (_: Exception) {
+                    lastProbeError = if (r.code == 404) "O servidor ainda não tem a busca em 4K (atualize o baixar-video)." else "Servidor: resposta inválida (HTTP ${r.code})"
+                    return QualityPage(false, lastProbeError ?: "")
+                }
+                if (!j.optBoolean("ok")) {
+                    lastProbeError = j.optString("error").ifBlank { "Busca em qualidade falhou (HTTP ${r.code})" }.take(300)
+                    return QualityPage(false, lastProbeError ?: "")
+                }
+                val arr = j.optJSONArray("results") ?: return QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"))
+                val out = ArrayList<Found>()
+                for (i in 0 until arr.length()) {
+                    val e = arr.optJSONObject(i) ?: continue
+                    val u = e.optString("url")
+                    if (u.isBlank()) continue
+                    val title = e.optString("title", u)
+                    val thumb = e.optString("thumbnail").ifBlank { null }
+                    val prev = e.optString("preview").ifBlank { null }
+                    val dur = e.optDouble("duration", 0.0)
+                    out += Found(
+                        u, u, title, Kind.SERVER, thumb = thumb,
+                        height = e.optInt("height"), duration = dur.toInt(),
+                        size = e.optLong("filesize", -1), site = e.optString("site"),
+                        preview = prev, bestQuality = true
+                    )
+                }
+                QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), results = out)
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            lastProbeError = "Não falei com o servidor de qualidade: ${e.message}".take(300)
+            QualityPage(false, lastProbeError ?: "")
         }
     }
 

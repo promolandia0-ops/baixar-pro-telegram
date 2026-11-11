@@ -16,6 +16,7 @@ const val UA = "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KH
 interface CookieSource {
     fun cookieFor(url: String): String?
     fun store(url: String, setCookie: String) {}
+    fun knownHosts(): List<String> = emptyList()
 }
 
 object Net {
@@ -59,7 +60,12 @@ object Net {
             val resp = ch.proceed(req)
             // Cookies novos que o site manda voltam para a sessão do navegador
             val sc = resp.headers("Set-Cookie")
-            if (sc.isNotEmpty() && req.header("Cookie") != null) cookies?.let { cs -> sc.forEach { try { cs.store(resp.request.url.toString(), it) } catch (_: Exception) {} } }
+            if (sc.isNotEmpty()) {
+                val rh = req.url.host
+                if (noCookieHosts.none { rh == it || rh.endsWith(".$it") }) {
+                    cookies?.let { cs -> sc.forEach { try { cs.store(resp.request.url.toString(), it) } catch (_: Exception) {} } }
+                }
+            }
             resp
         }.build()
     /** Cliente com timeout longo para o servidor (Render pode demorar para acordar / yt-dlp). */

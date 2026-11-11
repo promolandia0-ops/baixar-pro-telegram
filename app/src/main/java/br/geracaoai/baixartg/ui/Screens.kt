@@ -46,7 +46,8 @@ import java.util.Date
 import java.util.Locale
 
 enum class Tab(val label: String, val icon: ImageVector) {
-    HOME("Início", Icons.Rounded.Home), SITE("Varrer tudo", Icons.Rounded.TravelExplore), PAGE("Filtrar", Icons.Rounded.FilterAlt),
+    HOME("Início", Icons.Rounded.Home), BEST("4K", Icons.Rounded.HighQuality),
+    SITE("Varrer tudo", Icons.Rounded.TravelExplore), PAGE("Filtrar", Icons.Rounded.FilterAlt),
     QUEUE("Fila", Icons.Rounded.Downloading), HIST("Histórico", Icons.Rounded.History)
 }
 
@@ -95,6 +96,7 @@ fun MainShell(shared: MutableState<String?>) {
             AnimatedContent(tab, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tab") { t ->
                 when (t) {
                     Tab.HOME -> HomeTab(homeText) { tab = Tab.QUEUE }
+                    Tab.BEST -> QualityTab { tab = Tab.QUEUE }
                     Tab.SITE -> SiteTab { tab = Tab.QUEUE }
                     Tab.PAGE -> PageTab()
                     Tab.QUEUE -> QueueTab()
@@ -208,9 +210,10 @@ fun HowTo() {
     OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Como funciona", style = MaterialTheme.typography.titleSmall)
         Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados.")
+        Tip(Icons.Rounded.HighQuality, "Buscar 4K", "procura o mesmo vídeo (ou um tema) na melhor qualidade e deixa baixar ou enviar ao Telegram.")
         Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "percorre o site inteiro e baixa todos os vídeos.")
         Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega só os vídeos de uma página, sem abrir outras.")
-        Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta do site; os downloads usam essa sessão.")
+        Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta (YouTube etc.); a sessão fica só no aparelho e a busca/download reutilizam esses cookies, sem anúncios.")
         Tip(Icons.Rounded.Cloud, "MEGA", "entre na sua conta MEGA ou cole um link público e envie os vídeos.")
         Tip(Icons.Rounded.Lock, "Segundo plano", "pode bloquear a tela; “Parar” interrompe na hora.")
     } }

@@ -53,6 +53,11 @@ class MainActivity : ComponentActivity() {
         }
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handle(intent) }
+    override fun onPause() {
+        super.onPause()
+        try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
+        try { br.geracaoai.baixartg.web.WebCookies.persist() } catch (_: Exception) {}
+    }
     private fun handle(i: Intent?) {
         if (i?.action == Intent.ACTION_SEND) i.getStringExtra(Intent.EXTRA_TEXT)?.let { t -> Regex("""https?://\S+""").find(t)?.value?.let { shared.value = it } }
     }

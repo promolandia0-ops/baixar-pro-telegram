@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.6.4
+- Nova aba **Buscar 4K**: busca por texto (tema, nome ou título). Filtros 4K / 1080p+ / Qualquer, lista com miniatura, duração e resolução, prévia muda (se o site oferecer um clipe), rolagem infinita. Toque baixa a melhor qualidade (vídeo+áudio) e envia ao Telegram. Também dá para colar um link e achar o mesmo vídeo em resolução maior.
+- Navegador mais rápido, com bloqueador de anúncios e rastreadores (listas no estilo EasyList + EasyPrivacy, CSS cosmético, sem janelas pop-up). O histórico do WebView permanece sem recarregar a página ao voltar.
+- Login que você faz no navegador do app (YouTube etc.) permanece neste aparelho (CookieManager + perfil do WebView). Varrer tudo, busca por nome, busca em 4K e o download reutilizam esses cookies e o mesmo User-Agent. O servidor yt-dlp recebe os cookies só na requisição, não guarda sessão.
+
 ## 1.6.3
 - Varrer tudo: campo do site + campo Nome + botão Buscar. A busca usa a pesquisa do próprio site (form/OpenSearch ou `/search?q=`, `/?s=`), a busca do YouTube (canal ou ytsearch) pelo servidor, ou só segue links cujo texto/endereço batem com o nome.
 - A lista de resultados mostra miniatura e título; você escolhe os vídeos ou toca em “Baixar todos”. O download em 8 conexões continua igual.
@@ -30,6 +35,6 @@ Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
 ## 1.6.0
 - **Navegador** (ícone de globo): WebView com barra de endereço, voltar/avançar/recarregar e barra de carregamento. Entre na sua conta do site normalmente; os cookies ficam salvos (CookieManager). Botão **“Usar esta página no app”** manda o link para Filtrar ou Varrer tudo.
-- Todas as requisições (Varrer tudo, Filtrar, Início, tamanho dos arquivos, downloads, segmentos HLS) enviam os cookies do domínio, o mesmo User-Agent do WebView e Referer. O servidor yt-dlp recebe `cookies`/`user_agent`/`referer` no JSON (o backend atual ainda ignora esses campos).
+- Todas as requisições (Varrer tudo, Filtrar, Início, tamanho dos arquivos, downloads, segmentos HLS) enviam os cookies do domínio, o mesmo User-Agent do WebView e Referer. O servidor yt-dlp recebe `cookies`/`user_agent`/`referer` (e, na busca em 4K, um `cookie_jar` por domínio) só nesta requisição; a sessão não é guardada no servidor.
 - **Configurações → Contas logadas**: lista os sites com sessão, “Sair” de cada um e “Sair de todas”.
 - **MEGA** (ícone de nuvem): login na sua conta (API oficial, com prova de trabalho X-Hashcash e 2FA), navegar nas pastas, ver vídeos com tamanho, marcar um ou todos, baixar e descriptografar no celular em qualidade original e enviar ao Telegram. Também aceita links públicos de arquivo/pasta (com chave), inclusive colados no Início/Filtrar. A senha nunca é guardada; só a sessão, criptografada com o Android Keystore.
