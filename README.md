@@ -4,6 +4,12 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.6.6
+- A busca por nome (Varrer tudo, busca no site e aba 4K) aceita qualquer palavra significativa, sem acento/maiúsculas, com typo leve e também o endereço do vídeo. Não precisa do nome exato.
+- Se a busca no próprio site não achar nada, o app procura na web só naquele site e, se preciso, na web em geral.
+- Aba 4K: várias fontes ao mesmo tempo e os primeiros resultados aparecem em poucos segundos; o resto vai entrando. Resolução pelo título na hora (ex.: “provável 4K”). Se o filtro 4K ou 1080p+ não tiver confirmação, mostra o melhor que achou, com o aviso.
+- Cache da busca recente no servidor. Sem filtro de idade; sites de vazamento e pirataria continuam bloqueados.
+
 ## 1.6.5
 - Corrige o crash ao abrir o Navegador (globo): o WebView passou a ser criado com o contexto da tela, não com o da aplicação.
 - Busca em 4K: a lista mostra os resultados da busca mesmo quando a sonda de resolução falha. Filtro padrão “Qualquer”; resolução desconhecida não some. Erros reais (servidor ocupado, etc.) aparecem na tela, com nova tentativa se o servidor estiver acordando.

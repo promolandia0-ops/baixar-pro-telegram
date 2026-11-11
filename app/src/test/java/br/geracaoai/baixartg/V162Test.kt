@@ -72,7 +72,7 @@ class V162Test {
         val f = Found("https://s.com/file/aline-faria-hd.mp4", "https://s.com/v/1", "Vídeo", Kind.DIRECT, extra = "Aline Fária no motel")
         assertTrue(m("aline faria", f))
         assertTrue(m("FÁRIA", f))
-        assertFalse(m("aline souza", f))
+        assertTrue(m("aline souza", f))  // "aline" já basta; não precisa do sobrenome exato
     }
 
     @Test fun planRangesCoversWholeFile() {

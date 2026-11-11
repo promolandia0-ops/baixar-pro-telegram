@@ -13,8 +13,11 @@ class NameFilterTest {
         assertTrue(m("aline faria", f("x", "https://site.com/aline-faria-video-hd/"))) // pela URL
         assertTrue(m("joão", f("Joao Silva")))
         assertTrue(m("  ", f("qualquer")))
-        assertFalse(m("Aline Faria", f("Aline Souza")))          // todas as palavras
+        assertTrue(m("Aline Faria", f("Aline Souza")))           // qualquer palavra significativa
         assertTrue(m("aline x", f("x", "https://s.com/Aline%20X.mp4")))
+        assertTrue(m("fariaa", f("Aline Faria no motel")))         // typo leve
+        assertTrue(m("farin", f("Vídeo da Aline Faria")))          // radical / typo
+        assertFalse(m("pedro", f("Aline Souza")))
     }
     @Test fun perf5000() {
         val l = (0 until 5000).map { f("Vídeo número $it de Fulana Ciclana " + if (it % 7 == 0) "Aline Faria" else "", "https://site.com/video-$it/") }

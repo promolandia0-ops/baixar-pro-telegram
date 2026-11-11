@@ -105,6 +105,31 @@ object Jobs {
                     pagesBefore = crawl.value.pagesDone
                     flush()
                 }
+                if (!stopped && items.value.isEmpty() && words.isNotEmpty()) {
+                    status.value = "Nada no site com esse nome; buscando na web…"
+                    val sites = urls.map { Extract.host(it) }.filter { it.isNotBlank() }.distinct()
+                    suspend fun takeWeb(site: String = "") {
+                        repeat(5) { i ->
+                            val r = Downloader.qualitySearch(server, name, page = 1, site = site)
+                            if (r.ok) {
+                                r.results.forEach { f ->
+                                    if (keep(f) && seen.add(f.url.substringBefore('#'))) {
+                                        val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s)
+                                    }
+                                }
+                                flush()
+                            }
+                            if (items.value.isNotEmpty() && (i >= 1 || !r.pending)) return
+                            if (!r.ok && i == 0) return
+                            kotlinx.coroutines.delay(800)
+                        }
+                    }
+                    for (h in sites) {
+                        if (items.value.isNotEmpty()) break
+                        takeWeb(h)
+                    }
+                    if (items.value.isEmpty()) takeWeb("")
+                }
                 if (m != Mode.SITE || items.value.size <= 300) {
                     status.value = "Verificando o tamanho dos arquivos…"
                     fetchSizes()

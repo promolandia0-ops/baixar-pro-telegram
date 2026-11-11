@@ -46,6 +46,7 @@ fun QualityTab(goQueue: () -> Unit) {
     val loading by QualitySearch.loading.collectAsState()
     val loadingMore by QualitySearch.loadingMore.collectAsState()
     val hasMore by QualitySearch.hasMore.collectAsState()
+    val pending by QualitySearch.pending.collectAsState()
     val err by QualitySearch.error.collectAsState()
     val status by QualitySearch.status.collectAsState()
     val phase by Jobs.phase.collectAsState()
@@ -65,7 +66,7 @@ fun QualityTab(goQueue: () -> Unit) {
 
     LazyColumn(Modifier.fillMaxSize().imePadding(), listState, contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
-            Section("Buscar em 4K", "Digite um tema, um nome ou o título de um vídeo. O app procura em várias fontes, mede a resolução de verdade e mostra o de melhor qualidade primeiro. Sem filtro de idade; sites de vazamento e pirataria continuam bloqueados.", Icons.Rounded.HighQuality)
+            Section("Buscar em 4K", "Digite um tema, um nome ou o título de um vídeo. O app consulta várias fontes ao mesmo tempo e mostra os primeiros resultados na hora; a resolução entra pelo título e é completada depois quando der. Sem filtro de idade; sites de vazamento e pirataria continuam bloqueados.", Icons.Rounded.HighQuality)
         }
         item {
             OutlinedTextField(q, { QualitySearch.query.value = it }, Modifier.fillMaxWidth(), singleLine = true, shape = MaterialTheme.shapes.medium,
@@ -84,9 +85,11 @@ fun QualityTab(goQueue: () -> Unit) {
             }
         }
         item { BigButton("Buscar", Icons.Rounded.Search, !busy && (q.isNotBlank() || link.isNotBlank())) { QualitySearch.search() } }
-        if (loading) item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) { CircularProgressIndicator(); Text("Buscando… o servidor pode demorar um pouco para acordar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        if (loading && raw.isEmpty()) item { Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) { CircularProgressIndicator(); Text("Buscando… o servidor pode demorar um pouco para acordar. Os primeiros resultados aparecem assim que uma fonte responder.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
         if (err.isNotBlank() && raw.isEmpty()) item { Text(err, color = MaterialTheme.colorScheme.error) }
         if (status.isNotBlank() && !loading) item { Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+        if (pending && raw.isNotEmpty()) item { Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) { CircularProgressIndicator(Modifier.size(18.dp)); Text("Buscando mais resultados…", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }
+        if (QualitySearch.filterFallback() && visible.isNotEmpty()) item { Text("Nenhum vídeo com essa qualidade confirmada. Mostrando o melhor que achei (a qualidade no título é uma estimativa).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
         if (visible.isNotEmpty()) item {
             val n = visible.size
             Button({
@@ -120,7 +123,7 @@ private fun QualityCard(f: Found, playing: Boolean, onPreview: () -> Unit, onDow
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Text(f.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
-                Text(listOfNotNull(qualityLabel(f.height).takeIf { f.height > 0 }, fmtDur(f.duration).takeIf { f.duration > 0 }, f.site.ifBlank { null }, if (f.size > 0) fmtBytes(f.size) else null).joinToString(" · "),
+                Text(listOfNotNull(qualityLabel(f.height, f.title).takeIf { it != "—" }, fmtDur(f.duration).takeIf { f.duration > 0 }, f.site.ifBlank { null }, if (f.size > 0) fmtBytes(f.size) else null).joinToString(" · "),
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (!f.preview.isNullOrBlank()) Text("Toque na miniatura para a prévia (sem som)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -158,14 +161,23 @@ fun PreviewThumb(thumb: String?, preview: String?, playing: Boolean, onToggle: (
 
 private fun qualityLabelOrPlay() = "prévia"
 
-fun qualityLabel(h: Int): String = when {
-    h >= 2160 -> "4K"
-    h >= 1440 -> "1440p"
-    h >= 1080 -> "1080p"
-    h >= 720 -> "720p"
-    h >= 480 -> "480p"
-    h > 0 -> "${h}p"
-    else -> "—"
+fun qualityLabel(h: Int, title: String = ""): String {
+    val likely = if (h <= 0) QualitySearch.heightFromTitle(title) else 0
+    val used = if (h > 0) h else likely
+    val tag = when {
+        used >= 2160 -> "4K"
+        used >= 1440 -> "1440p"
+        used >= 1080 -> "1080p"
+        used >= 720 -> "720p"
+        used >= 480 -> "480p"
+        used > 0 -> "${used}p"
+        else -> ""
+    }
+    return when {
+        h > 0 -> tag
+        likely > 0 -> "provável $tag"
+        else -> "—"
+    }
 }
 
 fun fmtDur(sec: Int): String {

@@ -18,11 +18,7 @@ object SiteSearch {
         return YT_HOST.containsMatchIn(h) || h == "youtu.be"
     }
 
-    fun matches(text: String, words: List<String>): Boolean {
-        if (words.isEmpty()) return true
-        val k = " " + NameFilter.norm(text) + " "
-        return words.all { k.contains(it) }
-    }
+    fun matches(text: String, words: List<String>): Boolean = NameFilter.matchesText(text, words)
 
     fun isSearchUrl(url: String): Boolean {
         val pathAndQ = try {

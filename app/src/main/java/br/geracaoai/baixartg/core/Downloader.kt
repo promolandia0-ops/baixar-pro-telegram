@@ -458,7 +458,7 @@ object Downloader {
     }
 
 
-    data class QualityPage(val ok: Boolean, val error: String = "", val query: String = "", val page: Int = 1, val hasMore: Boolean = false, val results: List<Found> = emptyList())
+    data class QualityPage(val ok: Boolean, val error: String = "", val query: String = "", val page: Int = 1, val hasMore: Boolean = false, val pending: Boolean = false, val results: List<Found> = emptyList())
 
     /** Busca ampla em melhor qualidade (/api/quality). Envia cookies só nesta requisição. */
     fun parseQuality(raw: String, code: Int, query: String, page: Int): QualityPage {
@@ -472,7 +472,7 @@ object Downloader {
             return QualityPage(false, msg)
         }
         if (!j.optBoolean("ok")) {
-            return QualityPage(false, j.optString("error").ifBlank { "Busca em qualidade falhou (HTTP $code)" }.take(300), query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"))
+            return QualityPage(false, j.optString("error").ifBlank { "Busca em qualidade falhou (HTTP $code)" }.take(300), query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), pending = j.optBoolean("pending"))
         }
         val arr = j.optJSONArray("results")
         val out = ArrayList<Found>()
@@ -491,13 +491,14 @@ object Downloader {
                 preview = prev, bestQuality = true
             )
         }
-        return QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), results = out)
+        return QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), pending = j.optBoolean("pending"), results = out)
     }
 
-    suspend fun qualitySearch(server: String, query: String, url: String = "", page: Int = 1): QualityPage {
+    suspend fun qualitySearch(server: String, query: String, url: String = "", page: Int = 1, site: String = ""): QualityPage {
         lastProbeError = null
         val pageUrl = url.ifBlank { "https://www.youtube.com/" }
-        val body = session(JSONObject().put("query", query).put("url", url).put("page", page), pageUrl, withJar = true).toString().toRequestBody("application/json".toMediaType())
+        val payload = JSONObject().put("query", query).put("url", url).put("page", page).put("site", site)
+        val body = session(payload, pageUrl, withJar = true).toString().toRequestBody("application/json".toMediaType())
         val endpoint = server.trimEnd('/') + "/api/quality"
         var last = QualityPage(false, "Falha na busca.")
         repeat(2) { attempt ->
