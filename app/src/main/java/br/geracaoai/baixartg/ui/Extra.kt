@@ -39,6 +39,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import br.geracaoai.baixartg.core.*
 import br.geracaoai.baixartg.web.AdBlock
 import br.geracaoai.baixartg.web.MegaStore
+import br.geracaoai.baixartg.web.PageVideos
 import br.geracaoai.baixartg.web.WebCookies
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -114,6 +115,7 @@ fun WebView.configureBrowser() {
         settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
         CookieManager.getInstance().setAcceptCookie(true)
         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+        try { addJavascriptInterface(PageVideos.Bridge(), "BaixarPage") } catch (_: Exception) {}
     } catch (_: Exception) {}
 }
 
@@ -127,6 +129,43 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     var progress by remember { mutableIntStateOf(0) }
     var canBack by remember { mutableStateOf(false) }; var canFwd by remember { mutableStateOf(false) }
     var ask by remember { mutableStateOf(false) }
+    var watching by remember { mutableStateOf(setOf<String>()) }
+    var banner by remember { mutableStateOf("") }
+    val hits by PageVideos.hits.collectAsState()
+    val phase by Jobs.phase.collectAsState()
+    val jobItems by Jobs.items.collectAsState()
+    val jobStatus by Jobs.status.collectAsState()
+    val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
+    val mine = jobItems.filter { it.f.url in watching }
+    val liveBanner = when {
+        mine.any { it.st == St.ERR } -> mine.first { it.st == St.ERR }.msg.ifBlank { "Não consegui baixar este vídeo." }
+        mine.any { it.st == St.DOWN } -> {
+            val t = mine.first { it.st == St.DOWN }
+            val pct = if (t.total > 0) " ${(t.prog * 100).toInt()}%" else ""
+            "Baixando na melhor qualidade$pct…"
+        }
+        mine.any { it.st == St.UP || it.st == St.READY } -> "Enviando ao Telegram…"
+        mine.isNotEmpty() && mine.all { it.st == St.DONE } -> "Enviado às Mensagens Salvas."
+        mine.any { it.st == St.WAIT } || (watching.isNotEmpty() && busy) -> jobStatus.ifBlank { "Preparando o download…" }
+        else -> banner
+    }
+    fun onPage(v: WebView, url: String) {
+        current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward()
+        PageVideos.resetIfNewPage(url, v.title ?: "")
+    }
+    fun inject(v: WebView) {
+        try { v.evaluateJavascript(AdBlock.injectScript(), null) } catch (_: Exception) {}
+        try { v.evaluateJavascript(PageVideos.hookScript(), null) } catch (_: Exception) {}
+    }
+    fun startDownload() {
+        val list = hits.sortedByDescending { it.played }.map { PageVideos.toFound(it) }
+        if (list.isEmpty()) { banner = "Não achei um vídeo nesta página."; return }
+        if (list.any { PageVideos.blocked(it.url) || PageVideos.blocked(it.page) }) { banner = "Este site não é permitido."; return }
+        WebCookies.persist()
+        val ok = Jobs.addExternal(list.map { it to it.size.coerceAtLeast(-1) }, start = true, label = "Navegador")
+        watching = list.map { it.url }.toSet()
+        banner = if (ok) "Baixando na melhor qualidade e enviando ao Telegram…" else "Há uma tarefa em andamento. Espere terminar."
+    }
     BackHandler { if (web?.canGoBack() == true) web?.goBack() else { WebCookies.persist(); onClose() } }
     fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }
     DisposableEffect(Unit) { onDispose { WebCookies.persist(); BrowserHolder.detach() } }
@@ -144,8 +183,23 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go), keyboardActions = KeyboardActions(onGo = { go(address) }))
             if (progress in 1..99) LinearProgressIndicator({ progress / 100f }, Modifier.fillMaxWidth().padding(top = 6.dp)) else Spacer(Modifier.height(10.dp))
         }
+    }, floatingActionButton = {
+        if (hits.isNotEmpty()) {
+            ExtendedFloatingActionButton(onClick = { startDownload() }, icon = { Icon(Icons.Rounded.Download, null) }, text = { Text(if (hits.size > 1) "Baixar (${hits.size})" else "Baixar") })
+        }
     }, bottomBar = {
         Surface(tonalElevation = 3.dp) { Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
+            if (liveBanner.isNotBlank()) {
+                Row(Modifier.fillMaxWidth().padding(bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    if (busy && mine.any { it.st == St.DOWN || it.st == St.WAIT || it.st == St.UP || it.st == St.READY }) {
+                        val t = mine.firstOrNull { it.st == St.DOWN }
+                        if (t != null && t.total > 0) CircularProgressIndicator({ t.prog.coerceIn(0f, 1f) }, Modifier.size(18.dp))
+                        else CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text(liveBanner, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                }
+            }
             Button({ ask = true }, Modifier.fillMaxWidth().height(52.dp), enabled = current.startsWith("http"), shape = MaterialTheme.shapes.medium) {
                 Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Usar esta página no app") }
             Text("Entre na sua conta normalmente. O app guarda a sessão só neste aparelho (cookies do WebView) e reutiliza nos downloads. A senha nunca é lida. Anúncios e rastreadores são bloqueados.",
@@ -161,7 +215,10 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                     return try {
                         val u = request.url?.toString() ?: return super.shouldInterceptRequest(v, request)
                         if (AdBlock.shouldBlock(u, request.isForMainFrame, v.url)) AdBlock.emptyResponse
-                        else super.shouldInterceptRequest(v, request)
+                        else {
+                            if (!request.isForMainFrame) PageVideos.offerMedia(u, PageVideos.currentPage)
+                            super.shouldInterceptRequest(v, request)
+                        }
                     } catch (_: Exception) { super.shouldInterceptRequest(v, request) }
                 }
                 override fun shouldOverrideUrlLoading(v: WebView, request: WebResourceRequest): Boolean {
@@ -172,13 +229,17 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                         else false
                     } catch (_: Exception) { false }
                 }
-                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { onPage(v, url) }
                 override fun onPageFinished(v: WebView, url: String) {
-                    current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward()
-                    try { v.evaluateJavascript(AdBlock.injectScript(), null) } catch (_: Exception) {}
+                    onPage(v, url)
+                    inject(v)
                     try { WebCookies.remember(url) } catch (_: Exception) {}
                 }
-                override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) {
+                    onPage(v, url)
+                    if (!isReload) inject(v)
+                    PageVideos.considerPage(url, v.title ?: "")
+                }
             }
             w.webChromeClient = object : WebChromeClient() {
                 override fun onProgressChanged(v: WebView, p: Int) { progress = p }
@@ -186,6 +247,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
             }
             web = w
             if (w.url.isNullOrBlank() && address.length > 8) w.loadUrl(address)
+            else w.url?.let { onPage(w, it); inject(w) }
             w
         }, modifier = Modifier.fillMaxSize().padding(pad))
     }

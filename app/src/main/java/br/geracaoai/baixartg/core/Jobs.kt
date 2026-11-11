@@ -243,7 +243,7 @@ object Jobs {
         try {
             set(t.id) { it.copy(st = St.DOWN, prog = 0f, msg = "") }
             var lastT = System.currentTimeMillis(); var lastB = 0L; var spd = 0L
-            file = Downloader.download(t.f, File(app.cacheDir, "dl"), Prefs.server, Prefs.quality) { got, tot ->
+            file = Downloader.download(t.f, File(app.cacheDir, "dl"), Prefs.server, if (t.f.bestQuality) 0 else Prefs.quality) { got, tot ->
                 val now = System.currentTimeMillis(); if (now - lastT >= 1000) { spd = (got - lastB) * 1000 / (now - lastT); lastT = now; lastB = got }
                 set(t.id) { it.copy(bytes = got, total = tot, prog = if (tot > 0) got.toFloat() / tot else 0f, speed = spd) }
             }

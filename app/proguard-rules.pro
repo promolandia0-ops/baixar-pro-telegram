@@ -4,3 +4,4 @@
 -dontwarn okio.**
 -dontwarn org.jspecify.**
 -dontwarn com.google.re2j.**
+-keepclassmembers class * { @android.webkit.JavascriptInterface <methods>; }

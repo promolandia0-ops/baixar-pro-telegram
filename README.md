@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.6.7
+- No Navegador (ícone do globo): ao entrar numa página com vídeo — ou ao tocar em play — aparece um botão flutuante **Baixar**. Um toque começa na hora o download na melhor qualidade (original / bestvideo+bestaudio, ou a maior faixa HLS) e envia ao Telegram, sem sair da página e sem perguntar a qualidade. Se houver vários vídeos, o botão mostra a quantidade. Uma faixa pequena acompanha o progresso.
+- A detecção usa as tags `<video>`, os pedidos de mídia (.mp4/.m3u8/.webm/.mpd), um gancho no evento play e a própria URL quando o yt-dlp reconhece o site (YouTube etc.). Usa os cookies e o User-Agent do navegador. Sites de vazamento e pirataria continuam bloqueados; o app não fura DRM nem login.
+
 ## 1.6.6
 - A busca por nome (Varrer tudo, busca no site e aba 4K) aceita qualquer palavra significativa, sem acento/maiúsculas, com typo leve e também o endereço do vídeo. Não precisa do nome exato.
 - Se a busca no próprio site não achar nada, o app procura na web só naquele site e, se preciso, na web em geral.
