@@ -14,10 +14,10 @@ object NameFilter {
 
     fun words(q: String): List<String> = norm(q).split(' ').filter { it.isNotEmpty() }
 
-    /** Título + página + URL (decodificada, com - e _ virando espaço). */
+    /** Título + texto ao redor (alt, link, figcaption) + página + URL (decodificada). */
     fun key(f: Found): String = cache.getOrPut(f) {
         val u = try { URLDecoder.decode(f.page + " " + f.url, "UTF-8") } catch (_: Exception) { f.page + " " + f.url }
-        " " + norm(f.title + " " + u) + " "
+        " " + norm(f.title + " " + f.extra + " " + u) + " "
     }
 
     fun matches(f: Found, w: List<String>): Boolean { if (w.isEmpty()) return true; val k = key(f); return w.all { k.contains(it) } }

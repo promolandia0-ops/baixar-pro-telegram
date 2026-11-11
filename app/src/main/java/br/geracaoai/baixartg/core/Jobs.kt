@@ -54,8 +54,8 @@ object Jobs {
 
     fun startCrawl(url: String) = startScan(listOf(url), Mode.SITE, false)
 
-    /** Só roda quando o usuário toca no botão (nunca ao digitar). */
-    fun startScan(urls0: List<String>, m: Mode, auto: Boolean) {
+    /** Só roda quando o usuário toca no botão (nunca ao digitar). name = filtro por nome (Varrer tudo). */
+    fun startScan(urls0: List<String>, m: Mode, auto: Boolean, name: String = "") {
         if (job?.isActive == true) return
         val urls = urls0.map { u -> u.trim().let { if (it.startsWith("http", true) || it.startsWith("mega:", true)) it else "https://$it" } }.filter { it.length > 8 }.distinct()
         if (urls.isEmpty()) return
@@ -72,6 +72,10 @@ object Jobs {
             fun flush() { if (buf.isNotEmpty()) { val add = buf.toList(); buf.clear(); items.update { it + add } } }
             var stopped = false
             val errors = ArrayList<String>()
+            Downloader.lastProbeError = null
+            val words = NameFilter.words(name)
+            var skipped = 0
+            fun keep(f: Found): Boolean { if (words.isEmpty() || NameFilter.matches(f, words)) return true; skipped++; return false }
             try {
                 for (u in urls) {
                     if (Mega.looksLikeMega(u) || Mega.isMegaLink(u)) { // MEGA: não varrer a página (a chave # se perderia)
@@ -79,7 +83,7 @@ object Jobs {
                         try {
                             val found = Mega.resolvePublic(u)
                             if (found.isEmpty()) errors += "Nenhum vídeo encontrado neste link do MEGA."
-                            found.forEach { (f, sz) -> if (seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
+                            found.forEach { (f, sz) -> if (keep(f) && seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { errors += e.message ?: "Erro no MEGA" }
                         pagesBefore++; flush(); continue
@@ -87,7 +91,7 @@ object Jobs {
                     val c = Crawler(opts) { p -> Downloader.probe(server, p) }
                     c.run(u, { p -> crawl.value = p.copy(pagesDone = pagesBefore + p.pagesDone, queued = p.queued + (urls.size - urls.indexOf(u) - 1))
                         val now = System.currentTimeMillis(); if (now - lastFlush > 400) { lastFlush = now; flush() } }) { f ->
-                        if (seen.add(f.url.substringBefore('#'))) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s) } }
+                        if (keep(f) && seen.add(f.url.substringBefore('#'))) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s) } }
                     pagesBefore = crawl.value.pagesDone
                     flush()
                 }
@@ -98,12 +102,16 @@ object Jobs {
             } catch (e: CancellationException) { stopped = true; flush(); status.value = "Busca parada. ${items.value.size} vídeos encontrados até agora."
             } catch (e: Exception) { flush(); errors += e.message ?: "Erro na busca" }
             val total = items.value.size
+            val probeErr = Downloader.lastProbeError
+            if (total == 0 && probeErr != null && errors.none { probeErr in it }) errors += probeErr
+            val filt = if (words.isNotEmpty() && skipped > 0) " Filtro por nome: $total bateram, $skipped ignorados." else ""
             if (!stopped) status.value = when {
-                total == 0 && errors.isNotEmpty() -> errors.joinToString("\n")
+                total == 0 && errors.isNotEmpty() -> errors.joinToString("\n") + (if (words.isNotEmpty() && skipped > 0) " Nenhum vídeo bateu com o nome (havia $skipped)." else "")
+                total == 0 && words.isNotEmpty() && skipped > 0 -> "Nenhum vídeo bateu com o nome “${name.trim()}” ($skipped encontrados e filtrados)."
                 total == 0 -> if (m == Mode.SITE) "Nenhum vídeo encontrado. Tente ativar “Usar servidor (yt-dlp) em todas as páginas” em Ajustes." else "Nenhum vídeo encontrado nesta página."
-                errors.isNotEmpty() -> (if (m == Mode.SITE) "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos." else "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")) + " " + errors.joinToString(" ")
-                m == Mode.SITE -> "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos."
-                else -> "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")
+                errors.isNotEmpty() -> (if (m == Mode.SITE) "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos." else "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")) + filt + " " + errors.joinToString(" ")
+                m == Mode.SITE -> "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos." + filt
+                else -> "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.") + filt
             }
             if (!stopped && autoAfter && items.value.any { it.sel }) { job = null; startTransfer() } else phase.value = Phase.LIST
         }

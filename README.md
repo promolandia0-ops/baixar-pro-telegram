@@ -4,6 +4,13 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.6.2
+- Varredura mais forte: `<video>`/`<source>`, `og:video`, JSON-LD, config de player em `<script>`, links diretos `.mp4`/`.m3u8`/`.webm`, iframes/embeds (um nível) e fallback no servidor yt-dlp quando a página não mostra o arquivo.
+- Se o servidor não consegue ler o link (YouTube pedindo login, X, etc.), a mensagem de erro aparece na tela — não só “Nenhum vídeo encontrado”.
+- Varrer tudo: campo “Filtrar por nome” (sem acento/maiúsculas). Só entra na fila e só baixa o que bater no título, nome do arquivo, alt, texto do link ou texto ao redor.
+- Download mais rápido: arquivos grandes em até 8 conexões em paralelo (HTTP Range), com retomada se a conexão cair. Sem Range, baixa numa conexão só (como antes). HLS já era paralelo.
+- MEGA segue igual (cliente próprio, fora da varredura HTML).
+
 ## 1.5.0
 - Novo visual Material 3 com menu inferior: Início, Varrer tudo, Filtrar, Fila, Histórico + Configurações.
 - Início: vários links de uma vez (um por linha) e botão Baixar.

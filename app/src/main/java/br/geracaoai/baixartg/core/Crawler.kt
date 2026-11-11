@@ -7,13 +7,15 @@ import kotlinx.coroutines.ensureActive
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import org.jsoup.nodes.Element
 import java.net.URI
 import kotlin.coroutines.coroutineContext
 
 enum class Kind { DIRECT, HLS, SERVER, MEGA }
 
-/** ref = Referer a usar no download (ex.: página do player embutido); se null usa page. */
-data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null) {
+/** ref = Referer a usar no download (ex.: página do player embutido); se null usa page.
+ *  extra = texto ao redor (alt, título do link, figcaption, JSON-LD) para o filtro por nome. */
+data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null, val extra: String = "") {
     val label get() = when (kind) { Kind.DIRECT -> "Arquivo direto"; Kind.HLS -> "Stream HLS (m3u8)"; Kind.SERVER -> "Via servidor (yt-dlp)"; Kind.MEGA -> "MEGA (descriptografado no celular)" }
 }
 
@@ -26,13 +28,17 @@ object Extract {
     private val SKIP_EXT = Regex("""\.(jpe?g|png|gif|webp|svg|ico|css|js|json|xml|pdf|zip|rar|7z|gz|mp3|wav|ogg|woff2?|ttf|eot|apk|exe|dmg|txt|avif|bmp)(?:$|[?#])""", RegexOption.IGNORE_CASE)
     private val URL_IN_TEXT = Regex("""https?://[^\s"'<>()\\]+?\.(?:mp4|webm|m3u8|mov|m4v|mkv)(?:\?[^\s"'<>\\]*)?(?=$|[\s"'<>\\),;])""", RegexOption.IGNORE_CASE)
     private val KVS = Regex("""video_(?:alt_)?url\d*\s*[:=]\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
-    private val REL_MEDIA = Regex("""['"](/[^'"\s<>]+?\.(?:mp4|webm|m3u8)(?:\?[^'"\s<>]*)?)['"]""", RegexOption.IGNORE_CASE)
+    private val REL_MEDIA = Regex("""['"](/[^'"\s<>]+?\.(?:mp4|webm|m3u8|mov|m4v|mkv)(?:\?[^'"\s<>]*)?)['"]""", RegexOption.IGNORE_CASE)
+    private val PLAYER_URL = Regex(
+        """(?:file|src|source|url|videoUrl|video_url|videoSrc|contentUrl|content_url|hlsUrl|hls_url|dashUrl|streamUrl|playbackUrl|playlist|mp4|m3u8)\s*[:=]\s*['"]([^'"]+)['"]""",
+        RegexOption.IGNORE_CASE)
+    private val LD_URL = Regex(""""(?:contentUrl|embedUrl)"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
     /** Players conhecidos que dão o m3u8 direto pelo id (sem abrir o iframe). */
     private val VAZOU = Regex("""^https?://(?:[\w-]+\.)*vazounudes\.net/video/video-player[^?]*\?(?:.*&)?id=([0-9a-fA-F-]{36})""")
     private val AD_FRAME = Regex("""(doubleclick|googlesyndication|googletag|adservice|/ads?[/.?]|banner|recaptcha|disqus|facebook\.com/plugins/(?:like|page|comments)|platform\.twitter|instagram\.com/embed\.js|spotify|soundcloud|maps\.google|google\.com/maps|exoclick|juicyads|trafficjunky|popads|adsterra|chaturbate|stripchat|livejasmin)""", RegexOption.IGNORE_CASE)
-    /** Páginas que o yt-dlp do servidor sabe extrair (YouTube, Vimeo, etc). */
+    /** Páginas que o yt-dlp do servidor sabe extrair (YouTube, Vimeo, X, etc). */
     val YTDLP_HOSTS = Regex(
-        """^https?://(?:[\w-]+\.)*(?:youtube\.com/(?:embed/|watch\?|shorts/|live/)|youtube-nocookie\.com/embed/|youtu\.be/|player\.vimeo\.com/video/|vimeo\.com/\d+|dailymotion\.com/(?:embed/)?video/|dai\.ly/|geo\.dailymotion\.com/player|streamable\.com/(?:e/)?\w+|rumble\.com/(?:embed/)?v|ok\.ru/video(?:embed)?/|facebook\.com/(?:plugins/video|watch|[^/]+/videos/|reel/)|fb\.watch/|instagram\.com/(?:p|reel|reels|tv)/|tiktok\.com/(?:@[^/]+/video/|embed)|twitter\.com/[^/]+/status/|x\.com/[^/]+/status/|twitch\.tv/videos/|clips\.twitch\.tv/|bitchute\.com/(?:embed|video)/|odysee\.com/|loom\.com/(?:share|embed)/|wistia\.(?:com|net)/(?:medias|embed)/|fast\.wistia\.net/embed|player\.bilibili\.com|bilibili\.com/video/|vk\.com/video|kick\.com/[^/]+/videos?/|redgifs\.com/(?:watch|ifr)/|xvideos\.com/video|pornhub\.com/(?:view_video|embed)|xhamster\.com/(?:videos|embed))""",
+        """^https?://(?:[\w-]+\.)*(?:youtube\.com/(?:embed/|watch\?|shorts/|live/)|youtube-nocookie\.com/embed/|youtu\.be/|player\.vimeo\.com/video/|vimeo\.com/\d+|dailymotion\.com/(?:embed/)?video/|dai\.ly/|geo\.dailymotion\.com/player|streamable\.com/(?:e/)?\w+|rumble\.com/(?:embed/)?v|ok\.ru/video(?:embed)?/|facebook\.com/(?:plugins/video|watch|[^/]+/videos/|reel/)|fb\.watch/|instagram\.com/(?:p|reel|reels|tv)/|tiktok\.com/(?:@[^/]+/video/|embed)|(?:twitter|x)\.com/(?:(?:i/web|i|[^/]+)/)?status/|twitch\.tv/videos/|clips\.twitch\.tv/|bitchute\.com/(?:embed|video)/|odysee\.com/|loom\.com/(?:share|embed)/|wistia\.(?:com|net)/(?:medias|embed)/|fast\.wistia\.net/embed|player\.bilibili\.com|bilibili\.com/video/|vk\.com/video|kick\.com/[^/]+/videos?/|redgifs\.com/(?:watch|ifr)/|xvideos\.com/video|pornhub\.com/(?:view_video|embed)|xhamster\.com/(?:videos|embed)|archive\.org/(?:details|embed)/)""",
         RegexOption.IGNORE_CASE)
 
     fun host(u: String): String = try { (URI(u).host ?: "").lowercase().removePrefix("www.") } catch (_: Exception) { "" }
@@ -52,7 +58,32 @@ object Extract {
 
     data class PageResult(val videos: List<Found>, val links: List<String>, val title: String, val frames: List<String> = emptyList())
 
-    private fun mk(u: String, page: String, title: String, ref: String? = null) = Found(u, page, title, if (isHls(u)) Kind.HLS else Kind.DIRECT, ref)
+    private fun mk(u: String, page: String, title: String, ref: String? = null, extra: String = "") = Found(u, page, title, if (isHls(u)) Kind.HLS else Kind.DIRECT, ref, extra)
+
+    private fun nearby(e: Element): String {
+        val bits = ArrayList<String>()
+        fun add(s: String?) { val t = s?.replace(Regex("\\s+"), " ")?.trim().orEmpty(); if (t.length > 1) bits += t }
+        add(e.attr("alt")); add(e.attr("title")); add(e.attr("aria-label")); add(e.attr("data-title")); add(e.attr("data-name"))
+        add(e.ownText()); add(e.text().take(200))
+        e.select("img[alt],img[title]").forEach { add(it.attr("alt")); add(it.attr("title")) }
+        // Só o contexto imediato: figcaption da <figure> desta mídia, texto do pai, heading irmão.
+        // Não buscar figcaption/h1 em ancestrais largos (body), senão um nome vaza para todos os vídeos da página.
+        e.closest("figure")?.selectFirst("figcaption")?.let { add(it.text()) }
+        e.parent()?.let { p ->
+            add(p.attr("title")); add(p.attr("aria-label")); add(p.ownText())
+            if (p.tagName().matches(Regex("h[1-6]"))) add(p.text())
+        }
+        e.previousElementSibling()?.let { s ->
+            if (s.tagName().matches(Regex("h[1-6]|figcaption")) || s.hasClass("title") || s.hasClass("name")) add(s.text())
+        }
+        return bits.joinToString(" ").replace(Regex("\\s+"), " ").trim().take(400)
+    }
+
+    private fun putCtx(ctx: MutableMap<String, String>, url: String, text: String?) {
+        val t = text?.replace(Regex("\\s+"), " ")?.trim().orEmpty(); if (t.length < 2) return
+        val old = ctx[url]
+        if (old.isNullOrBlank()) ctx[url] = t.take(400) else if (!old.contains(t.take(40))) ctx[url] = (old + " " + t).trim().take(500)
+    }
 
     fun parse(pageUrl: String, html: String): PageResult {
         val doc: Document = Jsoup.parse(html, pageUrl)
@@ -63,16 +94,40 @@ object Extract {
         val media = LinkedHashSet<String>()
         val server = LinkedHashSet<String>()
         val frames = LinkedHashSet<String>()
-        fun addMedia(u: String?) { val a = abs(pageUrl, u) ?: return; if (isVideoUrl(a)) media += a }
-        doc.select("video[src], video source[src], source[src], video[data-src], source[data-src]").forEach { e -> addMedia(e.attr("src").ifBlank { e.attr("data-src") }) }
-        doc.select("meta[property=og:video], meta[property=og:video:url], meta[property=og:video:secure_url], meta[name=twitter:player:stream]").forEach { addMedia(it.attr("content")) }
-        doc.select("a[href]").forEach { e -> addMedia(e.attr("href")) }
+        val ctx = HashMap<String, String>()
+        fun addMedia(u: String?, text: String? = null) { val a = abs(pageUrl, u) ?: return; if (isVideoUrl(a)) { media += a; putCtx(ctx, a, text) } }
+        fun addServer(u: String?, text: String? = null) { val a = abs(pageUrl, u) ?: return; if (YTDLP_HOSTS.containsMatchIn(a)) { server += a; putCtx(ctx, a, text) } }
+
+        doc.select("video[src], video source[src], source[src], video[data-src], source[data-src], video[data-url], source[data-url]").forEach { e ->
+            val u = e.attr("src").ifBlank { e.attr("data-src") }.ifBlank { e.attr("data-url") }
+            addMedia(u, nearby(e.closest("video") ?: e))
+        }
+        doc.select("[data-video],[data-video-src],[data-stream],[data-file],[data-src][data-type*=video]").forEach { e ->
+            addMedia(e.attr("data-video").ifBlank { e.attr("data-video-src") }.ifBlank { e.attr("data-stream") }.ifBlank { e.attr("data-file") }.ifBlank { e.attr("data-src") }, nearby(e))
+        }
+        doc.select("meta[property=og:video], meta[property=og:video:url], meta[property=og:video:secure_url], meta[name=twitter:player:stream], meta[itemprop=contentUrl], link[itemprop=contentUrl]").forEach { e ->
+            val u = e.attr("content").ifBlank { e.attr("href") }
+            addMedia(u, title); addServer(u, title)
+        }
+        doc.select("a[href]").forEach { e -> addMedia(e.attr("href"), nearby(e)); addServer(e.attr("href"), nearby(e)) }
+
         val raw = html.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/").replace("&amp;", "&")
         URL_IN_TEXT.findAll(raw).forEach { addMedia(it.value) }
         KVS.findAll(raw).forEach { addMedia(it.groupValues[1].replace(Regex("^function/\\d+/"), "")) }
         REL_MEDIA.findAll(raw).forEach { addMedia(it.groupValues[1]) }
-        val frameSrcs = doc.select("iframe[src], iframe[data-src], iframe[data-lazy-src], embed[src]").mapNotNull { e ->
-            abs(pageUrl, e.attr("src").takeIf { it.isNotBlank() && it != "about:blank" } ?: e.attr("data-src").ifBlank { e.attr("data-lazy-src") }) }
+        PLAYER_URL.findAll(raw).forEach { addMedia(it.groupValues[1]); addServer(it.groupValues[1]) }
+
+        doc.select("script[type=application/ld+json]").forEach { s ->
+            val body = s.data().replace("\\/", "/")
+            LD_URL.findAll(body).forEach { addMedia(it.groupValues[1], title); addServer(it.groupValues[1], title) }
+            Regex(""""(?:name|description|caption)"\s*:\s*"([^"]{2,200})"""").findAll(body).forEach { m ->
+                media.forEach { putCtx(ctx, it, m.groupValues[1]) }
+                server.forEach { putCtx(ctx, it, m.groupValues[1]) }
+            }
+        }
+
+        val frameSrcs = doc.select("iframe[src], iframe[data-src], iframe[data-lazy-src], iframe[data-url], embed[src], object[data], amp-iframe[src]").mapNotNull { e ->
+            abs(pageUrl, e.attr("src").takeIf { it.isNotBlank() && it != "about:blank" } ?: e.attr("data-src").ifBlank { e.attr("data-lazy-src") }.ifBlank { e.attr("data-url") }.ifBlank { e.attr("data") }) }
         for (f in frameSrcs) {
             val vz = VAZOU.find(f)
             when {
@@ -81,9 +136,7 @@ object Extract {
                 !AD_FRAME.containsMatchIn(f) && !skipPage(f) -> frames += f
             }
         }
-        (doc.select("a[href]").map { it.attr("href") } +
-            doc.select("meta[property=og:video], meta[property=og:video:url], meta[name=twitter:player]").map { it.attr("content") })
-            .mapNotNull { abs(pageUrl, it) }.filter { YTDLP_HOSTS.containsMatchIn(it) }.forEach { server += it }
+        doc.select("meta[name=twitter:player], meta[property=og:video:url]").forEach { addServer(it.attr("content"), title) }
         if (Bunkr.isBunkrPage(pageUrl)) {
             val cdn = media.firstOrNull { Bunkr.isCdn(it) }
             return PageResult(if (cdn != null) listOf(Found(cdn, pageUrl, title.substringBefore(" | "), Kind.DIRECT)) else emptyList(),
@@ -91,14 +144,17 @@ object Extract {
         }
         val links = doc.select("a[href], link[rel=next]").mapNotNull { abs(pageUrl, it.attr("href")) }.filter { !skipPage(it) }.distinct()
         val vids = ArrayList<Found>()
-        media.filterNot { it.contains("preview", true) && media.size > 1 }.ifEmpty { media.toList() }.forEach { vids += mk(it, pageUrl, title) }
-        server.forEach { vids += Found(it, pageUrl, title, Kind.SERVER) }
-        return PageResult(vids, links, title, frames.take(4))
+        media.filterNot { it.contains("preview", true) && media.size > 1 }.ifEmpty { media.toList() }.forEach { vids += mk(it, pageUrl, title, extra = ctx[it].orEmpty()) }
+        server.forEach { vids += Found(it, pageUrl, title, Kind.SERVER, extra = ctx[it].orEmpty()) }
+        return PageResult(vids, links, title, frames.take(8))
     }
 
     /** Resultado de um iframe (player de outro site): vídeos herdam a página e o título de quem embutiu. */
     fun parseFrame(frameUrl: String, html: String, parentPage: String, parentTitle: String): List<Found> =
-        parse(frameUrl, html).videos.map { if (it.kind == Kind.SERVER) it.copy(page = parentPage, title = parentTitle) else Found(it.url, parentPage, parentTitle, it.kind, frameUrl) }
+        parse(frameUrl, html).videos.map {
+            if (it.kind == Kind.SERVER) it.copy(page = parentPage, title = parentTitle)
+            else Found(it.url, parentPage, parentTitle, it.kind, frameUrl, it.extra)
+        }
 }
 
 class Crawler(private val opts: CrawlOpts, private val probe: (suspend (String) -> String?)? = null) {
@@ -132,6 +188,7 @@ class Crawler(private val opts: CrawlOpts, private val probe: (suspend (String) 
                 val before = found
                 r.videos.forEach(::emit)
                 frameRes.filter { it.first.first == u }.forEach { (k, html) -> if (html != null) Extract.parseFrame(k.third, html, u, k.second).forEach(::emit) }
+                // Fallback yt-dlp: na página inicial sempre; nas outras, se o ajuste estiver ligado.
                 if (found == before && probe != null && !Extract.YTDLP_HOSTS.containsMatchIn(u) && (opts.probeServer || u == startUrl)) {
                     try { probe.invoke(u)?.let { t -> emit(Found(u, u, t, Kind.SERVER)) } } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e }
                 }

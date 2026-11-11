@@ -225,12 +225,21 @@ fun SiteTab(goQueue: () -> Unit) {
     val phase by Jobs.phase.collectAsState(); val mode by Jobs.mode.collectAsState(); val status by Jobs.status.collectAsState(); val items by Jobs.items.collectAsState()
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     var url by rememberSaveable { mutableStateOf(Prefs.lastUrl) }
+    var name by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Handoff.site.value) { Handoff.site.value?.let { url = it; Handoff.site.value = null } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
         item { Section("Varrer o site inteiro", "Abre todas as páginas do mesmo site ligadas a este link, encontra todos os vídeos e baixa tudo automaticamente.", Icons.Rounded.TravelExplore) }
         item { LinkField(url, { url = it }, !busy, label = "Link do site") }
         item {
-            BigButton("Varrer tudo", Icons.Rounded.TravelExplore, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, true) }
+            OutlinedTextField(name, { name = it }, label = { Text("Filtrar por nome") }, placeholder = { Text("ex.: Aline Faria") }, singleLine = true,
+                enabled = !busy, leadingIcon = { Icon(Icons.Rounded.Search, null) }, shape = MaterialTheme.shapes.medium,
+                trailingIcon = { if (name.isNotEmpty()) IconButton({ name = "" }, enabled = !busy) { Icon(Icons.Rounded.Close, "Limpar filtro") } },
+                modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+            Text("Se preencher, só entra na fila (e só baixa) o que bater com o nome no título, arquivo, alt, texto do link ou texto ao redor. Sem diferenciar maiúsculas ou acentos.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        item {
+            BigButton("Varrer tudo", Icons.Rounded.TravelExplore, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, true, name) }
             Spacer(Modifier.height(6.dp))
             Text("Limite: até ${Prefs.maxPages} páginas, profundidade ${Prefs.depth}, só o mesmo domínio (mude em Configurações).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
