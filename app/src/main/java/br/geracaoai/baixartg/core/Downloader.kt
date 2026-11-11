@@ -409,7 +409,41 @@ object Downloader {
         }
     }
 
-    /** Tamanho do arquivo antes de baixar (HEAD, ou GET Range 0-0). -1 = desconhecido (HLS/servidor/sem cabeçalho). */
+    /** Busca no YouTube (ytsearch / busca do canal) via backend. */
+    suspend fun search(server: String, pageUrl: String, query: String): List<Found> {
+        lastProbeError = null
+        val body = session(JSONObject().put("url", pageUrl).put("query", query), pageUrl).toString().toRequestBody("application/json".toMediaType())
+        return try {
+            Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/search").post(body).build()).await().use { r ->
+                val raw = r.body?.string() ?: ""
+                val j = try { JSONObject(raw) } catch (_: Exception) {
+                    lastProbeError = if (r.code == 404) "O servidor ainda não tem a busca por nome (atualize o baixar-video)." else "Servidor yt-dlp: resposta inválida (HTTP ${r.code})"
+                    return emptyList()
+                }
+                if (!j.optBoolean("ok")) {
+                    lastProbeError = j.optString("error").ifBlank { "Busca no YouTube falhou (HTTP ${r.code})" }.take(300)
+                    return emptyList()
+                }
+                val arr = j.optJSONArray("results") ?: return emptyList()
+                val out = ArrayList<Found>()
+                for (i in 0 until arr.length()) {
+                    val e = arr.optJSONObject(i) ?: continue
+                    val u = e.optString("url")
+                    if (u.isBlank()) continue
+                    val title = e.optString("title", u)
+                    val thumb = e.optString("thumbnail").ifBlank { SiteSearch.youtubeThumb(u) }
+                    out += Found(u, u, title, Kind.SERVER, thumb = thumb)
+                }
+                out
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            lastProbeError = "Não falei com o servidor de busca: ${e.message}".take(300)
+            emptyList()
+        }
+    }
+
+        /** Tamanho do arquivo antes de baixar (HEAD, ou GET Range 0-0). -1 = desconhecido (HLS/servidor/sem cabeçalho). */
     suspend fun sizeOf(f: Found): Long {
         if (f.kind != Kind.DIRECT || Bunkr.applies(f)) return -1
         val ref = f.ref ?: f.page

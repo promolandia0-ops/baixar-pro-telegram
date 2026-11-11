@@ -15,11 +15,11 @@ enum class Kind { DIRECT, HLS, SERVER, MEGA }
 
 /** ref = Referer a usar no download (ex.: página do player embutido); se null usa page.
  *  extra = texto ao redor (alt, título do link, figcaption, JSON-LD) para o filtro por nome. */
-data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null, val extra: String = "") {
+data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null, val extra: String = "", val thumb: String? = null) {
     val label get() = when (kind) { Kind.DIRECT -> "Arquivo direto"; Kind.HLS -> "Stream HLS (m3u8)"; Kind.SERVER -> "Via servidor (yt-dlp)"; Kind.MEGA -> "MEGA (descriptografado no celular)" }
 }
 
-data class CrawlOpts(val maxDepth: Int = 10, val maxPages: Int = 500, val probeServer: Boolean = false, val parallel: Int = 6)
+data class CrawlOpts(val maxDepth: Int = 10, val maxPages: Int = 500, val probeServer: Boolean = false, val parallel: Int = 6, val nameWords: List<String> = emptyList(), val nameQuery: String = "")
 
 data class CrawlProgress(val pagesDone: Int, val queued: Int, val found: Int, val current: String)
 
@@ -56,9 +56,9 @@ object Extract {
     fun isHls(u: String) = Regex("""\.m3u8(?:$|[?/])""", RegexOption.IGNORE_CASE).containsMatchIn(u)
     fun skipPage(u: String) = SKIP_EXT.containsMatchIn(u) || isVideoUrl(u)
 
-    data class PageResult(val videos: List<Found>, val links: List<String>, val title: String, val frames: List<String> = emptyList())
+    data class PageResult(val videos: List<Found>, val links: List<String>, val title: String, val frames: List<String> = emptyList(), val linkText: Map<String, String> = emptyMap(), val pageThumb: String? = null, val openSearch: String? = null)
 
-    private fun mk(u: String, page: String, title: String, ref: String? = null, extra: String = "") = Found(u, page, title, if (isHls(u)) Kind.HLS else Kind.DIRECT, ref, extra)
+    private fun mk(u: String, page: String, title: String, ref: String? = null, extra: String = "", thumb: String? = null) = Found(u, page, title, if (isHls(u)) Kind.HLS else Kind.DIRECT, ref, extra, thumb)
 
     private fun nearby(e: Element): String {
         val bits = ArrayList<String>()
@@ -95,12 +95,21 @@ object Extract {
         val server = LinkedHashSet<String>()
         val frames = LinkedHashSet<String>()
         val ctx = HashMap<String, String>()
-        fun addMedia(u: String?, text: String? = null) { val a = abs(pageUrl, u) ?: return; if (isVideoUrl(a)) { media += a; putCtx(ctx, a, text) } }
-        fun addServer(u: String?, text: String? = null) { val a = abs(pageUrl, u) ?: return; if (YTDLP_HOSTS.containsMatchIn(a)) { server += a; putCtx(ctx, a, text) } }
+        val thumbs = HashMap<String, String>()
+        val linkText = LinkedHashMap<String, String>()
+        fun addThumb(u: String?, t: String?) {
+            val a = u ?: return; val th = abs(pageUrl, t) ?: return
+            if (th.startsWith("http") && thumbs[a] == null) thumbs[a] = th
+        }
+        fun addMedia(u: String?, text: String? = null, thumb: String? = null) { val a = abs(pageUrl, u) ?: return; if (isVideoUrl(a)) { media += a; putCtx(ctx, a, text); addThumb(a, thumb) } }
+        fun addServer(u: String?, text: String? = null, thumb: String? = null) { val a = abs(pageUrl, u) ?: return; if (YTDLP_HOSTS.containsMatchIn(a)) { server += a; putCtx(ctx, a, text); addThumb(a, thumb) } }
+        val pageThumb = abs(pageUrl, doc.selectFirst("meta[property=og:image], meta[property=og:image:secure_url], meta[name=twitter:image]")?.attr("content"))
+        val openSearch = abs(pageUrl, doc.selectFirst("link[rel=search][type=application/opensearchdescription+xml], link[rel=search][href]")?.attr("href"))
 
         doc.select("video[src], video source[src], source[src], video[data-src], source[data-src], video[data-url], source[data-url]").forEach { e ->
+            val v = e.closest("video") ?: e
             val u = e.attr("src").ifBlank { e.attr("data-src") }.ifBlank { e.attr("data-url") }
-            addMedia(u, nearby(e.closest("video") ?: e))
+            addMedia(u, nearby(v), v.attr("poster").ifBlank { v.attr("data-poster") }.ifBlank { null })
         }
         doc.select("[data-video],[data-video-src],[data-stream],[data-file],[data-src][data-type*=video]").forEach { e ->
             addMedia(e.attr("data-video").ifBlank { e.attr("data-video-src") }.ifBlank { e.attr("data-stream") }.ifBlank { e.attr("data-file") }.ifBlank { e.attr("data-src") }, nearby(e))
@@ -109,7 +118,15 @@ object Extract {
             val u = e.attr("content").ifBlank { e.attr("href") }
             addMedia(u, title); addServer(u, title)
         }
-        doc.select("a[href]").forEach { e -> addMedia(e.attr("href"), nearby(e)); addServer(e.attr("href"), nearby(e)) }
+        doc.select("a[href]").forEach { e ->
+            val a = abs(pageUrl, e.attr("href"))
+            val txt = nearby(e)
+            if (a != null && !skipPage(a)) {
+                linkText[a] = (linkText[a]?.let { it + " " + txt } ?: txt).trim()
+            }
+            val img = e.selectFirst("img[src], img[data-src]")?.let { it.attr("src").ifBlank { it.attr("data-src") } }
+            addMedia(e.attr("href"), txt, img); addServer(e.attr("href"), txt, img)
+        }
 
         val raw = html.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/").replace("&amp;", "&")
         URL_IN_TEXT.findAll(raw).forEach { addMedia(it.value) }
@@ -120,6 +137,8 @@ object Extract {
         doc.select("script[type=application/ld+json]").forEach { s ->
             val body = s.data().replace("\\/", "/")
             LD_URL.findAll(body).forEach { addMedia(it.groupValues[1], title); addServer(it.groupValues[1], title) }
+            val ldThumb = Regex(""""thumbnailUrl"\s*:\s*"([^"]+)"""").find(body)?.groupValues?.get(1)
+            if (ldThumb != null) { media.forEach { addThumb(it, ldThumb) }; server.forEach { addThumb(it, ldThumb) } }
             Regex(""""(?:name|description|caption)"\s*:\s*"([^"]{2,200})"""").findAll(body).forEach { m ->
                 media.forEach { putCtx(ctx, it, m.groupValues[1]) }
                 server.forEach { putCtx(ctx, it, m.groupValues[1]) }
@@ -143,17 +162,18 @@ object Extract {
                 doc.select("a[href]").mapNotNull { abs(pageUrl, it.attr("href")) }.filter { !skipPage(it) }.distinct(), title)
         }
         val links = doc.select("a[href], link[rel=next]").mapNotNull { abs(pageUrl, it.attr("href")) }.filter { !skipPage(it) }.distinct()
+        fun thumbOf(u: String) = thumbs[u] ?: SiteSearch.youtubeThumb(u) ?: pageThumb
         val vids = ArrayList<Found>()
-        media.filterNot { it.contains("preview", true) && media.size > 1 }.ifEmpty { media.toList() }.forEach { vids += mk(it, pageUrl, title, extra = ctx[it].orEmpty()) }
-        server.forEach { vids += Found(it, pageUrl, title, Kind.SERVER, extra = ctx[it].orEmpty()) }
-        return PageResult(vids, links, title, frames.take(8))
+        media.filterNot { it.contains("preview", true) && media.size > 1 }.ifEmpty { media.toList() }.forEach { vids += mk(it, pageUrl, title, extra = ctx[it].orEmpty(), thumb = thumbOf(it)) }
+        server.forEach { vids += Found(it, pageUrl, title, Kind.SERVER, extra = ctx[it].orEmpty(), thumb = thumbOf(it)) }
+        return PageResult(vids, links, title, frames.take(8), linkText, pageThumb, openSearch)
     }
 
     /** Resultado de um iframe (player de outro site): vídeos herdam a página e o título de quem embutiu. */
     fun parseFrame(frameUrl: String, html: String, parentPage: String, parentTitle: String): List<Found> =
         parse(frameUrl, html).videos.map {
             if (it.kind == Kind.SERVER) it.copy(page = parentPage, title = parentTitle)
-            else Found(it.url, parentPage, parentTitle, it.kind, frameUrl, it.extra)
+            else Found(it.url, parentPage, parentTitle, it.kind, frameUrl, it.extra, it.thumb)
         }
 }
 
@@ -169,9 +189,12 @@ class Crawler(private val opts: CrawlOpts, private val probe: (suspend (String) 
         queue += startUrl to 0; seenPages += norm(startUrl)
         var done = 0; var found = 0
         fun emit(f: Found) { if (seenVideos.add(f.url.substringBefore('#'))) { found++; onFound(f) } }
-        if (Extract.YTDLP_HOSTS.containsMatchIn(startUrl)) emit(Found(startUrl, startUrl, startUrl, Kind.SERVER))
+        if (opts.nameWords.isEmpty() && Extract.YTDLP_HOSTS.containsMatchIn(startUrl)) emit(Found(startUrl, startUrl, startUrl, Kind.SERVER, thumb = SiteSearch.youtubeThumb(startUrl)))
         if (Extract.isVideoUrl(startUrl)) { emit(Found(startUrl, startUrl, startUrl.substringAfterLast('/'), if (Extract.isHls(startUrl)) Kind.HLS else Kind.DIRECT)); return@coroutineScope found }
         val par = opts.parallel.coerceIn(1, 12)
+        val words = opts.nameWords
+        val query = opts.nameQuery.ifBlank { words.joinToString(" ") }
+        var searchSeeded = false
         while (queue.isNotEmpty() && done < opts.maxPages) {
             coroutineContext.ensureActive()
             val batch = ArrayList<Pair<String, Int>>()
@@ -180,21 +203,43 @@ class Crawler(private val opts: CrawlOpts, private val probe: (suspend (String) 
             val pages = batch.map { (u, d) -> async { Triple(u, d, safeFetch(u)) } }.awaitAll()
             // iframes (players de outros sites) — um nível, em paralelo
             val frameJobs = ArrayList<Pair<Extract.PageResult, Pair<String, String>>>()
-            val parsed = pages.map { (u, d, html) -> done++; Triple(u, d, html?.let { Extract.parse(u, it) }) }
-            for ((u, _, r) in parsed) r?.frames?.forEach { f -> if (seenFrames.add(f)) frameJobs += r to (u to f) }
+            val parsed = pages.map { (u, d, html) -> done++; Triple(u, d, html?.let { Extract.parse(u, it) } to html) }
+            for ((u, _, pair) in parsed) pair.first?.frames?.forEach { f -> if (seenFrames.add(f)) frameJobs += pair.first!! to (u to f) }
             val frameRes = frameJobs.chunked(par).flatMap { ch -> ch.map { (r, uf) -> async { Triple(uf.first, r.title, uf.second) to safeFetch(uf.second) } }.awaitAll() }
-            for ((u, d, r) in parsed) {
+            for ((u, d, pair) in parsed) {
+                val r = pair.first; val html = pair.second
                 if (r == null) continue
                 val before = found
                 r.videos.forEach(::emit)
-                frameRes.filter { it.first.first == u }.forEach { (k, html) -> if (html != null) Extract.parseFrame(k.third, html, u, k.second).forEach(::emit) }
+                frameRes.filter { it.first.first == u }.forEach { (k, fhtml) -> if (fhtml != null) Extract.parseFrame(k.third, fhtml, u, k.second).forEach(::emit) }
                 // Fallback yt-dlp: na página inicial sempre; nas outras, se o ajuste estiver ligado.
                 if (found == before && probe != null && !Extract.YTDLP_HOSTS.containsMatchIn(u) && (opts.probeServer || u == startUrl)) {
-                    try { probe.invoke(u)?.let { t -> emit(Found(u, u, t, Kind.SERVER)) } } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e }
+                    try { probe.invoke(u)?.let { t -> emit(Found(u, u, t, Kind.SERVER, thumb = r.pageThumb)) } } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e }
                 }
-                if (d < opts.maxDepth) for (l in r.links) {
-                    if (Extract.host(l) != root) continue
-                    if (seenPages.add(norm(l))) queue += l to d + 1
+                // Busca do próprio site (form / OpenSearch / padrões) a partir da página inicial.
+                if (!searchSeeded && words.isNotEmpty() && u == startUrl && html != null) {
+                    searchSeeded = true
+                    val foundSearch = ArrayList<String>()
+                    foundSearch += SiteSearch.discover(u, html, query)
+                    r.openSearch?.let { osd ->
+                        try { safeFetch(osd)?.let { xml -> SiteSearch.fromOpenSearch(xml, query, u)?.let { foundSearch += it } } } catch (_: Exception) {}
+                    }
+                    for (s in foundSearch.distinct().asReversed()) {
+                        if (Extract.host(s) == root && seenPages.add(norm(s))) queue.addFirst(s to 0)
+                    }
+                }
+                if (d < opts.maxDepth) {
+                    val match = ArrayList<Pair<String, Int>>()
+                    for (l in r.links) {
+                        if (Extract.host(l) != root) continue
+                        if (!seenPages.add(norm(l))) continue
+                        if (words.isEmpty()) { match += l to d + 1; continue }
+                        val txt = (r.linkText[l] ?: "") + " " + r.title + " " + l
+                        if (SiteSearch.isSearchUrl(l) || SiteSearch.matches(txt, words)) match += l to d + 1
+                        // páginas sem relação com o nome são puladas
+                    }
+                    // prioriza os que batem com o nome (entram no começo da fila)
+                    for (i in match.indices.reversed()) queue.addFirst(match[i])
                 }
             }
             onProgress(CrawlProgress(done, queue.size, found, batch.last().first))

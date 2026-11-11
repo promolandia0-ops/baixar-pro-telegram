@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.6.3
+- Varrer tudo: campo do site + campo Nome + botão Buscar. A busca usa a pesquisa do próprio site (form/OpenSearch ou `/search?q=`, `/?s=`), a busca do YouTube (canal ou ytsearch) pelo servidor, ou só segue links cujo texto/endereço batem com o nome.
+- A lista de resultados mostra miniatura e título; você escolhe os vídeos ou toca em “Baixar todos”. O download em 8 conexões continua igual.
+- “Varrer o site inteiro” segue disponível, sem o filtro de nome.
+
 ## 1.6.2
 - Varredura mais forte: `<video>`/`<source>`, `og:video`, JSON-LD, config de player em `<script>`, links diretos `.mp4`/`.m3u8`/`.webm`, iframes/embeds (um nível) e fallback no servidor yt-dlp quando a página não mostra o arquivo.
 - Se o servidor não consegue ler o link (YouTube pedindo login, X, etc.), a mensagem de erro aparece na tela — não só “Nenhum vídeo encontrado”.

@@ -25,6 +25,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -228,26 +229,40 @@ fun SiteTab(goQueue: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Handoff.site.value) { Handoff.site.value?.let { url = it; Handoff.site.value = null } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Varrer o site inteiro", "Abre todas as páginas do mesmo site ligadas a este link, encontra todos os vídeos e baixa tudo automaticamente.", Icons.Rounded.TravelExplore) }
+        item { Section("Buscar no site", "Cole o link do site e, se quiser, o nome de uma pessoa, canal ou título. A busca usa a pesquisa do próprio site (ou do YouTube) e só abre páginas relacionadas a esse nome.", Icons.Rounded.TravelExplore) }
         item { LinkField(url, { url = it }, !busy, label = "Link do site") }
         item {
-            OutlinedTextField(name, { name = it }, label = { Text("Filtrar por nome") }, placeholder = { Text("ex.: Aline Faria") }, singleLine = true,
+            OutlinedTextField(name, { name = it }, label = { Text("Nome") }, placeholder = { Text("ex.: nome da pessoa, canal ou título") }, singleLine = true,
                 enabled = !busy, leadingIcon = { Icon(Icons.Rounded.Search, null) }, shape = MaterialTheme.shapes.medium,
-                trailingIcon = { if (name.isNotEmpty()) IconButton({ name = "" }, enabled = !busy) { Icon(Icons.Rounded.Close, "Limpar filtro") } },
+                trailingIcon = { if (name.isNotEmpty()) IconButton({ name = "" }, enabled = !busy) { Icon(Icons.Rounded.Close, "Limpar") } },
                 modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(4.dp))
-            Text("Se preencher, só entra na fila (e só baixa) o que bater com o nome no título, arquivo, alt, texto do link ou texto ao redor. Sem diferenciar maiúsculas ou acentos.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("O app tenta a busca do site, ou a busca do YouTube, ou só segue links cujo texto/endereço batem com o nome. Sem diferenciar maiúsculas ou acentos.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         item {
-            BigButton("Varrer tudo", Icons.Rounded.TravelExplore, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, true, name) }
+            BigButton("Buscar", Icons.Rounded.Search, !busy && url.isNotBlank() && name.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, false, name) }
+            Spacer(Modifier.height(8.dp))
+            FilledTonalButton({ Jobs.startScan(listOf(url), Jobs.Mode.SITE, true, "") }, enabled = !busy && url.isNotBlank(), modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
+                Icon(Icons.Rounded.TravelExplore, null); Spacer(Modifier.width(8.dp)); Text("Varrer o site inteiro")
+            }
             Spacer(Modifier.height(6.dp))
             Text("Limite: até ${Prefs.maxPages} páginas, profundidade ${Prefs.depth}, só o mesmo domínio (mude em Configurações).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (mode == Jobs.Mode.SITE) {
             if (phase == Phase.CRAWLING) item { ScanProgress() }
             if (status.isNotBlank() && phase != Phase.CRAWLING) item { InfoCard(status) }
-            if (items.isNotEmpty() && phase != Phase.CRAWLING) item {
-                FilledTonalButton(goQueue, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Downloading, null); Spacer(Modifier.width(8.dp)); Text("Ver ${items.size} vídeos na Fila") }
+            if (items.isNotEmpty() && phase != Phase.CRAWLING) {
+                item {
+                    val sel = items.count { it.sel && it.st != St.DONE }
+                    BigButton(if (sel == 0) "Tudo enviado ✓" else "Baixar todos ($sel)", Icons.AutoMirrored.Rounded.Send, sel > 0 && phase == Phase.LIST) {
+                        Jobs.selectAll(true); Jobs.startTransfer(); goQueue()
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    FilledTonalButton(goQueue, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Downloading, null); Spacer(Modifier.width(8.dp)); Text("Ver na Fila") }
+                    Spacer(Modifier.height(8.dp))
+                }
+                items(items.take(400), key = { it.id }) { it -> ItemRow(it, phase == Phase.LIST || phase == Phase.IDLE) }
+                if (items.size > 400) item { Text("Mostrando 400 de ${items.size}. Abra a Fila para o restante.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
             }
         }
     }
@@ -382,6 +397,7 @@ fun ItemRow(it: Item, editable: Boolean) {
     Surface(color = cs.surfaceContainerLow, shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.clickable(enabled = editable) { Jobs.toggle(it.id) }.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(it.sel, { _ -> Jobs.toggle(it.id) }, enabled = editable)
+            Thumb(it.f.thumb, Modifier.padding(end = 8.dp).size(72.dp).clip(MaterialTheme.shapes.small))
             Column(Modifier.weight(1f)) {
                 Text(it.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
                 Text(it.f.url, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)

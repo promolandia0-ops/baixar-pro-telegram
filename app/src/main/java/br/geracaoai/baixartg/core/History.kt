@@ -18,12 +18,12 @@ object History {
 
     private fun parse(l: String): HistEntry? = try {
         val j = JSONObject(l)
-        HistEntry(Found(j.getString("u"), j.getString("p"), j.optString("t"), Kind.valueOf(j.optString("k", "DIRECT")), j.optString("r").ifBlank { null }), j.optLong("ts"), j.optLong("s", -1))
+        HistEntry(Found(j.getString("u"), j.getString("p"), j.optString("t"), Kind.valueOf(j.optString("k", "DIRECT")), j.optString("r").ifBlank { null }, thumb = j.optString("th").ifBlank { null }), j.optLong("ts"), j.optLong("s", -1))
     } catch (_: Exception) { null }
 
     @Synchronized fun add(f: Found, size: Long) {
         val e = HistEntry(f, System.currentTimeMillis(), size)
-        val j = JSONObject().put("u", f.url).put("p", f.page).put("t", f.title).put("k", f.kind.name).put("r", f.ref ?: "").put("ts", e.time).put("s", size)
+        val j = JSONObject().put("u", f.url).put("p", f.page).put("t", f.title).put("k", f.kind.name).put("r", f.ref ?: "").put("th", f.thumb ?: "").put("ts", e.time).put("s", size)
         try { file?.appendText(j.toString() + "\n") } catch (_: Exception) {}
         list.value = listOf(e) + list.value
     }

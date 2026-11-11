@@ -66,18 +66,28 @@ object Jobs {
         WorkService.start(app)
         job = scope.launch {
             val server = Prefs.server
-            val opts = if (m == Mode.SITE) CrawlOpts(Prefs.depth.coerceIn(0, 20), Prefs.maxPages.coerceIn(1, 5000), Prefs.probe, 6) else CrawlOpts(0, 1, false, 6)
+            val words = NameFilter.words(name)
+            val opts = if (m == Mode.SITE) CrawlOpts(Prefs.depth.coerceIn(0, 20), Prefs.maxPages.coerceIn(1, 5000), Prefs.probe, 6, words, name) else CrawlOpts(0, 1, false, 6, words, name)
             val buf = ArrayList<Item>(); var n = 0; var lastFlush = 0L; var pagesBefore = 0
             val seen = HashSet<String>()
             fun flush() { if (buf.isNotEmpty()) { val add = buf.toList(); buf.clear(); items.update { it + add } } }
             var stopped = false
             val errors = ArrayList<String>()
             Downloader.lastProbeError = null
-            val words = NameFilter.words(name)
             var skipped = 0
             fun keep(f: Found): Boolean { if (words.isEmpty() || NameFilter.matches(f, words)) return true; skipped++; return false }
             try {
                 for (u in urls) {
+                    if (words.isNotEmpty() && SiteSearch.isYouTube(u)) {
+                        crawl.value = crawl.value.copy(current = u)
+                        try {
+                            val found = Downloader.search(server, u, name)
+                            if (found.isEmpty()) errors += (Downloader.lastProbeError ?: "Nenhum vídeo do YouTube com esse nome.")
+                            found.forEach { f -> if (keep(f) && seen.add(f.url.substringBefore('#'))) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s) } }
+                        } catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { errors += e.message ?: "Erro na busca do YouTube" }
+                        pagesBefore++; flush(); continue
+                    }
                     if (Mega.looksLikeMega(u) || Mega.isMegaLink(u)) { // MEGA: não varrer a página (a chave # se perderia)
                         crawl.value = crawl.value.copy(current = u)
                         try {
