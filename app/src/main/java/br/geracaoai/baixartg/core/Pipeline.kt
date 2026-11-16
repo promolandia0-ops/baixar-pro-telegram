@@ -143,7 +143,7 @@ object Pipeline {
         } catch (_: Exception) {}
     }
 
-    private fun normPage(u: String) = u.substringBefore('#').substringBefore('?').lowercase().replace("://www.", "://").replace("://m.", "://").trimEnd('/')
+    private fun normPage(u: String) = PageKey.norm(u)
 
     // ---------------- API ----------------
     data class In(val page: String, val title: String, val extra: String, val keys: List<String>, val f: Found?, val photo: Boolean = false)

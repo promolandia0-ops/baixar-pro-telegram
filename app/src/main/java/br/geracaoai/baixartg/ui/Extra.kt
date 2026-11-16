@@ -45,7 +45,7 @@ private val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.
  * (na 1.8.9 o relógio redesenhava a tela inteira do navegador a cada segundo, contando a lista toda duas vezes).
  */
 @Composable
-private fun DetectFab(modifier: Modifier, onOpen: () -> Unit) {
+private fun DetectFab(modifier: Modifier, show: Boolean, onOpen: () -> Unit) {
     val mode by BrowserDetect.mode
     val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
     val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
@@ -59,20 +59,15 @@ private fun DetectFab(modifier: Modifier, onOpen: () -> Unit) {
     val working = (if (mode == 1) 0 else pendingN) + (if (mode != 0) photoBusy else 0)
     // "Procurando" tem prazo: sem nada novo em 25 s, diz que não há nada novo
     val searching = detected == 0 && phN == 0 && working > 0 && (pageAt == 0L || now - pageAt < 25_000)
-    val what = when (mode) { 1 -> "foto"; 2 -> "vídeo ou foto"; else -> "vídeo" }
-    if (detected > 0 || working > 0 || phN > 0 || already > 0) Box(modifier, contentAlignment = Alignment.BottomEnd) {
-        val ctx = androidx.compose.ui.platform.LocalContext.current
-        ExtendedFloatingActionButton(onClick = {
-            if (detected > 0 || phN > 0) onOpen()
-            else {   // nada achado: toque copia o diagnóstico (motivo de cada foto descartada, páginas ocultas, tempos)
-                ctx.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", BrowserDiag.report()))
-                android.widget.Toast.makeText(ctx, "Diagnóstico do navegador copiado. Cole no chat.", android.widget.Toast.LENGTH_SHORT).show()
-            }
-        },
+    val none = when (mode) { 1 -> "Nenhuma foto nova"; 2 -> "Nenhum vídeo ou foto novo"; else -> "Nenhum vídeo novo" }
+    // sempre visível numa página aberta e o toque SEMPRE abre o painel (modo Vídeos/Fotos, marcar, baixar).
+    // Antes: com nada achado o toque copiava o diagnóstico e não dava pra trocar de modo.
+    if (show || detected > 0 || working > 0 || phN > 0 || already > 0) Box(modifier, contentAlignment = Alignment.BottomEnd) {
+        ExtendedFloatingActionButton(onClick = onOpen,
             icon = { if (searching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.VideoLibrary, null) },
             text = { Text(if (detected > 0) (if (BrowserDetect.term.value.isNotBlank()) "$marked de $detected marcados" else "$detected vídeos") + (if (pendingN > 0) " (+$pendingN…)" else "") + (if (mode == 2 && phN > 0) " • $phN fotos" else "")
                 else if (phN > 0) "$phN fotos" + (if (photoBusy > 0) " (+…)" else "") else if (searching) (if (mode == 1) "Procurando fotos…" else "Procurando vídeos…")
-                else "Nenhum $what novo nesta página" + (if (already > 0) " • $already já na fila/enviados" else "")) })
+                else "$none nesta página" + (if (already > 0 && mode != 1) " • $already já na fila/enviados" else "")) })
     }
 }
 
@@ -125,7 +120,8 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         if (collectState.busy && now - collectState.lastAt < 10_000) return@Runnable
         collectState.busy = true; collectState.lastAt = now
         // só o que mudou desde a última vez (nada, se a página não mudou)
-        v.evaluateJavascript(JsScripts.COLLECT_INC) { raw ->
+        val full = BrowserDetect.fullCollect.also { if (it) BrowserDetect.fullCollect = false }
+        v.evaluateJavascript(if (full) JsScripts.COLLECT else JsScripts.COLLECT_INC) { raw ->
             BrowserDiag.timed(System.currentTimeMillis() - now)
             collectScope.launch {
                 val c = JsScripts.parseCollected(raw)
@@ -232,7 +228,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
             web = this
             if (address.length > 8) loadUrl(address)
         } }, modifier = Modifier.fillMaxSize().padding(pad))
-        DetectFab(Modifier.fillMaxSize().padding(pad).padding(16.dp)) { sheet = true }
+        DetectFab(Modifier.fillMaxSize().padding(pad).padding(16.dp), current.startsWith("http")) { sheet = true }
     }
     if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }) { term ->
         val v = web; val page = v?.url

@@ -113,10 +113,12 @@ object MediaIdentity {
 
     fun keys(f: Found): List<String> {
         val out = LinkedHashSet<String>()
+        // foto identificada só pela query: a query entra na chave (só fotos; vídeos iguais a antes)
+        val pq = if (f.kind == Kind.PHOTO) PageKey.idQuery(f.url) else ""
         val media = canonicalMedia(f.url)
-        if (media.isNotBlank()) out += "m:$media"
+        if (media.isNotBlank()) out += "m:$media$pq"
         val page = canonicalPage(f.page)
-        val stem = fileStem(f.url)
+        val stem = fileStem(f.url) + pq
         if (page.isNotBlank() && usefulStem(stem)) out += "ps:$page|$stem"
         if (usefulStem(stem) && stem.length >= 8) out += "s:$stem"
         if (Extract.isHls(f.url) || Extract.isDash(f.url)) {

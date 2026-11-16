@@ -78,8 +78,12 @@ object Sent {
     /** Chaves que identificam um item da lista. */
     fun keysOf(f: Found): List<String> {
         val k = ArrayList<String>()
-        k += "v:" + norm(f.url)
-        k += "c:" + MediaIdentity.canonicalMedia(f.url)
+        // foto cujo endereço só se diferencia pela query (ex.: ".../images?q=ID", "/photo.php?id=N"): a query entra na chave.
+        // Antes todas essas fotos tinham a MESMA chave e, depois de enviar uma, as outras eram puladas como "já enviada".
+        // Só fotos; vídeos continuam exatamente com as mesmas chaves.
+        val pq = photoQuery(f)
+        k += "v:" + norm(f.url) + pq
+        k += "c:" + MediaIdentity.canonicalMedia(f.url) + pq
         val stem = MediaIdentity.fileStem(f.url)
         if (MediaIdentity.usefulStem(stem) && stem.length >= 8) k += "s:" + stem
         k += bunkrKeys(f.url)
@@ -91,8 +95,10 @@ object Sent {
     fun isSent(f: Found) = keysOf(f).any { it in set }
 
     /** Mesmo vídeo já enviado, mesmo em outra qualidade ou com assinatura de CDN diferente. */
+    private fun photoQuery(f: Found) = if (f.kind == Kind.PHOTO) PageKey.idQuery(f.url) else ""
     fun hasCanonical(f: Found): Boolean {
         if (isSent(f)) return true
+        if (photoQuery(f).isNotEmpty()) return false
         val media = MediaIdentity.canonicalMedia(f.url)
         val stem = MediaIdentity.fileStem(f.url)
         if (media.isBlank()) return false

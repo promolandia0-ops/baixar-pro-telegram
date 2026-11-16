@@ -29,16 +29,18 @@ object BrowserDiag {
     @Volatile var lastImgs = -1; @Volatile var collectMs = 0L; @Volatile var collectMaxMs = 0L; @Volatile var collects = 0
     fun inc(k: String, n: Int = 1) { counters.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
+    /** Página nova: contagens recomeçam (antes somavam todas as páginas e confundiam). */
+    fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
     fun timed(ms: Long) { collects++; collectMs = ms; if (ms > collectMaxMs) collectMaxMs = ms }
     fun report(): String = buildString {
-        appendLine("— navegador —")
+        appendLine("— navegador (página atual) —")
         appendLine("modo: ${listOf("só vídeos", "só fotos", "vídeos e fotos").getOrElse(BrowserDetect.mode.intValue) { "?" }}  nome: ${if (BrowserDetect.term.value.isBlank()) "-" else "sim"}")
         appendLine("lista: ${BrowserDetect.list.size} vídeos, ${BrowserDetect.photos.size} fotos, carregando=${BrowserDetect.pending.intValue}, já na fila/enviados nesta página=${BrowserDetect.alreadyHere.intValue}")
         appendLine("páginas ocultas vivas: ${br.geracaoai.baixartg.core.JsRender.alive.get()} (fila: ${br.geracaoai.baixartg.core.JsRender.aliveQueue.get()})")
         appendLine("coleta: ${collects}× última=${collectMs}ms pior=${collectMaxMs}ms  <img> na página=$lastImgs")
         if (counters.isNotEmpty()) appendLine("contadores: " + counters.entries.sortedBy { it.key }.joinToString("; ") { "${it.key}×${it.value.get()}" })
         if (photoRejects.isNotEmpty()) appendLine("fotos descartadas: " + photoRejects.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
-        if (br.geracaoai.baixartg.core.Photos.lastProbeFail.isNotBlank()) appendLine("última falha ao medir foto: ${br.geracaoai.baixartg.core.Photos.lastProbeFail}")
+        if (br.geracaoai.baixartg.core.BrowserProbeStats.fails.isNotEmpty()) appendLine("falhas ao medir foto: " + br.geracaoai.baixartg.core.BrowserProbeStats.fails.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
     }
 }
 
@@ -71,7 +73,9 @@ object BrowserDetect {
     val photosOn = mutableStateOf(Prefs.mediaMode != 0)   // "Só fotos" e "Vídeos e fotos" detectam fotos (inclusive ao reabrir o app)
     /** 0 Só vídeos, 1 Só fotos, 2 Vídeos e fotos. "Só fotos" só esconde os vídeos (continuam detectados/salvos). */
     val mode = mutableIntStateOf(Prefs.mediaMode)
-    fun setMode(m: Int) { Prefs.mediaMode = m; mode.intValue = m; setPhotosOn(m != 0) }
+    fun setMode(m: Int) { val was = mode.intValue; Prefs.mediaMode = m; mode.intValue = m; setPhotosOn(m != 0); if (was == 1 && m != 1) fullCollect = true }
+    /** Saiu de "Só fotos": a próxima coleta relê a página inteira (os vídeos não eram procurados nesse modo). */
+    @Volatile var fullCollect = false
     private val photoKeys = HashSet<String>()
     private val thumbKeys = java.util.Collections.synchronizedSet(HashSet<String>())
     /** Muda quando as fotos precisam ser relidas da página (nome trocado / fotos religadas). */
@@ -88,9 +92,8 @@ object BrowserDetect {
     }
     private fun videoTokens0(): HashSet<String> {
         val vt = HashSet<String>()
-        list.forEach { vt += Photos.idTokens(it.f.url); vt += Photos.idTokens(it.f.page) }
-        hidden.values.forEach { vt += Photos.idTokens(it.f.page) }
-        synchronized(cardPages) { cardPages.forEach { vt += Photos.idTokens(it) } }
+        // só vídeos de verdade (antes: toda página de card aberta, inclusive resultados de busca de imagens)
+        list.forEach { if (it.state == 0) { vt += Photos.idTokens(it.f.url); vt += Photos.idTokens(it.f.page) } }
         return vt
     }
     /** Foto passa no nome (mesma regra estrita dos vídeos: legenda/título/alt/título do post). Sem nome: passa. */
@@ -103,7 +106,7 @@ object BrowserDetect {
         val own = HashSet<String>().apply { (ownPages + page + browsing).forEach { addAll(Photos.idTokens(it)) } }
         val vt = videoTokens().let { v -> if (own.isEmpty()) v else v.filterTo(HashSet()) { it !in own } }
         for (p in ps) {
-            if (br.geracaoai.baixartg.web.AdBlock.isAdHost(Extract.host(p.url))) continue
+            if (br.geracaoai.baixartg.web.AdBlock.isAdHost(Extract.host(p.url))) { BrowserDiag.rej("anúncio"); continue }
             val k = Photos.key(p.url)
             if (k in photoKeys) continue
             if ((checkThumbs && k in thumbKeys) || Photos.sharesId(p.url, vt)) { BrowserDiag.rej("miniatura de vídeo"); continue }
@@ -111,7 +114,7 @@ object BrowserDetect {
             if (!photoMatches(f)) { BrowserDiag.rej("nome não bate"); continue }
             BrowserDiag.inc("fotos aceitas")   // com nome: só fotos cuja legenda/título bate (não grava a chave: volta se o nome mudar)
             photoKeys += k
-            if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k)) || Sent.isSent(f)) continue
+            if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k)) || Sent.isSent(f)) { BrowserDiag.rej("já enviada/na fila"); continue }
             photos += Det("ph:$k", f, sel = term.value.isNotBlank(), keys = listOf(k))
         }
     }
@@ -127,7 +130,6 @@ object BrowserDetect {
             val np = normPage(c.href)
             // Antes: todo link com imagem também vira "card de vídeo" no detector de vídeos, e aqui era pulado por isso
             // → nenhum post de foto era aberto (fotos = 0). Agora só pula se já virou um vídeo de verdade.
-            if (list.any { it.state == 0 && normPage(it.f.page) == np }) { BrowserDiag.rej("post: é vídeo"); continue }
             // abre o post na hora (antes esperava o detector de vídeo desistir dele: até 75 s por card, 3 por vez)
             if (!photoPosts.add(np)) continue
             BrowserDiag.inc("posts de foto achados")
@@ -137,7 +139,7 @@ object BrowserDetect {
                     // só HTML (sem página oculta: elas dividem o motor de páginas com o navegador visível e travavam a rolagem)
                     val ps = try { Photos.fromPost(c.href, c.text, null, deadlineMs = 30_000) } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
                     val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
-                    BrowserDiag.inc("posts abertos"); if (ps.isEmpty()) BrowserDiag.rej("post: sem foto grande (ou é vídeo)")
+                    BrowserDiag.inc("posts abertos"); if (ps.isEmpty()) BrowserDiag.rej("post: sem foto grande")
                     if (ps.isNotEmpty() && ok.isEmpty()) BrowserDiag.rej("post: nome não bate", ps.size)
                     if (ps.isNotEmpty() && ok.isEmpty()) photoPosts.remove(np)   // nome diferente: pode voltar se mudar a busca
                     if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false, ownPages = listOf(c.href, page)) }
@@ -152,19 +154,21 @@ object BrowserDetect {
         // foto aberta sozinha (endereço da própria imagem): herda o título/texto da página de onde você veio
         val ps0 = if (Extract.isPhotoUrl(page) && !Extract.isVideoUrl(page) && lastRefText.isNotBlank())
             ps00.map { it.copy(text = listOf(it.text, lastRefText).filter { t -> t.isNotBlank() }.joinToString(" ").take(500)) } else ps00
-        // tamanho desconhecido (lazy/placeholder): confere no arquivo de verdade antes de listar
-        // antes: os de tamanho desconhecido eram medidos de novo a cada coleta (a cada 2,5 s), até 60 seguidos — tempestade de pedidos
-        val unknown = ps0.filter { it.w <= 0 || it.h <= 0 }.filter { Photos.key(it.url) !in photoKeys && probing.add(it.url) }.take(24)
         BrowserDiag.inc("fotos candidatas", ps0.size)
-        if (unknown.isNotEmpty()) { busy(1); scope.launch { try {
+        // sem tamanho certo (lazy, link para a original, versão reduzida conhecida): mede o arquivo de verdade.
+        // Se não der pra medir, usa o tamanho da página; link para a original passa. Nada some sem motivo no diagnóstico.
+        // (antes: no máximo 24 por vez e o resto sumia sem motivo; falha ao medir = descartada)
+        val toMeasure = ps0.filter { (it.w <= 0 || it.h <= 0 || Photos.original(it.url) != null) && Photos.key(it.url) !in photoKeys && probing.add(it.url) }
+        if (toMeasure.isNotEmpty()) { busy(1); scope.launch { try {
             val ok = java.util.Collections.synchronizedList(ArrayList<Photos.Photo>())
-            unknown.chunked(4).forEach { grp -> grp.map { p -> async {
-                val wh = Photos.probeSize(p.url, page)
-                when { wh == null -> BrowserDiag.rej("não deu pra medir"); minOf(wh.first, wh.second) < Photos.MIN_SIDE -> BrowserDiag.rej("pequena (<500px)"); else -> ok += p.copy(w = wh.first, h = wh.second) }
-            } }.awaitAll() }
+            val g = Semaphore(6)
+            toMeasure.map { p -> async { g.withPermit {
+                val (m, why) = Photos.measure(p, page)
+                if (m == null) BrowserDiag.rej(why) else { ok += m; BrowserDiag.inc("aceitas: $why") }
+            } } }.awaitAll()
             if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(page, ok.toList(), checkThumbs = true, ownPages = listOf(lastRefPage)) }
         } finally { busy(-1) } } }
-        val ps = ps0.filter { it.w > 0 && it.h > 0 }
+        val ps = ps0.filter { it.w > 0 && it.h > 0 && Photos.original(it.url) == null }
         if (ps.isEmpty()) return
         addPhotos(page, ps, checkThumbs = true, ownPages = listOf(lastRefPage))
     }
@@ -191,7 +195,7 @@ object BrowserDetect {
         val todo = photos.filter { it.key in ks }
         if (todo.isEmpty()) { onMsg("Nada novo para enviar."); return }
         photos.removeAll { it.key in ks }
-        todo.forEach { d -> Sent.markQueued(d.keys + ("pg:" + Sent.norm(d.f.url))) }
+        todo.forEach { d -> Sent.markQueued(d.keys + ("pg:" + pgNorm(d.f.url))) }
         Pipeline.add(todo.map { d -> Pipeline.In(d.f.page, d.f.title, d.f.extra, d.keys, d.f, photo = true) })
         onMsg("Enviando ${todo.size} foto(s). Acompanhe na Fila.")
     }
@@ -204,7 +208,7 @@ object BrowserDetect {
     private fun busy(d: Int) { scope.launch(Dispatchers.Main) { photoBusy.intValue = (photoBusy.intValue + d).coerceAtLeast(0) } }
     /** Quando a página atual começou a abrir (para o "Procurando…" ter fim). */
     val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
-    fun newPage() { alreadyHere.intValue = 0; pageAt.longValue = System.currentTimeMillis() }
+    fun newPage() { alreadyHere.intValue = 0; pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(3)
     /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
@@ -323,7 +327,9 @@ object BrowserDetect {
     private val QUALITY_TOK = Regex("""(?i)(?:[_.\-/]|^)(?:\d{3,4}p\d{0,2}|[1-8]k|uhd|fhd|hd|sd|ld|hq|lq|low|high|medium|mobile|source|original|\d{3,4}x\d{3,4}|\d{3,5}k)(?=$|[_.\-/])""")
     private val GENERIC_STEM = setOf("index", "master", "playlist", "video", "media", "manifest", "stream", "chunklist", "file", "download", "embed", "play", "watch", "")
 
-    private fun normPage(u: String) = u.substringBefore('#').substringBefore('?').lowercase().replace("://www.", "://").replace("://m.", "://").trimEnd('/')
+    private fun normPage(u: String) = PageKey.norm(u)
+    /** Chave "pg:" da página: igual à de antes, mas com o parâmetro que identifica a página quando o caminho é genérico. */
+    private fun pgNorm(u: String) = Sent.norm(u) + PageKey.idQuery(u)
     private fun normMedia(u: String): String {
         val noQ = u.substringBefore('#').substringBefore('?').lowercase()
         val path = noQ.substringAfter("://").substringAfter('/')
@@ -400,11 +406,11 @@ object BrowserDetect {
     /** Todas as chaves de um item (página do card, URL do vídeo e variantes) para nunca reaparecer. */
     private fun allKeys(d: Det): List<String> =
         ((d.keys + dedupeKeys(d.f)).filter { k -> !k.startsWith("t:") &&
-            (!(k.startsWith("ip:") || k.startsWith("p:")) || k.substringAfter(':') in cardPages || d.f.kind == Kind.SERVER && k.substringAfter(':') == normPage(d.f.url)) } + Sent.keysOf(d.f) + ("pg:" + Sent.norm(d.f.url)) +
-            (if (d.f.page.isNotBlank() && d.key.startsWith("card:")) listOf("pg:" + Sent.norm(d.f.page)) else emptyList())).distinct()
+            (!(k.startsWith("ip:") || k.startsWith("p:")) || k.substringAfter(':') in cardPages || d.f.kind == Kind.SERVER && k.substringAfter(':') == normPage(d.f.url)) } + Sent.keysOf(d.f) + ("pg:" + pgNorm(d.f.url)) +
+            (if (d.f.page.isNotBlank() && d.key.startsWith("card:")) listOf("pg:" + pgNorm(d.f.page)) else emptyList())).distinct()
 
     private fun blocked(f: Found, ks: List<String>): Boolean {
-        val all = ks + Sent.keysOf(f) + ("pg:" + Sent.norm(f.url)) + (if (f.page != browsing) listOf("pg:" + Sent.norm(f.page)) else emptyList())
+        val all = ks + Sent.keysOf(f) + ("pg:" + pgNorm(f.url)) + (if (f.page != browsing) listOf("pg:" + pgNorm(f.page)) else emptyList())
         return Sent.isQueued(all) || Sent.anySent(all) || Jobs.isQueuedOrSent(f, ks.filter { it.startsWith("ip:") || it.startsWith("p:") })
     }
 
@@ -447,6 +453,7 @@ object BrowserDetect {
     /** Mídia interceptada pelo navegador (pedido de rede de vídeo). */
     fun intercepted(url: String, page: String, title: String) {
         if (page.isNotBlank()) browsing = page
+        if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
         val kind = Extract.mediaKindOf(url) ?: return
         if (Extract.isVideoThumb(url) || url.contains("preview", true) || TitleFix.isSubtitleUrl(url)) return
         val info = pageInfo[normPage(page)]
@@ -476,14 +483,17 @@ object BrowserDetect {
             }
         }
         val root = Extract.host(page)
-        for (v in c.videos) if (!v.startsWith("blob:")) intercepted(v, page, "")
+        if (mode.intValue != 1) for (v in c.videos) if (!v.startsWith("blob:")) intercepted(v, page, "")
         // cada link é examinado uma vez só (antes: todos os links da página, a cada coleta, na thread da tela)
         for (a in c.anchors) {
             val href = a.href.substringBefore('#')
             // (volta a examinar se o link ganhar miniatura/texto depois — lazy-load)
+            // miniatura de card de VÍDEO (link de página de vídeo ou com duração): só a imagem do próprio link (ou do pai).
+            // Antes todo link com imagem contava (resultados de busca de imagens viravam "miniatura de vídeo").
+            if (a.thumb.startsWith("http") && a.thumbLevel <= 1 && !(Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) &&
+                (Extract.looksLikeVideoPage(a.href) || DURATION.containsMatchIn(a.ctx))) thumbKeys += Photos.key(a.thumb)
+            if (mode.intValue == 1) continue   // "Só fotos": não abre card de vídeo nenhum (relido inteiro se o modo mudar)
             if (!processed.add(href + "|" + a.thumb.isNotBlank() + "|" + a.ctx.length + "|" + a.nav)) continue
-            // miniatura de card: só a imagem do próprio link (ou do pai); link que aponta para a foto grande não é miniatura
-            if (a.thumb.startsWith("http") && a.thumbLevel <= 1 && !(Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href))) thumbKeys += Photos.key(a.thumb)
             if (a.nav) continue
             if (a.thumb.isBlank() && !Extract.looksLikeVideoPage(a.href) && !DURATION.containsMatchIn(a.ctx)) continue
             if (Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) continue
@@ -565,7 +575,7 @@ object BrowserDetect {
         if (!Extract.isVideoUrl(card)) {
             val pk = listOf("ip:" + normPage(card), "p:" + normPage(card))
             // só consultas rápidas aqui (thread da tela); a conferência completa roda fora dela, no placeholder
-            val skip = try { val all = pk + ("pg:" + Sent.norm(card)); Sent.isQueued(all) || Sent.anySent(all) } catch (_: Exception) { false }
+            val skip = try { val all = pk + ("pg:" + pgNorm(card)); Sent.isQueued(all) || Sent.anySent(all) } catch (_: Exception) { false }
             if (skip) {
                 val k = "card:" + normPage(card)
                 synchronized(seenCards) { pk.forEach { if (!keys.containsKey(it)) keys[it] = "x:$k" } }
@@ -682,7 +692,8 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                 val ph = BrowserDetect.photos
                 val phChecked = ph.filter { it.sel }
                 Text("${phChecked.size} de ${ph.size} fotos marcadas", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 6.dp))
-                if (ph.isEmpty()) Text("Role a página: as fotos grandes postadas (não capas de vídeo) aparecem aqui.", style = MaterialTheme.typography.bodySmall)
+                val busyPh by BrowserDetect.photoBusy
+                if (ph.isEmpty()) Text(if (busyPh > 0) "Conferindo as fotos desta página…" else "Nenhuma foto grande (500 px ou mais) nesta página ainda. Role a página ou toque numa foto para abrir a original.", style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton({ BrowserDetect.setAllPhotos(true) }, Modifier.weight(1f), enabled = phChecked.size < ph.size) { Text("Marcar todos", maxLines = 1) }
                     OutlinedButton({ BrowserDetect.setAllPhotos(false) }, Modifier.weight(1f), enabled = phChecked.isNotEmpty()) { Text("Desmarcar todos", maxLines = 1) }
@@ -699,8 +710,17 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     }
                 }
             }
-            Spacer(Modifier.height(8.dp))
-            DiagButton(always = true)
+            // diagnóstico: link pequeno e separado no fim do painel (nunca no lugar das opções)
+            Spacer(Modifier.height(20.dp))
+            HorizontalDivider()
+            val ctx = androidx.compose.ui.platform.LocalContext.current
+            TextButton({
+                val rep = listOf(Jobs.diagReport.value, BrowserDiag.report()).filter { it.isNotBlank() }.joinToString("\n")
+                ctx.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", rep))
+                android.widget.Toast.makeText(ctx, "Diagnóstico copiado (sem links). Cole no chat.", android.widget.Toast.LENGTH_SHORT).show()
+            }, Modifier.align(Alignment.CenterHorizontally), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {
+                Text("Copiar diagnóstico (para suporte)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
             Spacer(Modifier.height(24.dp))
         }
     }
