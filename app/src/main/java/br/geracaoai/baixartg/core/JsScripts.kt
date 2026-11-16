@@ -1,0 +1,131 @@
+package br.geracaoai.baixartg.core
+
+import org.json.JSONObject
+import org.json.JSONTokener
+
+/** Scripts do WebView oculto (também usados pelo harness de teste no Chrome headless). Sem dependência de Android. */
+object JsScripts {
+    /** Um passo de rolagem: desce até o fim, clica em "carregar mais", devolve "altura:links". */
+    const val SCROLL_STEP = """(function(){
+      try{
+        var h=Math.max(document.body?document.body.scrollHeight:0,document.documentElement.scrollHeight);
+        window.scrollTo(0,h);
+        var se=document.scrollingElement; if(se) se.scrollTop=se.scrollHeight;
+        var re=/^(load more|show more|more videos|ver mais|carregar mais|mostrar mais|mais v[ií]deos|mais resultados|see more|view more|plus de vid[ée]os|afficher plus)$/i;
+        var n=0;
+        document.querySelectorAll('button,a[role=button],a.load-more,.load-more,[class*=load-more],[class*=loadmore],[class*=show-more]').forEach(function(b){
+          if(n>2) return; var t=(b.innerText||b.textContent||'').trim();
+          if(re.test(t)||/load-?more|show-?more/i.test(b.className||'')){ try{b.click();n++}catch(e){} }
+        });
+        return h+':'+document.getElementsByTagName('a').length;
+      }catch(e){return '0:0'}
+    })()"""
+
+    /** Coleta anchors/vídeos do DOM renderizado, inclusive dentro de shadow DOM (web components). */
+    const val COLLECT = """(function(){
+      var out={t:document.title||'',ch:false,a:[],v:[],u:location.href,pt:'',pd:'',nx:''};
+      try{
+        var nl=document.querySelector('link[rel=next],a[rel=next],a[rel~=next]');
+        if(nl)out.nx=nl.href||'';
+        if(!out.nx){var re=/^(pr[oó]xim[ao]|next|seguinte|mais|›|»|>|>>|next page|pr[oó]xima p[aá]gina)$/i;
+          var as=document.querySelectorAll('a[href]');for(var i=0;i<as.length;i++){var t=(as[i].innerText||as[i].getAttribute('aria-label')||'').trim();if(t.length<20&&re.test(t)){out.nx=as[i].href;break}}}
+      }catch(e){}
+      try{
+        function mc(q){var m=document.querySelector(q);return m?(m.getAttribute('content')||m.textContent||'').trim():''}
+        var h1=document.querySelector('h1');
+        out.pt=[mc('meta[property="og:title"]'),mc('meta[name="twitter:title"]'),h1?(h1.innerText||'').trim():'',document.title||''].filter(function(x){return x&&x.length>1}).slice(0,4).join('\n');
+        var ch=[];document.querySelectorAll('[class*=channel],[class*=author],[class*=uploader],[itemprop=author],a[rel=author],[class*=teacher],[class*=professor],[class*=instructor]').forEach(function(e,i){if(i<3)ch.push((e.innerText||'').trim().slice(0,120))});
+        out.pd=[mc('meta[property="og:description"]'),mc('meta[name="description"]'),mc('meta[name="author"]')].concat(ch).join(' ').replace(/\s+/g,' ').slice(0,600);
+      }catch(e){}
+      try{
+        var b=(document.body?document.body.innerText:'')||'';
+        out.ch=/just a moment|attention required|checking your browser|verify you are human|um momento|verificando/i.test(document.title||'')
+          ||!!document.querySelector('#challenge-form,#cf-challenge-running,.cf-browser-verification,[name=cf-turnstile-response],#challenge-stage,iframe[src*="challenges.cloudflare.com"]');
+        var seen={},vseen={},cnt=0;
+        function txt(e){var c=[e.getAttribute('title')||'',e.getAttribute('aria-label')||'',(e.innerText||e.textContent||'').replace(/\s+/g,' ').trim()];var i=e.querySelector('img[alt]');if(i)c.push(i.getAttribute('alt')||'');var hd=e.querySelector('h1,h2,h3,h4,[class*=title]');if(hd)c.unshift((hd.innerText||hd.textContent||'').trim());return c.filter(function(x){return x&&x.trim().length>1}).join('\n').slice(0,400)}
+        function card(e){var p=e.closest?e.closest('article,li,figure,[class*=card],[class*=item],[class*=video],[class*=post],[class*=thumb]'):null;return p?(p.innerText||'').replace(/\s+/g,' ').trim().slice(0,300):''}
+        function inNav(e){var p=e,k=0;while(p&&k<12){var tn=(p.tagName||'').toLowerCase();if(tn=='nav'||tn=='header'||tn=='footer')return true;p=p.parentNode||p.host;k++}return false}
+        function thumb(e){var p=e,k=0;while(p&&k<4){if(p.querySelector){var i=p.querySelector('img,picture,video,[style*="background-image"]');if(i){var s=i.currentSrc||i.src||i.getAttribute('data-src')||'';return s||'1'}}p=p.parentElement;k++}return ''}
+        function walk(root,d){
+          if(!root||d>8||cnt>4000)return;
+          var as=root.querySelectorAll('a[href]');
+          for(var i=0;i<as.length&&cnt<4000;i++){var a=as[i];var h=a.href;if(!h||h.indexOf('http')!==0||seen[h])continue;seen[h]=1;cnt++;
+            out.a.push([h,txt(a),thumb(a),inNav(a)?1:0,card(a)]);}
+          root.querySelectorAll('video,video source,source[src]').forEach(function(v){if(v.closest&&v.closest('track'))return;var s=v.currentSrc||v.src||v.getAttribute('src')||'';if(s&&s.indexOf('http')===0&&!vseen[s]){vseen[s]=1;out.v.push(s)}});
+          var all=root.querySelectorAll('*');
+          for(var j=0;j<all.length;j++){if(all[j].shadowRoot)walk(all[j].shadowRoot,d+1)}
+        }
+        walk(document,0);
+      }catch(e){}
+      return JSON.stringify(out);
+    })()"""
+
+    data class Collected(
+        val title: String = "",
+        val challenge: Boolean = false,
+        val anchors: List<Anchor> = emptyList(),
+        val videos: List<String> = emptyList(),
+        val finalUrl: String = "",
+        val pageTitles: List<String> = emptyList(),
+        val pageText: String = "",
+        val next: String = "",
+    ) {
+        /** og:title / twitter:title / h1 / document.title — primeiro que não é rótulo de player. */
+        val bestPageTitle: String get() = TitleFix.pick(*pageTitles.map { TitleFix.stripSite(it) }.toTypedArray(), TitleFix.stripSite(title))
+    }
+    data class Anchor(val href: String, val text: String, val thumb: String, val nav: Boolean, val ctx: String = "") {
+        /** Título do card: primeiro trecho (title/heading/aria/texto/alt) que não é lixo. */
+        val bestTitle: String get() = TitleFix.pick(*text.split('\n').toTypedArray(), ctx.take(150))
+    }
+
+    /** Resultado do evaluateJavascript (string JSON dentro de string JSON) ou JSON puro. */
+    fun parseCollected(raw: String?): Collected? {
+        if (raw.isNullOrBlank() || raw == "null") return null
+        return try {
+            var v: Any? = JSONTokener(raw.trim()).nextValue()
+            if (v is String) v = JSONTokener(v).nextValue()
+            val o = v as? JSONObject ?: return null
+            val arr = o.optJSONArray("a")
+            val anchors = ArrayList<Anchor>()
+            if (arr != null) for (i in 0 until arr.length()) {
+                val x = arr.optJSONArray(i) ?: continue
+                anchors += Anchor(x.optString(0), x.optString(1), x.optString(2), x.optInt(3) == 1, x.optString(4))
+            }
+            val vs = o.optJSONArray("v")
+            val videos = ArrayList<String>()
+            if (vs != null) for (i in 0 until vs.length()) vs.optString(i).takeIf { it.isNotBlank() }?.let { videos += it }
+            Collected(o.optString("t"), o.optBoolean("ch"), anchors, videos, o.optString("u"),
+                o.optString("pt").split('\n').filter { it.isNotBlank() }, o.optString("pd"), o.optString("nx"))
+        } catch (_: Exception) { null }
+    }
+
+    private fun esc(s: String) = s.replace("&", "&amp;").replace("\"", "&quot;").replace("<", "&lt;").replace(">", "&gt;")
+
+    /** Cards sintéticos (com miniatura ou cara de página de vídeo, fora de menus) anexados ao HTML renderizado. */
+    fun cardsHtml(c: Collected): String {
+        val sb = StringBuilder("<div id=\"bpt-cards\" class=\"video-list\">")
+        var n = 0
+        for (a in c.anchors) {
+            if (a.nav) continue
+            val hasThumb = a.thumb.isNotBlank()
+            if (!hasThumb && !Extract.looksLikeVideoPage(a.href)) continue
+            if (Extract.isPhotoUrl(a.href) && !Extract.isVideoUrl(a.href)) continue
+            val img = if (hasThumb && a.thumb.startsWith("http")) "<img src=\"${esc(a.thumb)}\" alt=\"${esc(a.bestTitle)}\">" else "<img src=\"data:,\" alt=\"${esc(a.bestTitle)}\">"
+            sb.append("<div class=\"item\"><a href=\"").append(esc(a.href)).append("\">").append(img)
+                .append("<span class=\"title\">").append(esc(a.bestTitle)).append("</span></a></div>")
+            n++
+        }
+        for (v in c.videos) sb.append("<video src=\"").append(esc(v)).append("\"></video>")
+        return sb.append("</div>").toString()
+    }
+
+    fun synthCount(c: Collected): Int = c.anchors.count { !it.nav && (it.thumb.isNotBlank() || Extract.looksLikeVideoPage(it.href)) }
+
+    /** Marcadores de desafio anti-bot (Cloudflare etc.) no HTML estático. */
+    fun isChallengeHtml(html: String): Boolean {
+        val head = html.take(20_000)
+        return head.contains("challenge-platform", true) || head.contains("cf-chl", true) || head.contains("cf_chl_opt", true) ||
+            Regex("""<title>\s*(just a moment|attention required|um momento)""", RegexOption.IGNORE_CASE).containsMatchIn(head) ||
+            head.contains("ddos-guard", true) || head.contains("/cdn-cgi/challenge", true)
+    }
+}

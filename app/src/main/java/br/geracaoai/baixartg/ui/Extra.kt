@@ -9,6 +9,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -47,14 +48,46 @@ object Handoff { val page = mutableStateOf<String?>(null); val site = mutableSta
 @Composable
 fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Unit) {
     var web by remember { mutableStateOf<WebView?>(null) }
-    var address by remember { mutableStateOf(br.geracaoai.baixartg.Prefs.lastUrl.ifBlank { "https://" }) }
+    var address by remember { mutableStateOf(br.geracaoai.baixartg.Prefs.browserUrl.ifBlank { br.geracaoai.baixartg.Prefs.lastUrl }.ifBlank { "https://" }) }
     var current by remember { mutableStateOf("") }
     var progress by remember { mutableIntStateOf(0) }
     var canBack by remember { mutableStateOf(false) }; var canFwd by remember { mutableStateOf(false) }
     var ask by remember { mutableStateOf(false) }
     BackHandler { if (web?.canGoBack() == true) web?.goBack() else onClose() }
     fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }
-    DisposableEffect(Unit) { onDispose { CookieManager.getInstance().flush(); web?.destroy() } }
+    fun savePanel() { val v = BrowserDetect.list.toList(); val p = BrowserDetect.photos.toList(); val h = BrowserDetect.loadedHostSet()
+        kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { BrowserStore.savePanel(v, p, h) } }
+    DisposableEffect(Unit) {
+        BrowserDetect.reset(); BrowserDetect.warm()
+        BrowserDetect.restore(Extract.host(address))   // lista salva deste site volta como estava
+        onDispose { savePanel(); CookieManager.getInstance().flush(); web?.destroy() }
+    }
+    // grava a lista do painel no disco quando muda (sobrevive a fechar/atualizar o app)
+    LaunchedEffect(Unit) {
+        var sig = 0
+        while (true) {
+            kotlinx.coroutines.delay(4_000)
+            val n = BrowserDetect.list.fold(BrowserDetect.list.size) { a, d -> 31 * a + (d.key.hashCode() xor (if (d.sel) 1 else 0) xor (d.state shl 2) xor d.f.url.hashCode()) } + BrowserDetect.photos.size * 7
+            if (n != sig) { sig = n; savePanel() }
+        }
+    }
+    var showSites by remember { mutableStateOf(false) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    var sheet by remember { mutableStateOf(false) }
+    val detected = if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent }
+    val phN = BrowserDetect.photos.size
+    val marked = BrowserDetect.list.count { it.sel && !it.sent }
+    val pendingN by BrowserDetect.pending
+    val handler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    val collect = remember { Runnable {
+        val v = web ?: return@Runnable
+        val page = v.url ?: return@Runnable
+        if (!page.startsWith("http")) return@Runnable
+        v.evaluateJavascript(JsScripts.COLLECT) { raw -> JsScripts.parseCollected(raw)?.let { c -> BrowserDetect.onCollected(page, c) } }
+        if (BrowserDetect.photosOn.value) v.evaluateJavascript(Photos.JS) { raw -> BrowserDetect.onPhotos(page, Photos.parse(raw)) }
+    } }
+    fun scheduleCollect(delayMs: Long = 700) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs) }
+    LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_500); if (web != null) scheduleCollect(0) } }
     Scaffold(topBar = {
         Column {
             TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.Rounded.Close, "Fechar") } },
@@ -62,6 +95,9 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                     IconButton({ web?.goBack() }, enabled = canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
                     IconButton({ web?.goForward() }, enabled = canFwd) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
                     IconButton({ web?.reload() }) { Icon(Icons.Rounded.Refresh, "Recarregar") }
+                    IconButton({ BrowserStore.toggleFav(current, web?.title ?: "") }, enabled = current.startsWith("http")) {
+                        Icon(if (BrowserStore.isFav(current)) Icons.Rounded.Star else Icons.Rounded.StarBorder, "Favorito") }
+                    IconButton({ showSites = true }) { Icon(Icons.Rounded.History, "Recentes") }
                 }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
             OutlinedTextField(address, { address = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp), singleLine = true, shape = MaterialTheme.shapes.extraLarge,
                 leadingIcon = { Icon(if (current.startsWith("https")) Icons.Rounded.Lock else Icons.Rounded.Public, null) },
@@ -80,19 +116,83 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         AndroidView(factory = { c -> WebView(c).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.databaseEnabled = true
-            settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(false)
+            settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(true)
             settings.userAgentString = Net.userAgent
             CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             webViewClient = object : WebViewClient() {
-                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
-                override fun onPageFinished(v: WebView, url: String) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url) }
+                override fun shouldOverrideUrlLoading(v: WebView, request: android.webkit.WebResourceRequest): Boolean {
+                    if (!request.isForMainFrame) return false
+                    return br.geracaoai.baixartg.web.AdBlock.blockNavigation(request.url.toString(), v.url ?: current, request.hasGesture(), request.isRedirect)
+                }
+                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun onPageFinished(v: WebView, url: String) {
+                    if (url.startsWith("http")) { br.geracaoai.baixartg.Prefs.browserUrl = url; BrowserStore.visit(url, v.title ?: ""); BrowserDetect.restore(Extract.host(url)) }
+                    current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; scheduleCollect(400) }
+                override fun shouldInterceptRequest(v: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
+                    val u = request.url?.toString().orEmpty()
+                    if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, current, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
+                    if (u.startsWith("http") && Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u))) {
+                        val pg = current; BrowserDetect.intercepted(u, pg, "")
+                    }
+                    return super.shouldInterceptRequest(v, request)
+                }
                 override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
             }
-            webChromeClient = object : WebChromeClient() { override fun onProgressChanged(v: WebView, p: Int) { progress = p } }
+            settings.setSupportMultipleWindows(true); settings.javaScriptCanOpenWindowsAutomatically = false
+            webChromeClient = object : WebChromeClient() {
+                override fun onProgressChanged(v: WebView, p: Int) { progress = p; if (p in 30..90 && br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { } }
+                /** target=_blank / window.open após toque: abre na MESMA aba. Sem toque do usuário: pop-up bloqueado. */
+                override fun onCreateWindow(view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: android.os.Message?): Boolean {
+                    if (!isUserGesture && br.geracaoai.baixartg.web.AdBlock.enabled) return false
+                    val href = view.hitTestResult?.extra?.takeIf { it.startsWith("http", true) && view.hitTestResult?.type in setOf(WebView.HitTestResult.SRC_ANCHOR_TYPE, WebView.HitTestResult.SRC_IMAGE_ANCHOR_TYPE) }
+                    if (href != null) { view.loadUrl(href); return false }
+                    val tr = resultMsg?.obj as? WebView.WebViewTransport ?: return false
+                    val tmp = WebView(view.context)
+                    tmp.webViewClient = object : WebViewClient() {
+                        private var done = false
+                        fun take(u: String?) {
+                            if (done || u == null) return
+                            if (!u.startsWith("http", true)) return
+                            done = true; view.loadUrl(u); tmp.post { try { tmp.stopLoading(); tmp.destroy() } catch (_: Exception) {} }
+                        }
+                        override fun shouldOverrideUrlLoading(w: WebView, r: android.webkit.WebResourceRequest): Boolean { take(r.url?.toString()); return true }
+                        override fun onPageStarted(w: WebView, url: String?, favicon: Bitmap?) { take(url) }
+                    }
+                    tr.webView = tmp; resultMsg.sendToTarget()
+                    return true
+                }
+            }
+            setOnScrollChangeListener { _, _, _, _, _ -> scheduleCollect(600) }
             web = this
             if (address.length > 8) loadUrl(address)
         } }, modifier = Modifier.fillMaxSize().padding(pad))
+        if (detected > 0 || pendingN > 0 || phN > 0) Box(Modifier.fillMaxSize().padding(pad).padding(16.dp), contentAlignment = Alignment.BottomEnd) {
+            ExtendedFloatingActionButton(onClick = { if (detected > 0 || phN > 0) sheet = true },
+                icon = { if (detected == 0) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.VideoLibrary, null) },
+                text = { Text(if (detected > 0) (if (BrowserDetect.term.value.isNotBlank()) "$marked de $detected marcados" else "$detected vídeos") + (if (pendingN > 0) " (+$pendingN…)" else "") else if (phN > 0) "$phN fotos" else "Procurando vídeos…") })
+        }
     }
+    if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }) { term ->
+        val v = web; val page = v?.url
+        if (v != null && page != null && page.startsWith("http")) {
+            v.evaluateJavascript("(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()") { raw ->
+                val html = try { org.json.JSONTokener(raw ?: "").nextValue() as? String } catch (_: Exception) { null }
+                siteSearchUrl(page, html, term)?.let { u -> sheet = false; v.loadUrl(u) }
+            }
+        }
+    }
+    if (showSites) AlertDialog(onDismissRequest = { showSites = false }, icon = { Icon(Icons.Rounded.History, null) },
+        title = { Text("Recentes e favoritos") },
+        text = {
+            androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                if (BrowserStore.favorites.isNotEmpty()) item { Text("Favoritos", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(vertical = 6.dp)) }
+                items(BrowserStore.favorites.toList(), key = { "f" + it.url }) { s -> SiteRow(s, Icons.Rounded.Star, { showSites = false; address = s.url; web?.loadUrl(s.url) }, { BrowserStore.removeFav(s.url) }) }
+                item { Text("Recentes (segure para remover)", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(vertical = 6.dp)) }
+                if (BrowserStore.recents.isEmpty()) item { Text("Nenhum site visitado ainda.", style = MaterialTheme.typography.bodySmall) }
+                items(BrowserStore.recents.toList(), key = { "r" + it.url }) { s -> SiteRow(s, Icons.Rounded.History, { showSites = false; address = s.url; web?.loadUrl(s.url) }, { BrowserStore.removeRecent(s.url) }) }
+            }
+        },
+        confirmButton = { TextButton({ showSites = false }) { Text("Fechar") } })
     if (ask) AlertDialog(onDismissRequest = { ask = false }, icon = { Icon(Icons.Rounded.Download, null) },
         title = { Text("Usar esta página") }, text = { Text(current, maxLines = 3, overflow = TextOverflow.Ellipsis) },
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
@@ -210,4 +310,18 @@ fun MegaLogin(onDone: (Mega.Session) -> Unit) {
         Text("Login direto com a API oficial do MEGA. A senha só é usada para gerar a chave na hora e não é guardada; o app guarda só a sessão, criptografada no aparelho. Os arquivos são descriptografados no celular, em qualidade original.",
             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     } }
+}
+
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
+@Composable
+private fun SiteRow(s: BrowserStore.Site, icon: androidx.compose.ui.graphics.vector.ImageVector, onOpen: () -> Unit, onRemove: () -> Unit) {
+    var confirm by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().combinedClickable(onClick = onOpen, onLongClick = { confirm = true }).padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Icon(icon, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp))
+        Column(Modifier.weight(1f)) {
+            Text(s.title.ifBlank { Extract.host(s.url) }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+            Text(s.url, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        if (confirm) TextButton({ confirm = false; onRemove() }) { Text("Remover") }
+    }
 }

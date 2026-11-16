@@ -1,6 +1,7 @@
 package br.geracaoai.baixartg.tg
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import kotlinx.coroutines.*
 import org.drinkless.tdlib.TdApi
@@ -28,15 +29,30 @@ object Uploader {
     } catch (_: Throwable) { Info(0, 0, 0, null) }
 
     /** Envia para Mensagens Salvas. Cancelar a corrotina (Parar) aborta o envio no TDLib. */
-    suspend fun upload(file: File, caption: String, onProgress: (Float) -> Unit): TdApi.Message {
+    suspend fun upload(file: File, caption: String, asVideo: Boolean = true, onProgress: (Float) -> Unit): TdApi.Message {
         val chat = savedChat()
-        val isVideo = file.extension.lowercase() in setOf("mp4", "mov", "m4v")
+        val ext = file.extension.lowercase()
+        val isVideo = ext in setOf("mp4", "mov", "m4v")
+        val isPhoto = !asVideo && ext in setOf("jpg", "jpeg", "png", "webp") && file.length() in 1..(10L * 1024 * 1024)
+        if (asVideo && ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) {
+            throw IllegalStateException("O arquivo não é um vídeo (veio uma imagem (capa)).")
+        }
         val info = if (isVideo) withContext(Dispatchers.IO) { probe(file) } else Info(0, 0, 0, null)
-        val cap = TdApi.FormattedText(caption.take(1000), emptyArray())
+        // padrão: só a mídia, sem legenda (título/link) — a não ser que o usuário ligue "Enviar legenda"
+        val cap = TdApi.FormattedText(if (br.geracaoai.baixartg.Prefs.sendCaption) caption.take(1000) else "", emptyArray())
         val thumb = info.thumb?.let { t -> TdApi.InputThumbnail().apply { thumbnail = TdApi.InputFileLocal(t.absolutePath); width = 320; height = 320 } }
         val content: TdApi.InputMessageContent = if (isVideo && info.w > 0) TdApi.InputMessageVideo().apply {
             video = TdApi.InputVideo().apply { video = TdApi.InputFileLocal(file.absolutePath); thumbnail = thumb; duration = info.dur; width = info.w; height = info.h
             supportsStreaming = true }; this.caption = cap
+        } else if (isPhoto) {
+            val (w, h) = withContext(Dispatchers.IO) { photoSize(file) }
+            TdApi.InputMessagePhoto().apply {
+                photo = TdApi.InputPhoto().apply {
+                    photo = TdApi.InputFileLocal(file.absolutePath)
+                    width = w; height = h
+                }
+                this.caption = cap
+            }
         } else TdApi.InputMessageDocument().apply {
             document = TdApi.InputDocument().apply { document = TdApi.InputFileLocal(file.absolutePath); thumbnail = thumb }; this.caption = cap
         }
@@ -59,7 +75,14 @@ object Uploader {
 
     private fun fileOf(m: TdApi.Message): TdApi.File? = when (val c = m.content) {
         is TdApi.MessageVideo -> c.video.video
+        is TdApi.MessagePhoto -> c.photo.sizes.maxByOrNull { it.photo.expectedSize }?.photo
         is TdApi.MessageDocument -> c.document.document
         else -> null
     }
+
+    private fun photoSize(f: File): Pair<Int, Int> = try {
+        val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(f.absolutePath, opt)
+        (opt.outWidth.coerceAtLeast(0)) to (opt.outHeight.coerceAtLeast(0))
+    } catch (_: Throwable) { 0 to 0 }
 }

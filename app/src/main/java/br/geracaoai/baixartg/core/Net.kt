@@ -47,21 +47,31 @@ object Net {
         }
         return b.build()
     }
-    val http: OkHttpClient = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS).readTimeout(90, TimeUnit.SECONDS)
-        .followRedirects(true).followSslRedirects(true)
-        .dispatcher(okhttp3.Dispatcher().apply { maxRequests = 96; maxRequestsPerHost = 24 })
-        .connectionPool(okhttp3.ConnectionPool(32, 5, TimeUnit.MINUTES))
-        .addInterceptor { ch ->
-            ch.proceed(decorate(ch.request()))
-        }.addNetworkInterceptor { ch ->
-            val req = withCookies(ch.request())
-            val resp = ch.proceed(req)
-            // Cookies novos que o site manda voltam para a sessão do navegador
-            val sc = resp.headers("Set-Cookie")
-            if (sc.isNotEmpty() && req.header("Cookie") != null) cookies?.let { cs -> sc.forEach { try { cs.store(resp.request.url.toString(), it) } catch (_: Exception) {} } }
-            resp
-        }.build()
+    private fun newClient(connectS: Long, readS: Long, writeS: Long, callS: Long, maxReq: Int, maxHost: Int, pool: Int): OkHttpClient {
+        val b = OkHttpClient.Builder()
+            .connectTimeout(connectS, TimeUnit.SECONDS)
+            .readTimeout(readS, TimeUnit.SECONDS)
+            .writeTimeout(writeS, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .followRedirects(true).followSslRedirects(true)
+            .dispatcher(okhttp3.Dispatcher().apply { maxRequests = maxReq; maxRequestsPerHost = maxHost })
+            .connectionPool(okhttp3.ConnectionPool(pool, 5, TimeUnit.MINUTES))
+            .addInterceptor { ch -> ch.proceed(decorate(ch.request())) }
+            .addNetworkInterceptor { ch ->
+                val req = withCookies(ch.request())
+                val resp = ch.proceed(req)
+                val sc = resp.headers("Set-Cookie")
+                if (sc.isNotEmpty()) cookies?.let { cs -> sc.forEach { try { cs.store(resp.request.url.toString(), it) } catch (_: Exception) {} } }
+                resp
+            }
+        if (callS > 0) b.callTimeout(callS, TimeUnit.SECONDS)
+        return b.build()
+    }
+
+    /** Downloads, tamanhos, Telegram — timeouts folgados. */
+    val http: OkHttpClient = newClient(30, 90, 90, 0, 96, 24, 32)
+    /** Varredura e busca do site: timeouts curtos, muita paralelismo, HTTP/2 quando o site oferece. */
+    val fast: OkHttpClient = newClient(5, 8, 8, 12, 128, 32, 64)
     /** Cliente com timeout longo para o servidor (Render pode demorar para acordar / yt-dlp). */
     val slow: OkHttpClient = http.newBuilder().connectTimeout(90, TimeUnit.SECONDS).readTimeout(300, TimeUnit.SECONDS).build()
 }

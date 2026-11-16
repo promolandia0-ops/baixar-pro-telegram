@@ -13,11 +13,22 @@ import java.util.concurrent.ConcurrentHashMap
 object Sent {
     private val set: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private var file: File? = null
+    /** Vídeos que o usuário já mandou baixar no navegador (fila/enviando/enviados): nunca voltam a aparecer na lista. */
+    private val queued: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private var qfile: File? = null
 
-    fun init(dir: File) { file = File(dir, "sent_keys.txt"); load() }
-    private fun load() { set.clear(); file?.takeIf { it.exists() }?.forEachLine { if (it.isNotBlank()) set += it.trim() } }
+    fun init(dir: File) { file = File(dir, "sent_keys.txt"); qfile = File(dir, "queued_keys.txt"); load() }
+    private fun load() {
+        set.clear(); file?.takeIf { it.exists() }?.forEachLine { if (it.isNotBlank()) set += it.trim() }
+        queued.clear(); qfile?.takeIf { it.exists() }?.forEachLine { if (it.isNotBlank()) queued += it.trim() }
+    }
+    @Synchronized fun markQueued(keys: Collection<String>) {
+        val new = keys.filter { it.isNotBlank() && queued.add(it) }
+        if (new.isNotEmpty()) try { qfile?.appendText(new.joinToString("\n", postfix = "\n")) } catch (_: Exception) {}
+    }
+    fun isQueued(keys: Collection<String>) = keys.any { it in queued }
     val size get() = set.size
-    @Synchronized fun clear() { set.clear(); file?.delete() }
+    @Synchronized fun clear() { set.clear(); file?.delete(); queued.clear(); qfile?.delete() }
     @Synchronized private fun addAll(keys: Collection<String>): Int {
         val new = keys.filter { set.add(it) }
         if (new.isNotEmpty()) file?.appendText(new.joinToString("\n", postfix = "\n"))
@@ -47,6 +58,9 @@ object Sent {
     fun keysOf(f: Found): List<String> {
         val k = ArrayList<String>()
         k += "v:" + norm(f.url)
+        k += "c:" + MediaIdentity.canonicalMedia(f.url)
+        val stem = MediaIdentity.fileStem(f.url)
+        if (MediaIdentity.usefulStem(stem) && stem.length >= 8) k += "s:" + stem
         k += bunkrKeys(f.url)
         if (Bunkr.applies(f)) k += bunkrKeys(f.page)
         if (norm(f.url) == norm(f.page) || f.kind == Kind.MEGA) k += "p:" + norm(f.page)
@@ -55,8 +69,30 @@ object Sent {
 
     fun isSent(f: Found) = keysOf(f).any { it in set }
 
-    /** Grava depois do envio com sucesso. */
-    fun markSent(f: Found) = addAll(keysOf(f))
+    /** Mesmo vídeo já enviado, mesmo em outra qualidade ou com assinatura de CDN diferente. */
+    fun hasCanonical(f: Found): Boolean {
+        if (isSent(f)) return true
+        val media = MediaIdentity.canonicalMedia(f.url)
+        val stem = MediaIdentity.fileStem(f.url)
+        if (media.isBlank()) return false
+        return set.any { key ->
+            when {
+                key.startsWith("c:") -> key.removePrefix("c:") == media
+                key.startsWith("s:") -> MediaIdentity.usefulStem(stem) && stem.length >= 8 && key.removePrefix("s:") == stem
+                key.startsWith("v:") -> {
+                    val u = key.removePrefix("v:")
+                    MediaIdentity.canonicalMedia(if (u.startsWith("http")) u else "https://$u") == media ||
+                        (MediaIdentity.usefulStem(stem) && stem.length >= 8 && MediaIdentity.fileStem(if (u.startsWith("http")) u else "https://$u") == stem)
+                }
+                else -> false
+            }
+        }
+    }
+
+    /** Grava depois do envio com sucesso (chaves do item + chaves extras: página do card, hash do arquivo). */
+    fun markSent(f: Found, extra: Collection<String> = emptyList()) = addAll(keysOf(f) + extra)
+    @Synchronized fun has(k: String) = k in set
+    fun anySent(keys: Collection<String>) = keys.any { has(it) }
 
     private val URL_RE = Regex("""https?://[^\s<>"']+""")
 

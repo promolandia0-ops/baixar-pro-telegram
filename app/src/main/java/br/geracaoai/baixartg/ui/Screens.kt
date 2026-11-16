@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -65,7 +66,9 @@ fun MainShell(shared: MutableState<String?>) {
     val items by Jobs.items.collectAsState()
     val active = items.count { it.st == St.DOWN || it.st == St.UP }
 
-    if (settings) { BackHandler { settings = false }; SettingsScreen { settings = false }; return }
+    var dedupe by rememberSaveable { mutableStateOf(false) }
+    if (dedupe) { BackHandler { dedupe = false }; DedupeScreen { dedupe = false }; return }
+    if (settings) { BackHandler { settings = false }; SettingsScreen({ settings = false }) { settings = false; dedupe = true }; return }
     if (browser) { BrowserScreen({ browser = false }) { u, site -> if (site) { Handoff.site.value = u; tab = Tab.SITE } else { Handoff.page.value = u; tab = Tab.PAGE }; browser = false }; return }
     if (mega) { MegaScreen({ mega = false }) { mega = false; tab = Tab.QUEUE }; return }
     Scaffold(
@@ -75,6 +78,7 @@ fun MainShell(shared: MutableState<String?>) {
                     Text("Baixar pro Telegram", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } },
                 actions = { IconButton({ mega = true }) { Icon(Icons.Rounded.Cloud, "MEGA") }
                     IconButton({ browser = true }) { Icon(Icons.Rounded.Public, "Navegador") }
+                    IconButton({ dedupe = true }) { Icon(Icons.Rounded.DeleteSweep, "Limpar repetidos") }
                     IconButton({ settings = true }) { Icon(Icons.Rounded.Settings, "Configurações") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
         },
@@ -113,7 +117,7 @@ fun ActivityBar(phase: Phase, onOpen: () -> Unit) {
             Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 Spacer(Modifier.width(12.dp))
-                Text(if (phase == Phase.CRAWLING) "Procurando: ${crawl.pagesDone} páginas • ${crawl.found} vídeos" else status.ifBlank { "Baixando e enviando…" },
+                Text(if (phase == Phase.CRAWLING) "${crawl.method.ifBlank { "Procurando" }}: ${crawl.pagesDone} páginas • ${crawl.found} mídias" else status.ifBlank { "Baixando e enviando…" },
                     Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 TextButton({ Jobs.stop() }, enabled = !stopping) { Icon(Icons.Rounded.Stop, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text(if (stopping) "Parando…" else "Parar") }
             }
@@ -151,6 +155,18 @@ fun BigButton(text: String, icon: ImageVector, enabled: Boolean, onClick: () -> 
         Icon(icon, null); Spacer(Modifier.width(10.dp)); Text(text, style = MaterialTheme.typography.titleSmall) }
 }
 
+/** Copia o relatório da última busca (sem links/domínios) para colar no chat. */
+@Composable
+fun DiagButton() {
+    val rep by Jobs.diagReport.collectAsState(); val ctx = LocalContext.current
+    if (rep.isBlank()) return
+    OutlinedButton(onClick = {
+        val cm = ctx.getSystemService(ClipboardManager::class.java)
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", rep))
+        Toast.makeText(ctx, "Diagnóstico copiado (sem links). Cole no chat.", Toast.LENGTH_SHORT).show()
+    }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.ContentCopy, null); Spacer(Modifier.width(8.dp)); Text("Copiar diagnóstico") }
+}
+
 @Composable
 fun InfoCard(text: String, icon: ImageVector = Icons.Rounded.Info, tone: Int = 0) {
     val (bg, fg) = when (tone) { 1 -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
@@ -165,14 +181,26 @@ fun InfoCard(text: String, icon: ImageVector = Icons.Rounded.Info, tone: Int = 0
 fun ScanProgress() {
     val crawl by Jobs.crawl.collectAsState()
     OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp)) {
-        Text("Procurando vídeos…", style = MaterialTheme.typography.titleSmall)
+        Text(crawl.method.ifBlank { "Procurando…" }, style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(10.dp))
         val tot = (crawl.pagesDone + crawl.queued).coerceAtLeast(1)
         LinearProgressIndicator(progress = { crawl.pagesDone.toFloat() / tot }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
         Spacer(Modifier.height(10.dp))
-        Row { Stat("${crawl.pagesDone}", "páginas lidas", Modifier.weight(1f)); Stat("${crawl.queued}", "na fila", Modifier.weight(1f)); Stat("${crawl.found}", "vídeos", Modifier.weight(1f)) }
+        Row { Stat("${crawl.pagesDone}", "páginas lidas", Modifier.weight(1f)); Stat("${crawl.queued}", "na fila", Modifier.weight(1f)); Stat("${crawl.found}", "mídias", Modifier.weight(1f)) }
+        if (crawl.cards > 0 || crawl.searchPages > 0 || crawl.failed > 0) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                listOfNotNull(
+                    crawl.searchPages.takeIf { it > 0 }?.let { "$it págs. de busca" },
+                    crawl.cards.takeIf { it > 0 }?.let { "$it cards" },
+                    crawl.resolved.takeIf { it > 0 }?.let { "$it resolvidos" },
+                    crawl.failed.takeIf { it > 0 }?.let { "$it sem stream" },
+                ).joinToString(" • "),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(Modifier.height(6.dp))
-        Text(crawl.current, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(crawl.detail.ifBlank { crawl.current }, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
     } }
 }
 
@@ -188,7 +216,7 @@ fun HomeTab(text: MutableState<String>, goQueue: () -> Unit) {
     val phase by Jobs.phase.collectAsState(); val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     val links = remember(text.value) { Jobs.parseLinks(text.value) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Baixar vídeos", "Cole um ou vários links (um por linha). Qualidade original, sem compressão.", Icons.Rounded.Download) }
+        item { Section("Baixar vídeos", "Cole um ou vários links (um por linha). Qualidade original, sem compressão. Se o link for uma listagem de aulas, o app abre cada card e pega o vídeo (nunca a capa). Só vídeos — fotos não entram.", Icons.Rounded.Download) }
         item { LinkField(text.value, { text.value = it }, !busy, multi = true, label = "Links dos vídeos ou páginas") }
         item {
             BigButton(if (links.size > 1) "Baixar ${links.size} links" else "Baixar", Icons.Rounded.Download, !busy && links.isNotEmpty()) {
@@ -206,9 +234,9 @@ fun HomeTab(text: MutableState<String>, goQueue: () -> Unit) {
 fun HowTo() {
     OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Como funciona", style = MaterialTheme.typography.titleSmall)
-        Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados.")
-        Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "percorre o site inteiro e baixa todos os vídeos.")
-        Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega só os vídeos de uma página, sem abrir outras.")
+        Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados; se for listagem, abre cada card e pega o vídeo real.")
+        Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "com um nome tenta a busca do site, senão varre o domínio; mostra só as aulas que batem no título para você confirmar.")
+        Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega os vídeos desta página; se for uma listagem, abre cada aula e baixa o vídeo (não a miniatura).")
         Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta do site; os downloads usam essa sessão.")
         Tip(Icons.Rounded.Cloud, "MEGA", "entre na sua conta MEGA ou cole um link público e envie os vídeos.")
         Tip(Icons.Rounded.Lock, "Segundo plano", "pode bloquear a tela; “Parar” interrompe na hora.")
@@ -225,20 +253,58 @@ fun SiteTab(goQueue: () -> Unit) {
     val phase by Jobs.phase.collectAsState(); val mode by Jobs.mode.collectAsState(); val status by Jobs.status.collectAsState(); val items by Jobs.items.collectAsState()
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     var url by rememberSaveable { mutableStateOf(Prefs.lastUrl) }
+    var name by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Handoff.site.value) { Handoff.site.value?.let { url = it; Handoff.site.value = null } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Varrer o site inteiro", "Abre todas as páginas do mesmo site ligadas a este link, encontra todos os vídeos e baixa tudo automaticamente.", Icons.Rounded.TravelExplore) }
+        item { Section("Varrer o site inteiro", "Cole o link do site e, embaixo, o nome ou título da aula (ex.: Gibson, dedilhado pentatônico). Com um nome, o app tenta primeiro a busca do próprio site e só faz a varredura completa se a busca não achar nada. A lista aparece para você confirmar antes de enviar.", Icons.Rounded.TravelExplore) }
         item { LinkField(url, { url = it }, !busy, label = "Link do site") }
         item {
-            BigButton("Varrer tudo", Icons.Rounded.TravelExplore, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, true) }
+            OutlinedTextField(name, { name = it }, label = { Text("Nome ou título") }, placeholder = { Text("ex.: Gibson, dedilhado pentatônico, guitarra") }, singleLine = true,
+                enabled = !busy, leadingIcon = { Icon(Icons.Rounded.Search, null) }, shape = MaterialTheme.shapes.medium,
+                trailingIcon = { if (name.isNotEmpty()) IconButton({ name = "" }, enabled = !busy) { Icon(Icons.Rounded.Close, "Limpar") } },
+                modifier = Modifier.fillMaxWidth())
+            Spacer(Modifier.height(4.dp))
+            Text("Com um nome, o app usa a busca do site e inclui todos os resultados (não só os que repetem o nome no texto ao lado). Na varredura completa, a palavra inteira é obrigatória (guitarra não traz guitarrada). Nada é enviado até você conferir a lista.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Text("Só vídeos. Capas e miniaturas dos players nunca entram.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            PhotosToggle(!busy)
+        }
+        item {
+            BigButton("Buscar", Icons.Rounded.Search, !busy && url.isNotBlank() && name.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, false, name) }
+            Spacer(Modifier.height(8.dp))
+            FilledTonalButton({ Jobs.startScan(listOf(url), Jobs.Mode.SITE, true, "") }, enabled = !busy && url.isNotBlank(), modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
+                Icon(Icons.Rounded.TravelExplore, null); Spacer(Modifier.width(8.dp)); Text("Varrer o site inteiro")
+            }
             Spacer(Modifier.height(6.dp))
             Text("Limite: até ${Prefs.maxPages} páginas, profundidade ${Prefs.depth}, só o mesmo domínio (mude em Configurações).", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (mode == Jobs.Mode.SITE) {
             if (phase == Phase.CRAWLING) item { ScanProgress() }
-            if (status.isNotBlank() && phase != Phase.CRAWLING) item { InfoCard(status) }
-            if (items.isNotEmpty() && phase != Phase.CRAWLING) item {
-                FilledTonalButton(goQueue, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Downloading, null); Spacer(Modifier.width(8.dp)); Text("Ver ${items.size} vídeos na Fila") }
+            if (status.isNotBlank() && phase != Phase.CRAWLING) { item { InfoCard(status) }; item { DiagButton() } }
+            val onlyPhotos = BrowserDetect.mode.intValue == 1
+            if (items.isNotEmpty()) {
+                if (phase != Phase.CRAWLING && !onlyPhotos) item {
+                    val sel = items.count { it.sel && it.st != St.DONE && it.f.kind != Kind.PHOTO }
+                    val named = name.isNotBlank()
+                    BigButton(
+                        if (sel == 0) "Tudo enviado ✓" else if (named) "Baixar e enviar ($sel)" else "Baixar todos ($sel)",
+                        Icons.AutoMirrored.Rounded.Send, sel > 0 && (phase == Phase.LIST || phase == Phase.IDLE)
+                    ) {
+                        if (!named) Jobs.selectAll(true)
+                        Jobs.sendVideos(); goQueue()
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    FilledTonalButton(goQueue, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Downloading, null); Spacer(Modifier.width(8.dp)); Text("Ver na Fila") }
+                    Spacer(Modifier.height(8.dp))
+                }
+                // enviados / na fila somem daqui (acompanhe na Fila); só fica o que ainda não foi mandado
+                val open = if (onlyPhotos) emptyList() else items.filter { it.f.kind != Kind.PHOTO && !it.sent && it.st != St.DONE && it.st !in setOf(St.DOWN, St.READY, St.UP) && !(phase == Phase.RUNNING && it.sel) }
+                val gone = if (onlyPhotos) 0 else items.count { it.f.kind != Kind.PHOTO } - open.size
+                if (gone > 0) item { Text("$gone vídeo(s) já enviados ou na fila — veja na Fila.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                items(open.take(400), key = { it.id }) { it -> ItemRow(it, phase == Phase.LIST || phase == Phase.IDLE) }
+                if (open.size > 400) item { Text("Mostrando 400 de ${open.size}. Abra a Fila para o restante.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                photosSection(phase)
             }
         }
     }
@@ -254,13 +320,46 @@ fun PageTab() {
     LaunchedEffect(Handoff.page.value) { Handoff.page.value?.let { url = it; Handoff.page.value = null } }
     val query = rememberSaveable { mutableStateOf("") }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Section("Só os vídeos desta página", "Cole o link de uma página. O app lista apenas os vídeos dela (não abre outras páginas), todos já marcados.", Icons.Rounded.FilterAlt) }
+        item { Section("Só os vídeos desta página", "Cole o link de uma página ou de uma listagem. Se for uma grade de aulas, o app abre cada card e pega o vídeo real — nunca a capa. Se for a página de um único vídeo, tenta o HTML, o servidor yt-dlp e o player na WebView. Só vídeos.", Icons.Rounded.FilterAlt) }
         item { LinkField(url, { url = it }, !busy, label = "Link da página") }
+        item { PhotosToggle(!busy) }
         item { BigButton("Buscar vídeos desta página", Icons.Rounded.Search, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.PAGE, false) } }
         if (mode == Jobs.Mode.PAGE) {
             if (phase == Phase.CRAWLING) item { ScanProgress() }
-            if (status.isNotBlank() && phase != Phase.CRAWLING) item { InfoCard(status) }
-            itemsPanel(query, showSend = true)
+            if (status.isNotBlank() && phase != Phase.CRAWLING) { item { InfoCard(status) }; item { DiagButton() } }
+            if (BrowserDetect.mode.intValue != 1) itemsPanel(query, showSend = true, videosOnly = true)
+            photosSection(phase)
+        }
+    }
+}
+
+@Composable
+fun PhotosToggle(enabled: Boolean) {
+    val mm by BrowserDetect.mode
+    Column {
+        Text("O que baixar", style = MaterialTheme.typography.bodyLarge)
+        MediaModeSelector(mm) { if (enabled) BrowserDetect.setMode(it) }
+        Text("Fotos = fotos de verdade postadas na página (ex.: diagramas). Nunca capas ou miniaturas de vídeo.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Seção "Fotos" (separada dos vídeos): marcar todos, desmarcar e baixar só as fotos. */
+fun LazyListScope.photosSection(phase: Phase) {
+    item(key = "photos") {
+        val items by Jobs.items.collectAsState()
+        val ph = items.filter { it.f.kind == Kind.PHOTO && !it.sent && it.st != St.DONE && it.st !in setOf(St.DOWN, St.READY, St.UP) && !(phase == Phase.RUNNING && it.sel) }
+        if (ph.isEmpty()) return@item
+        val editable = phase == Phase.LIST || phase == Phase.IDLE
+        val sel = ph.count { it.sel }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            HorizontalDivider()
+            Text("Fotos (${ph.size}) • $sel marcadas", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton({ Jobs.selectPhotos(true) }, enabled = editable && sel < ph.size, modifier = Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
+                OutlinedButton({ Jobs.selectPhotos(false) }, enabled = editable && sel > 0, modifier = Modifier.weight(1f)) { Text("Desmarcar todos", maxLines = 1) }
+            }
+            Button({ Jobs.sendPhotos() }, Modifier.fillMaxWidth(), enabled = editable && sel > 0) { Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Baixar marcados ($sel)") }
+            ph.take(300).forEach { key("ph" + it.id) { ItemRow(it, editable) } }
         }
     }
 }
@@ -271,14 +370,111 @@ fun PageTab() {
 fun QueueTab() {
     val items by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState(); val status by Jobs.status.collectAsState()
     val query = rememberSaveable { mutableStateOf("") }
+    val pItems by Pipeline.items.collectAsState()
+    val pFilter = rememberSaveable { mutableStateOf(0) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (pItems.isNotEmpty()) pipelinePanel(pItems, pFilter)
         if (items.isEmpty()) {
-            item { if (phase == Phase.CRAWLING) ScanProgress() else EmptyState(Icons.Rounded.Downloading, "Fila vazia", "Cole um link em Início, Varrer tudo ou Filtrar.") }
+            if (pItems.isEmpty()) item { if (phase == Phase.CRAWLING) ScanProgress() else EmptyState(Icons.Rounded.Downloading, "Fila vazia", "Cole um link em Início, Varrer tudo ou Filtrar.") }
         } else {
             item { QueueSummary(items, phase) }
             if (phase == Phase.CRAWLING) item { ScanProgress() }
-            if (status.isNotBlank() && phase == Phase.LIST) item { InfoCard(status) }
+            if (status.isNotBlank() && phase == Phase.LIST) { item { InfoCard(status) }; item { DiagButton() } }
             itemsPanel(query, showSend = true)
+        }
+    }
+}
+
+/** Fila de envio do Navegador (persistente, em segundo plano). */
+private fun pipeGroup(st: Pipeline.PS) = when (st) {
+    Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP -> 1
+    Pipeline.PS.WAIT, Pipeline.PS.READY -> 2
+    Pipeline.PS.DONE -> 3
+    Pipeline.PS.FAIL -> 4
+}
+
+fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<Int>) {
+    item(key = "pipe-head") {
+        val paused by Pipeline.paused.collectAsState(); val running by Pipeline.running.collectAsState()
+        val done = l.count { it.st == Pipeline.PS.DONE }; val fail = l.count { it.st == Pipeline.PS.FAIL }
+        val waiting = l.count { it.st == Pipeline.PS.WAIT || it.st == Pipeline.PS.READY }
+        val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
+        val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
+        val active = l.any { it.st != Pipeline.PS.DONE && it.st != Pipeline.PS.FAIL }
+        var confirm by remember { mutableStateOf(false) }
+        ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Fila de envio do Navegador", style = MaterialTheme.typography.titleMedium)
+            Row { Stat("$done", "enviados", Modifier.weight(1f)); Stat("$waiting", "na fila", Modifier.weight(1f)); Stat("$fail", "falharam", Modifier.weight(1f)) }
+            LinearProgressIndicator(progress = { if (l.isEmpty()) 0f else (done + fail).toFloat() / l.size }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
+            Text("$done de ${l.size} enviados" + (if (resolving > 0) " • abrindo $resolving página(s)" else "") + (if (downs > 0) " • baixando $downs" else "") + (if (ups > 0) " • enviando $ups" else "") +
+                (if (paused) " • PAUSADO" else if (running) " • rodando em segundo plano" else ""),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (paused) Button({ Pipeline.resume() }, Modifier.weight(1f), enabled = active) { Text("Retomar") }
+                else FilledTonalButton({ Pipeline.pause() }, Modifier.weight(1f), enabled = active) { Text("Pausar") }
+                OutlinedButton({ confirm = true }, Modifier.weight(1f), enabled = active) { Text("Cancelar tudo", maxLines = 1) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (fail > 0) FilledTonalButton({ Pipeline.retryFailed() }, Modifier.weight(1f)) { Text("Reenviar falhas", maxLines = 1) }
+                if (done > 0) OutlinedButton({ Pipeline.clearDone() }, Modifier.weight(1f)) { Text("Limpar enviados", maxLines = 1) }
+            }
+        } }
+        if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Cancelar tudo?") },
+            text = { Text("Os vídeos que ainda não foram enviados saem da fila.") },
+            confirmButton = { TextButton({ confirm = false; Pipeline.cancelAll() }) { Text("Cancelar tudo") } },
+            dismissButton = { TextButton({ confirm = false }) { Text("Voltar") } })
+    }
+    // contagem por grupo numa passada só (rápido com milhares de itens)
+    val cnt = IntArray(5); for (t in l) cnt[pipeGroup(t.st)]++
+    cnt[0] = l.size
+    item(key = "pipe-chips") { PipeChips(filter, cnt) }
+    val f = filter.value
+    val shown = if (f == 0) {
+        // Todos: o que está andando primeiro, depois a ordem da fila
+        val a = ArrayList<Pipeline.PItem>(l.size); l.filterTo(a) { pipeGroup(it.st) == 1 }; l.filterTo(a) { pipeGroup(it.st) != 1 }; a
+    } else l.filter { pipeGroup(it.st) == f }
+    if (shown.isEmpty()) item(key = "pipe-empty") { Text("Nada aqui.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    items(shown, key = { "pq" + it.id }, contentType = { "pipe" }) { t -> PipeRow(t) }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PipeChips(filter: MutableState<Int>, cnt: IntArray) {
+    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas")
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        names.forEachIndexed { i, n ->
+            FilterChip(selected = filter.value == i, onClick = { filter.value = i }, label = { Text("$n (${cnt[i]})", maxLines = 1) })
+        }
+    }
+}
+
+private fun speedTxt(b: Long): String = if (b <= 0) "" else if (b >= 1 shl 20) " (%.1f MB/s)".format(b / 1048576.0) else " (%.0f KB/s)".format(b / 1024.0)
+
+@Composable
+fun PipeRow(t: Pipeline.PItem) {
+    val cs = MaterialTheme.colorScheme
+    Surface(color = cs.surfaceContainerLow, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(t.title.ifBlank { t.page }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                val pct = (t.prog * 100).toInt().coerceIn(0, 100)
+                Text(when (t.st) {
+                    Pipeline.PS.WAIT -> "aguardando" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.RESOLVING -> "abrindo página…" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.READY -> "aguardando (vídeo já encontrado)" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.DOWN -> if (t.prog >= 1f) (t.msg.ifBlank { "baixado, esperando envio" }) else "baixando " + (if (t.prog > 0f) "$pct%" else "") + speedTxt(t.speed) + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.UP -> if (t.msg.startsWith("Esperando")) t.msg else "enviando $pct%" + speedTxt(t.speed)
+                    Pipeline.PS.DONE -> "enviado" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.FAIL -> "falhou: " + t.msg.ifBlank { "erro" }
+                }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
+                    color = when (t.st) { Pipeline.PS.FAIL -> cs.error; Pipeline.PS.DONE -> cs.primary; else -> cs.onSurfaceVariant })
+                if ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog > 0f) {
+                    Spacer(Modifier.height(4.dp)); LinearProgressIndicator(progress = { t.prog }, Modifier.fillMaxWidth())
+                } else if (t.st == Pipeline.PS.RESOLVING || ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog <= 0f)) {
+                    Spacer(Modifier.height(4.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+            if (t.st == Pipeline.PS.FAIL) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
         }
     }
 }
@@ -304,9 +500,9 @@ fun EmptyState(icon: ImageVector, title: String, sub: String) {
 }
 
 /** Lista de vídeos com seleção em massa, filtro por nome e envio. Usada na Fila e no Filtrar. */
-fun LazyListScope.itemsPanel(query: MutableState<String>, showSend: Boolean) {
+fun LazyListScope.itemsPanel(query: MutableState<String>, showSend: Boolean, videosOnly: Boolean = false) {
     item(key = "tools") { SelectionTools(query, showSend) }
-    item(key = "list") { ItemsList(query.value) }
+    item(key = "list") { ItemsList(query.value, videosOnly) }
 }
 
 @Composable
@@ -343,7 +539,7 @@ fun SelectionTools(query: MutableState<String>, showSend: Boolean) {
         }
         if (showSend && editable) {
             val pend = items.count { it.sel && it.st != St.DONE }
-            BigButton(if (pend == 0) "Tudo enviado ✓" else "Baixar e enviar $pend vídeo(s)", Icons.AutoMirrored.Rounded.Send, pend > 0) { Jobs.startTransfer() }
+            BigButton(if (pend == 0) "Tudo enviado ✓" else "Baixar e enviar $pend", Icons.AutoMirrored.Rounded.Send, pend > 0) { Jobs.startTransfer() }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton({ copy(ctx, items.joinToString("\n") { linkOf(it.f) }, "${items.size} links copiados") }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar links") }
@@ -355,8 +551,9 @@ fun SelectionTools(query: MutableState<String>, showSend: Boolean) {
 
 /** Lista renderizada dentro de um item (até 400 de cada vez para manter fluido; filtro por nome restringe). */
 @Composable
-fun ItemsList(q: String) {
-    val items by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState()
+fun ItemsList(q: String, videosOnly: Boolean = false) {
+    val all by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState()
+    val items = remember(all, videosOnly) { if (videosOnly) all.filter { it.f.kind != Kind.PHOTO && !it.sent && it.st != St.DONE } else all }
     val qWords = remember(q) { NameFilter.words(q) }
     val shown = remember(items, qWords) { if (qWords.isEmpty()) items else items.filter { NameFilter.matches(it.f, qWords) } }
     var limit by remember { mutableIntStateOf(200) }
@@ -375,9 +572,10 @@ fun ItemRow(it: Item, editable: Boolean) {
             Checkbox(it.sel, { _ -> Jobs.toggle(it.id) }, enabled = editable)
             Column(Modifier.weight(1f)) {
                 Text(it.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                Text(it.f.url, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Text(it.f.page.ifBlank { it.f.url }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Chip(it.f.typeLabel, if (it.f.kind == Kind.PHOTO) cs.tertiaryContainer else cs.secondaryContainer, if (it.f.kind == Kind.PHOTO) cs.onTertiaryContainer else cs.onSecondaryContainer)
                     if (it.sent) Chip("Já enviado", cs.tertiaryContainer, cs.onTertiaryContainer)
                     if (it.st == St.WAIT) Chip(if (it.total > 0) fmtBytes(it.total) else "Tamanho ?", cs.secondaryContainer, cs.onSecondaryContainer)
                     val (txt, color) = when (it.st) {
@@ -448,7 +646,7 @@ fun HistoryTab(goQueue: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onClose: () -> Unit) {
+fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
     var depth by remember { mutableFloatStateOf(Prefs.depth.toFloat()) }
     var pages by remember { mutableStateOf(Prefs.maxPages.toString()) }
     var probe by remember { mutableStateOf(Prefs.probe) }
@@ -473,6 +671,8 @@ fun SettingsScreen(onClose: () -> Unit) {
                     trailingIcon = { IconButton({ showTok = !showTok }) { Icon(if (showTok) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, "Mostrar") } }, modifier = Modifier.fillMaxWidth())
                 Text("Os vídeos são enviados pela sua conta para as Mensagens Salvas (sem limite de 50 MB do bot). O token só é verificado no teste.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 SwitchRow("Envio automático", "Depois de encontrar, já baixa e envia (Início e Varrer tudo).", auto) { auto = it }
+                var capOn by remember { mutableStateOf(Prefs.sendCaption) }
+                SwitchRow("Enviar legenda (título/link)", "Desligado: vai só o vídeo/foto, sem título, link ou texto.", capOn) { capOn = it; Prefs.sendCaption = it }
                 FilledTonalButton({ save(); testing = true; test = ""; scope.launch { test = Jobs.testConnection(); testing = false } }, enabled = !testing, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     if (testing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.NetworkCheck, null); Spacer(Modifier.width(8.dp)); Text("Testar conexão") }
                 if (test.isNotBlank()) InfoCard(test, if (test.contains("✗")) Icons.Rounded.ErrorOutline else Icons.Rounded.CheckCircle, if (test.contains("✗")) 1 else 2)
@@ -487,6 +687,8 @@ fun SettingsScreen(onClose: () -> Unit) {
                 Slider(depth, { depth = it }, valueRange = 0f..20f, steps = 19)
                 OutlinedTextField(pages, { pages = it.filter(Char::isDigit) }, label = { Text("Máximo de páginas") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                 SwitchRow("Usar servidor (yt-dlp) em todas as páginas", "Acha vídeos de players difíceis. Mais lento.", probe) { probe = it }
+                var strong by remember { mutableStateOf(Prefs.strongBlock) }
+                SwitchRow("Bloqueador forte", "No Navegador: bloqueia anúncios, pop-ups e redirecionamentos. Nunca bloqueia os vídeos.", strong) { strong = it; Prefs.strongBlock = it; br.geracaoai.baixartg.web.AdBlock.enabled = it }
             }
             SettingsGroup("Desempenho", Icons.Rounded.Speed) {
                 Text("Downloads ao mesmo tempo: ${pd.toInt()}")
@@ -495,6 +697,10 @@ fun SettingsScreen(onClose: () -> Unit) {
                 Slider(pu, { pu = it }, valueRange = 1f..3f, steps = 1)
                 Text("Conta restrita? Deixe envios em 1.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(server, { server = it }, label = { Text("Servidor yt-dlp") }, singleLine = true, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth())
+            }
+            SettingsGroup("Limpar repetidos", Icons.Rounded.DeleteSweep) {
+                Text("Acha vídeos repetidos nas Mensagens Salvas e apaga as cópias, mantendo a mais recente. Só apaga depois de você confirmar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onDedupe, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.DeleteSweep, null); Spacer(Modifier.width(8.dp)); Text("Limpar repetidos das Mensagens Salvas") }
             }
             LoggedAccountsGroup()
             SettingsGroup("Histórico de enviados", Icons.Rounded.History) {

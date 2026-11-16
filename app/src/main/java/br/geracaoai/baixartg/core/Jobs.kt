@@ -13,7 +13,7 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicInteger
 
 enum class St { WAIT, DOWN, READY, UP, DONE, ERR, STOPPED }
-data class Item(val id: Int, val f: Found, val sel: Boolean = true, val st: St = St.WAIT, val prog: Float = 0f, val bytes: Long = 0, val total: Long = -1, val msg: String = "", val speed: Long = 0, val sent: Boolean = false)
+data class Item(val id: Int, val f: Found, val sel: Boolean = true, val st: St = St.WAIT, val prog: Float = 0f, val bytes: Long = 0, val total: Long = -1, val msg: String = "", val speed: Long = 0, val sent: Boolean = false, val xkeys: List<String> = emptyList())
 enum class Phase { IDLE, CRAWLING, LIST, RUNNING }
 
 object Jobs {
@@ -32,7 +32,11 @@ object Jobs {
     private fun set(id: Int, f: (Item) -> Item) = items.update { l -> if (id !in l.indices) l else l.toMutableList().also { it[id] = f(it[id]) } }
     fun toggle(id: Int) = set(id) { it.copy(sel = !it.sel) }
     /** "Marcar" nunca pega os já enviados (dá pra marcar um por um na mão). */
-    private fun canAuto(it: Item) = !it.sent && it.st != St.DONE
+    private fun canAuto(it: Item) = !it.sent && it.st != St.DONE && it.f.kind != Kind.PHOTO
+    /** Seção Fotos: marca/desmarca só as fotos. */
+    fun selectPhotos(v: Boolean) = items.update { l -> l.map { if (it.f.kind != Kind.PHOTO) it else { val nv = v && !it.sent && it.st != St.DONE; if (it.sel == nv) it else it.copy(sel = nv) } } }
+    fun sendPhotos() { val ids = items.value.filter { it.f.kind == Kind.PHOTO && it.sel && !it.sent && it.st != St.DONE }.map { it.id }.toSet(); if (ids.isNotEmpty()) startTransfer(ids) }
+    fun sendVideos() { val ids = items.value.filter { it.f.kind != Kind.PHOTO && it.sel && !it.sent && it.st != St.DONE }.map { it.id }.toSet(); if (ids.isNotEmpty()) startTransfer(ids) }
     fun selectAll(v: Boolean) = items.update { l -> l.map { val nv = v && canAuto(it); if (it.sel == nv) it else it.copy(sel = nv) } }
     /** Marca/desmarca só os ids informados (ex.: resultado do filtro por nome). */
     fun setSel(ids: Set<Int>, v: Boolean) = items.update { l -> l.map { if (it.id in ids && it.sel != v && (!v || canAuto(it))) it.copy(sel = v) else it } }
@@ -45,6 +49,8 @@ object Jobs {
     /** SITE = varre o site inteiro (mesmo domínio); PAGE = só a página informada; LINKS = vários links colados (cada um só a própria página). */
     enum class Mode { SITE, PAGE, LINKS }
     val mode = MutableStateFlow(Mode.SITE)
+    /** Relatório da última busca (sem URL/domínio) para o botão "Copiar diagnóstico". */
+    val diagReport = MutableStateFlow("")
     /** Último pedido: começar a baixar sozinho quando a busca terminar. */
     @Volatile private var autoAfter = false
 
@@ -54,58 +60,163 @@ object Jobs {
 
     fun startCrawl(url: String) = startScan(listOf(url), Mode.SITE, false)
 
-    /** Só roda quando o usuário toca no botão (nunca ao digitar). */
-    fun startScan(urls0: List<String>, m: Mode, auto: Boolean) {
+    /** Só roda quando o usuário toca no botão (nunca ao digitar). name = filtro por título/nome da aula. */
+    fun startScan(urls0: List<String>, m: Mode, auto: Boolean, name: String = "") {
         if (job?.isActive == true) return
         val urls = urls0.map { u -> u.trim().let { if (it.startsWith("http", true) || it.startsWith("mega:", true)) it else "https://$it" } }.filter { it.length > 8 }.distinct()
         if (urls.isEmpty()) return
         Prefs.lastUrl = urls.first()
-        mode.value = m; autoAfter = auto
+        mode.value = m; autoAfter = auto && name.isBlank() // busca por nome sempre para na prévia
         items.value = emptyList(); phase.value = Phase.CRAWLING; status.value = ""; stopping.value = false
         crawl.value = CrawlProgress(0, urls.size, 0, urls.first())
         WorkService.start(app)
         job = scope.launch {
             val server = Prefs.server
-            val opts = if (m == Mode.SITE) CrawlOpts(Prefs.depth.coerceIn(0, 20), Prefs.maxPages.coerceIn(1, 5000), Prefs.probe, 6) else CrawlOpts(0, 1, false, 6)
+            val words = NameFilter.words(name)
+            val opts = if (m == Mode.SITE) CrawlOpts(Prefs.depth.coerceIn(0, 20), Prefs.maxPages.coerceIn(1, 5000), Prefs.probe, 24, words, name, maxJsPages = 3, maxSniffs = 0, followCards = true, maxCardPages = 200, resolvePlayer = false) else CrawlOpts(0, 1, false, 24, words, name, maxJsPages = 3, maxSniffs = 0, followCards = true, maxCardPages = 200, resolvePlayer = true)
             val buf = ArrayList<Item>(); var n = 0; var lastFlush = 0L; var pagesBefore = 0
+            var methodUsed = if (m == Mode.SITE && words.isNotEmpty()) "" else SiteSearch.METHOD_FULL_CRAWL
             val seen = HashSet<String>()
             fun flush() { if (buf.isNotEmpty()) { val add = buf.toList(); buf.clear(); items.update { it + add } } }
             var stopped = false
             val errors = ArrayList<String>()
+            var skipped = 0
+            Downloader.lastProbeError = null
+            val diags = ArrayList<Diag>()
+            diagReport.value = ""
+            scope.launch { Downloader.warmUp(server) }
+            fun keep(f: Found): Boolean {
+                if (f.kind == Kind.PHOTO) { skipped++; return false }
+                if (f.kind != Kind.PHOTO && Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) { skipped++; return false }
+                if (words.isEmpty() || methodUsed == SiteSearch.METHOD_SITE_SEARCH) return true
+                if (NameFilter.matches(f, words)) return true
+                skipped++; return false
+            }
+            val keyToId = HashMap<String, Int>()
+            fun registerKeys(id: Int, f: Found) { MediaIdentity.keys(f).forEach { keyToId[it] = id } }
+            fun replaceItem(id: Int, neu: Found) {
+                val old = (buf.firstOrNull { it.id == id } ?: items.value.getOrNull(id))?.f
+                if (old != null) MediaIdentity.keys(old).forEach { if (keyToId[it] == id) keyToId.remove(it) }
+                val sent = Sent.isSent(neu) || MediaIdentity.keys(neu).any { k -> items.value.any { it.id == id && it.sent } }
+                val iBuf = buf.indexOfFirst { it.id == id }
+                if (iBuf >= 0) buf[iBuf] = buf[iBuf].copy(f = neu, sent = sent || buf[iBuf].sent, sel = if (sent || buf[iBuf].sent) false else buf[iBuf].sel)
+                else set(id) { it.copy(f = neu, sent = sent || it.sent, sel = if (sent || it.sent) false else it.sel) }
+                registerKeys(id, neu)
+                seen.add(neu.url.substringBefore('#'))
+            }
+            fun accept(f0: Found): Boolean {
+                val f = MediaIdentity.withQuality(f0)
+                if (!keep(f)) return false
+                val hit = MediaIdentity.keys(f).firstOrNull { it in keyToId }
+                if (hit != null) {
+                    val id = keyToId[hit]!!
+                    val cur = buf.firstOrNull { it.id == id }?.f ?: items.value.getOrNull(id)?.f
+                    if (cur != null && MediaIdentity.isBetter(f, cur)) replaceItem(id, f)
+                    return false
+                }
+                if (!seen.add(f.url.substringBefore('#'))) return false
+                val s = Sent.isSent(f) || Sent.hasCanonical(f)
+                val item = Item(n++, f, sel = !s, sent = s)
+                buf += item
+                registerKeys(item.id, f)
+                return true
+            }
             try {
                 for (u in urls) {
-                    if (Mega.looksLikeMega(u) || Mega.isMegaLink(u)) { // MEGA: não varrer a página (a chave # se perderia)
+                    if (Mega.looksLikeMega(u) || Mega.isMegaLink(u)) {
                         crawl.value = crawl.value.copy(current = u)
                         try {
                             val found = Mega.resolvePublic(u)
-                            if (found.isEmpty()) errors += "Nenhum vídeo encontrado neste link do MEGA."
-                            found.forEach { (f, sz) -> if (seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
+                            if (found.isEmpty()) errors += "Nenhum arquivo encontrado neste link do MEGA."
+                            found.forEach { (f, sz) -> if (keep(f) && seen.add(f.url)) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s, total = sz) } }
                         } catch (e: CancellationException) { throw e }
                         catch (e: Exception) { errors += e.message ?: "Erro no MEGA" }
                         pagesBefore++; flush(); continue
                     }
-                    val c = Crawler(opts) { p -> Downloader.probe(server, p) }
-                    c.run(u, { p -> crawl.value = p.copy(pagesDone = pagesBefore + p.pagesDone, queued = p.queued + (urls.size - urls.indexOf(u) - 1))
-                        val now = System.currentTimeMillis(); if (now - lastFlush > 400) { lastFlush = now; flush() } }) { f ->
-                        if (seen.add(f.url.substringBefore('#'))) { val s = Sent.isSent(f); buf += Item(n++, f, sel = !s, sent = s) } }
+                    val dg = Diag().also { it.webviewAvailable = JsRender.available() }
+                    diags += dg
+                    val c = Crawler(
+                        opts,
+                        diag = dg,
+                        sniff = { x -> Downloader.sniffType(x) },
+                        jsFallback = { x -> JsRender.render(x, 20_000, play = true) },
+                        probe = { p -> Downloader.probe(server, p) },
+                        jsScroll = { x -> JsRender.render(x, 20_000, scroll = true) },
+                        upgrade = { old, neu ->
+                            val id = keyToId[MediaIdentity.keys(old).firstOrNull { it in keyToId } ?: ""]
+                                ?: keyToId[MediaIdentity.keys(neu).firstOrNull { it in keyToId } ?: ""]
+                            if (id != null) replaceItem(id, neu)
+                        },
+                    )
+                    val onProg: (CrawlProgress) -> Unit = { p ->
+                        crawl.value = p.copy(pagesDone = pagesBefore + p.pagesDone, queued = p.queued + (urls.size - urls.indexOf(u) - 1))
+                        val now = System.currentTimeMillis(); if (now - lastFlush > 80) { lastFlush = now; flush() }
+                    }
+                    val onItem: (Found) -> Unit = { f ->
+                        accept(f)
+                    }
+                    if (m == Mode.SITE && words.isNotEmpty()) {
+                        methodUsed = SiteSearch.METHOD_SITE_SEARCH
+                        crawl.value = crawl.value.copy(method = methodUsed, current = u)
+                        val nSearch = c.runSiteSearch(u, onProg, onItem)
+                        flush()
+                        if (nSearch == 0 && items.value.isEmpty() && buf.isEmpty()) {
+                            methodUsed = SiteSearch.METHOD_FULL_CRAWL
+                            c.run(u, onProg, onItem)
+                        }
+                    } else {
+                        methodUsed = if (m == Mode.SITE) SiteSearch.METHOD_FULL_CRAWL else methodUsed
+                        c.run(u, onProg, onItem)
+                    }
                     pagesBefore = crawl.value.pagesDone
                     flush()
                 }
-                if (m != Mode.SITE || items.value.size <= 300) {
-                    status.value = "Verificando o tamanho dos arquivos…"
-                    fetchSizes()
-                }
-            } catch (e: CancellationException) { stopped = true; flush(); status.value = "Busca parada. ${items.value.size} vídeos encontrados até agora."
+                // tamanho em segundo plano, depois da lista já aparecer
+            } catch (e: CancellationException) { stopped = true; flush(); status.value = "Busca parada. ${items.value.size} itens encontrados até agora."
             } catch (e: Exception) { flush(); errors += e.message ?: "Erro na busca" }
-            val total = items.value.size
-            if (!stopped) status.value = when {
-                total == 0 && errors.isNotEmpty() -> errors.joinToString("\n")
-                total == 0 -> if (m == Mode.SITE) "Nenhum vídeo encontrado. Tente ativar “Usar servidor (yt-dlp) em todas as páginas” em Ajustes." else "Nenhum vídeo encontrado nesta página."
-                errors.isNotEmpty() -> (if (m == Mode.SITE) "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos." else "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")) + " " + errors.joinToString(" ")
-                m == Mode.SITE -> "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total vídeos."
-                else -> "$total vídeo(s) encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")
+            // "Fotos também": fotos de verdade das páginas, numa seção separada (não mexe nos vídeos)
+            if (!stopped && Prefs.photos) try {
+                val vids = items.value.filter { it.f.kind != Kind.PHOTO }
+                val vt = vids.flatMap { Photos.idTokens(it.f.url) + Photos.idTokens(it.f.page) }.toHashSet()
+                val pages = (urls.filter { it.startsWith("http") } + (if (m == Mode.SITE) vids.map { it.f.page }.filter { it.startsWith("http") } else emptyList())).distinct().take(40)
+                val pk = HashSet<String>()
+                for (pg in pages) {
+                    coroutineContext.ensureActive()
+                    crawl.value = crawl.value.copy(current = "fotos: $pg")
+                    val html = PageResolver.fetch(pg, null) ?: continue
+                    for (p in Photos.fromHtml(pg, html)) {
+                        val k = Photos.key(p.url)
+                        if (!pk.add(k) || Photos.sharesId(p.url, vt)) continue
+                        if (words.isNotEmpty() && !NameFilter.matchesText(p.text, words)) continue
+                        val f = Found(p.url, pg, Photos.title(p), Kind.PHOTO, ref = pg, extra = p.text)
+                        if (Sent.anySent(listOf(k)) || Sent.isQueued(listOf(k)) || Sent.isSent(f)) continue
+                        items.update { it + Item(it.size, f, sel = false, sent = false, xkeys = listOf(k)) }
+                    }
+                }
+            } catch (e: CancellationException) { stopped = true } catch (_: Exception) {}
+            val total = items.value.count { it.f.kind != Kind.PHOTO }
+            diagReport.value = diags.joinToString("\n") { it.report() } + "\nlista final: $total vídeos, $skipped descartados pelo filtro" + (if (errors.isNotEmpty()) "\nerros: " + errors.joinToString(" | ") { e -> e.replace(Regex("""https?://\S+"""), "<url>") } else "")
+            val probeErr = Downloader.lastProbeError
+            if (total == 0 && probeErr != null && errors.none { probeErr in it }) errors += probeErr
+            val midia = "vídeos"
+            if (!stopped) {
+                val via = if (methodUsed.isNotBlank()) "$methodUsed. " else ""
+                val diag = crawl.value.detail.let { if (it.isNotBlank()) " ($it)" else "" }
+                status.value = when {
+                total == 0 && words.isNotEmpty() -> via + "Nenhuma aula encontrada com esse nome (“${name.trim()}”)." + diag + (if (skipped > 0) " $skipped mídias no site não batiam com o título." else "") + (if (errors.isNotEmpty()) " " + errors.joinToString(" ") else "")
+                total == 0 && errors.isNotEmpty() -> via + errors.joinToString("\n")
+                total == 0 -> via + (if (m == Mode.SITE) "Nenhum vídeo ou foto encontrado. Tente ativar “Usar servidor (yt-dlp) em todas as páginas” em Ajustes." else "Nenhum vídeo ou foto encontrado nesta página.")
+                words.isNotEmpty() -> via + "$total $midia com esse nome. Confira os títulos e toque em “Baixar e enviar”." + diag + (if (errors.isNotEmpty()) " " + errors.joinToString(" ") else "")
+                errors.isNotEmpty() -> via + (if (m == Mode.SITE) "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total $midia." else "$total $midia encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")) + " " + errors.joinToString(" ")
+                m == Mode.SITE -> via + "Varredura concluída: ${crawl.value.pagesDone} páginas lidas, $total $midia." + diag
+                else -> via + "$total $midia encontrado(s)" + (if (urls.size > 1) " em ${urls.size} links." else " nesta página.")
             }
-            if (!stopped && autoAfter && items.value.any { it.sel }) { job = null; startTransfer() } else phase.value = Phase.LIST
+            }
+            if (!stopped && autoAfter && items.value.any { it.sel }) { job = null; startTransfer() }
+            else {
+                phase.value = Phase.LIST
+                if (!stopped && (m != Mode.SITE || items.value.size <= 300)) scope.launch { fetchSizes() }
+            }
         }
     }
 
@@ -115,18 +226,69 @@ object Jobs {
         items.value.filter { it.f.kind == Kind.DIRECT }.map { t -> launch { sem.acquire(); try { val sz = Downloader.sizeOf(t.f); if (sz > 0) set(t.id) { it.copy(total = sz) } } finally { sem.release() } } }.joinAll()
     }
 
-    /** Itens vindos de fora da varredura (MEGA): entram na lista com o tamanho já conhecido. */
-    fun addExternal(list: List<Pair<Found, Long>>, start: Boolean): Boolean {
-        if (job?.isActive == true || list.isEmpty()) return false
+    // ---------- Identidade do vídeo (fila idempotente) ----------
+    /** Chaves persistentes (gravadas no "já enviado"): URL/mídia canônica, nome do arquivo, página do card. */
+    fun sendKeys(f: Found, x: List<String> = emptyList()): List<String> = (Sent.keysOf(f) + x).distinct()
+    /** Chaves de comparação na fila (inclui as do MediaIdentity: mesma mídia em outra qualidade/variante). */
+    private fun queueKeys(t: Item): Set<String> = (sendKeys(t.f, t.xkeys) + MediaIdentity.keys(t.f)).toHashSet()
+    fun alreadySent(f: Found, x: List<String> = emptyList()) = Sent.anySent(sendKeys(f, x)) || Sent.hasCanonical(f)
+    private val busyStates = setOf(St.DOWN, St.READY, St.UP)
+    /** Já está na fila/enviando/enviado (qualquer lista). */
+    fun isQueuedOrSent(f: Found, x: List<String> = emptyList()): Boolean {
+        if (alreadySent(f, x)) return true
+        val k = (sendKeys(f, x) + MediaIdentity.keys(f)).toHashSet()
+        val running = job?.isActive == true
+        return items.value.any { (it.st in busyStates || it.st == St.DONE || it.sent || (running && it.st == St.WAIT)) && queueKeys(it).any { q -> q in k } }
+    }
+    @Volatile private var lastEnqueueAt = 0L
+
+    /**
+     * Itens vindos de fora da varredura (MEGA, Navegador). Nunca duplica: ignora o que já foi enviado,
+     * o que já está na fila e repetidos dentro da própria lista (fica o de maior qualidade).
+     * Devolve quantos vídeos entraram para envio, ou -1 se há tarefa em andamento / toque repetido.
+     */
+    fun enqueue(list: List<Triple<Found, Long, List<String>>>, start: Boolean): Int {
+        if (job?.isActive == true || list.isEmpty()) return -1
+        val now = System.currentTimeMillis()
+        if (start && now - lastEnqueueAt < 1500) return -1   // toque duplo
+        lastEnqueueAt = now
         mode.value = Mode.LINKS
         val base = if (phase.value == Phase.LIST || phase.value == Phase.IDLE) items.value else emptyList()
-        val have = base.map { it.f.url }.toHashSet()
-        val add = list.filter { it.first.url !in have }.mapIndexed { i, (f, sz) -> val s = Sent.isSent(f); Item(base.size + i, f, sel = true, sent = s, total = sz) }
+        val baseKeys = base.map { it to queueKeys(it) }
+        // repetidos dentro da lista: fica o de maior qualidade
+        val picked = ArrayList<Triple<Found, Long, List<String>>>()
+        val pickedKeys = ArrayList<Set<String>>()
+        for (e in list) {
+            val f = MediaIdentity.withQuality(e.first)
+            val k = (sendKeys(f, e.third) + MediaIdentity.keys(f)).toHashSet()
+            val i = pickedKeys.indexOfFirst { pk -> pk.any { it in k } }
+            if (i >= 0) { if (MediaIdentity.isBetter(f, picked[i].first)) { picked[i] = Triple(f, e.second, e.third); pickedKeys[i] = pickedKeys[i] + k }; continue }
+            picked += Triple(f, e.second, e.third); pickedKeys += k
+        }
+        val startIds = LinkedHashSet<Int>()
+        val add = ArrayList<Item>()
+        var skipped = 0
+        for ((idx, e) in picked.withIndex()) {
+            val (f, sz, x) = e
+            if (alreadySent(f, x)) { skipped++; continue }
+            val hit = baseKeys.firstOrNull { (_, bk) -> bk.any { it in pickedKeys[idx] } }?.first
+            if (hit != null) {
+                if (hit.sent || hit.st == St.DONE || hit.st in busyStates) { skipped++; continue }
+                startIds += hit.id; continue          // mesmo vídeo já está na lista: usa o item existente
+            }
+            val it = Item(base.size + add.size, f, sel = true, sent = false, total = sz, xkeys = x)
+            add += it; startIds += it.id
+        }
         items.value = base + add
-        phase.value = Phase.LIST; status.value = "${add.size} vídeo(s) do MEGA adicionados."
-        if (start) startTransfer(add.map { it.id }.toSet())
-        return true
+        phase.value = Phase.LIST
+        status.value = "${startIds.size} vídeo(s) para enviar" + (if (skipped > 0) " • $skipped repetido(s)/já enviado(s) ignorado(s)" else "") + "."
+        if (start && startIds.isNotEmpty()) startTransfer(startIds)
+        return startIds.size
     }
+
+    /** Itens vindos de fora da varredura (MEGA): entram na lista com o tamanho já conhecido. */
+    fun addExternal(list: List<Pair<Found, Long>>, start: Boolean): Boolean =
+        enqueue(list.map { Triple(it.first, it.second, emptyList()) }, start) >= 0
 
     /** Reenvia um vídeo do histórico (baixa de novo do site e manda pro Telegram). */
     fun resend(f: Found): Boolean {
@@ -134,7 +296,7 @@ object Jobs {
         val id = items.value.size
         items.update { it + Item(id, f, sel = true, sent = true) }
         if (phase.value == Phase.IDLE) phase.value = Phase.LIST
-        startTransfer(setOf(id)); return true
+        startTransfer(setOf(id), force = true); return true
     }
 
     /** Testa o Telegram (conta conectada) e, se informado, o token do bot. */
@@ -159,10 +321,23 @@ object Jobs {
         sb.toString()
     }
 
-    fun startTransfer(only: Set<Int>? = null) {
+    /** force = reenvio pedido no Histórico (único caso que manda de novo algo já enviado). */
+    fun startTransfer(only: Set<Int>? = null, force: Boolean = false) {
         if (job?.isActive == true) return
-        val todo = items.value.filter { if (only != null) it.id in only else it.sel && it.st != St.DONE }
+        val cand = items.value.filter { (if (only != null) it.id in only else it.sel) && it.st != St.DONE && it.st !in busyStates && (force || (!it.sent && !alreadySent(it.f, it.xkeys))) }
+        // mesmo vídeo duas vezes na seleção (outra qualidade/variante): fica só o melhor
+        val todo = ArrayList<Item>(); val todoKeys = ArrayList<Set<String>>()
+        val dupIds = HashSet<Int>()
+        for (t in cand) {
+            val k = queueKeys(t)
+            val i = todoKeys.indexOfFirst { tk -> tk.any { it in k } }
+            if (i < 0) { todo += t; todoKeys += k; continue }
+            if (MediaIdentity.isBetter(t.f, todo[i].f)) { dupIds += todo[i].id; todo[i] = t; todoKeys[i] = todoKeys[i] + k } else dupIds += t.id
+        }
+        if (dupIds.isNotEmpty()) items.update { l -> l.map { if (it.id in dupIds) it.copy(sel = false, msg = "Repetido (mesmo vídeo)") else it } }
         if (todo.isEmpty()) return
+        forceIds = if (force) todo.map { it.id }.toHashSet() else emptySet()
+        claimed.clear()
         phase.value = Phase.RUNNING; stopping.value = false
         val ids = todo.map { it.id }.toHashSet()
         items.update { l -> l.map { if (it.id in ids) it.copy(st = St.WAIT, prog = 0f, msg = "") else it } }
@@ -180,9 +355,12 @@ object Jobs {
                     val queue = Channel<Item>(Channel.UNLIMITED); todo.forEach { queue.trySend(it) }; queue.close()
                     // fila limitada: no máximo nDown baixando + nDown prontos esperando envio (protege o armazenamento)
                     val ready = Channel<Pair<Item, File>>(nDown)
-                    val downs = List(nDown) { launch { for (t in queue) { val f = downloadOne(t); if (f == null) { fail.incrementAndGet(); st() } else ready.send(t to f) } } }
+                    val downs = List(nDown) { launch { for (t0 in queue) {
+                        val t = items.value.getOrNull(t0.id) ?: t0
+                        if (skipIfDuplicate(t)) { st(); continue }
+                        val f = downloadOne(t); if (f == null) { fail.incrementAndGet(); st() } else ready.send(t to f) } } }
                     launch { downs.joinAll(); ready.close() }
-                    repeat(nUp) { launch { for ((t, f) in ready) { if (uploadOne(t, f)) ok.incrementAndGet() else fail.incrementAndGet(); st() } } }
+                    repeat(nUp) { launch { for ((t, f) in ready) { if (uploadOne(t, f)) ok.incrementAndGet() else if (items.value.getOrNull(t.id)?.st != St.DONE) fail.incrementAndGet(); st() } } }
                 }
                 status.value = "Pronto! ${ok.get()} enviados para Mensagens Salvas" + (if (fail.get() > 0) ", ${fail.get()} com erro" else "") + "."
             } catch (e: CancellationException) {
@@ -193,6 +371,32 @@ object Jobs {
             phase.value = Phase.LIST; stopping.value = false
         }
     }
+
+    @Volatile private var forceIds: Set<Int> = emptySet()
+    /** Chaves "em uso" nesta tarefa: dois itens do mesmo vídeo nunca baixam/enviam juntos. */
+    private val claimed = HashSet<String>()
+
+    /** Já enviado ou outro item da mesma tarefa já pegou este vídeo: marca e pula (sem baixar). */
+    private fun skipIfDuplicate(t: Item): Boolean {
+        if (t.id in forceIds) return false
+        val sent = alreadySent(t.f, t.xkeys)
+        val k = queueKeys(t)
+        val taken = synchronized(claimed) { if (!sent && k.none { it in claimed }) { claimed.addAll(k); false } else true }
+        if (!sent && !taken) return false
+        set(t.id) { it.copy(st = St.DONE, prog = 1f, sel = false, sent = true, msg = if (sent) "Já enviado antes (pulado)" else "Repetido (mesmo vídeo, pulado)") }
+        return true
+    }
+
+    /** Impressão do arquivo: tamanho + SHA-256 do começo e do fim (mesmo arquivo = mesmo vídeo). */
+    fun fileKey(f: File): String? = try {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        java.io.RandomAccessFile(f, "r").use { r ->
+            val buf = ByteArray(1 shl 20)
+            val n1 = r.read(buf); if (n1 > 0) md.update(buf, 0, n1)
+            if (r.length() > 2L * buf.size) { r.seek(r.length() - buf.size); val n2 = r.read(buf); if (n2 > 0) md.update(buf, 0, n2) }
+        }
+        "h:" + f.length() + ":" + md.digest().take(12).joinToString("") { "%02x".format(it) }
+    } catch (_: Exception) { null }
 
     /** Baixa (e, se veio de HLS, remuxa para MP4 sem recodificar). null = erro (já marcado). */
     private suspend fun downloadOne(t: Item): File? {
@@ -214,6 +418,18 @@ object Jobs {
             }
             val size = file!!.length()
             if (size > 2000L * 1024 * 1024 && !Td.isPremium.value) throw DlException("Maior que 2 GB (limite do Telegram)")
+            if (t.f.kind == Kind.PHOTO) {
+                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeFile(file.absolutePath, o)
+                if (o.outWidth <= 0 || minOf(o.outWidth, o.outHeight) < Photos.MIN_SIDE) throw DlException("Imagem pequena (miniatura/ícone), ignorada.")
+            }
+            if (t.f.kind != Kind.PHOTO) {
+                val k = Downloader.sniffFile(file)
+                val ext = file.extension.lowercase()
+                if (k == "image" || ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) {
+                    throw DlException("O arquivo não é um vídeo (veio uma imagem (capa)).")
+                }
+            }
             set(t.id) { it.copy(st = St.READY, prog = 1f, bytes = size, total = size, msg = "") }
             return file
         } catch (e: CancellationException) { file?.delete(); set(t.id) { it.copy(st = St.STOPPED, msg = "Parado") }; throw e
@@ -224,8 +440,26 @@ object Jobs {
         try {
             set(t.id) { it.copy(st = St.UP, prog = 0f) }
             val cap = t.f.title + "\n" + t.f.page + (if (t.f.url != t.f.page && !Bunkr.isCdn(t.f.url) && t.f.kind != Kind.MEGA) "\n" + t.f.url else "")
-            Uploader.upload(file, cap) { p -> set(t.id) { it.copy(prog = p) } }
-            Sent.markSent(t.f); History.add(t.f, file.length())
+            if (t.f.kind != Kind.PHOTO) {
+                val k = Downloader.sniffFile(file)
+                val ext = file.extension.lowercase()
+                if (k == "image" || ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) {
+                    throw DlException("O arquivo não é um vídeo (veio uma imagem (capa)).")
+                }
+            }
+            // Idempotência: confere de novo logo antes de enviar (outra tarefa/lista pode ter enviado o mesmo vídeo)
+            val fk = fileKey(file)
+            if (t.id !in forceIds) {
+                val dupFile = fk != null && (Sent.has(fk) || synchronized(claimed) { !claimed.add(fk) })
+                if (dupFile || alreadySent(t.f, t.xkeys)) {
+                    file.delete()
+                    set(t.id) { it.copy(st = St.DONE, prog = 1f, sel = false, sent = true, msg = "Repetido (mesmo arquivo já enviado, pulado)") }
+                    return false
+                }
+            }
+            // Envio único: sem nova tentativa depois que o TDLib aceitou a mensagem
+            Uploader.upload(file, cap, asVideo = t.f.kind != Kind.PHOTO) { p -> set(t.id) { it.copy(prog = p) } }
+            Sent.markSent(t.f, t.xkeys + listOfNotNull(fk)); History.add(t.f, file.length())
             set(t.id) { it.copy(st = St.DONE, prog = 1f, msg = "", sent = true) }; return true
         } catch (e: CancellationException) { set(t.id) { it.copy(st = St.STOPPED, msg = "Parado") }; throw e
         } catch (e: Exception) { set(t.id) { it.copy(st = St.ERR, msg = e.message?.take(160) ?: "Erro") }; return false

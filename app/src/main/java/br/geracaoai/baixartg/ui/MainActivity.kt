@@ -46,11 +46,36 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        br.geracaoai.baixartg.core.JsRender.bind(this)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { try { br.geracaoai.baixartg.core.Downloader.warmUp(br.geracaoai.baixartg.Prefs.server) } catch (_: Exception) {} }
         handle(intent)
+        askBackgroundPermissions()
+        br.geracaoai.baixartg.core.Pipeline.start()
+        br.geracaoai.baixartg.core.Dedupe.resumeDelete()   // retoma a fila salva (app aberto = pode iniciar o serviço)
         setContent {
             val dark = isSystemInDarkTheme(); val ctx = LocalContext.current
             AppTheme(dark) { Surface(color = MaterialTheme.colorScheme.background) { Root(shared) } }
         }
+    }
+    override fun onDestroy() {
+        br.geracaoai.baixartg.core.JsRender.unbind(this)
+        super.onDestroy()
+    }
+    /** Uma vez: notificações (Android 13+) e "não otimizar bateria" — para a fila não ser parada em segundo plano. */
+    private fun askBackgroundPermissions() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 41)
+        } catch (_: Exception) {}
+        try {
+            val pm = getSystemService(android.os.PowerManager::class.java)
+            if (!Prefs.askedBattery && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                Prefs.askedBattery = true
+                @android.annotation.SuppressLint("BatteryLife")
+                val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:$packageName"))
+                startActivity(i)
+            }
+        } catch (_: Exception) {}
     }
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handle(intent) }
     private fun handle(i: Intent?) {
