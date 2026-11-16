@@ -112,7 +112,11 @@ object JsRender {
     }
 
     /** Página com play para a fila de envio (pool separado). */
-    suspend fun renderQueue(url: String, timeoutMs: Long): JsPage? = page(url, timeoutMs, true, queueGate)
+    suspend fun renderQueue(url: String, timeoutMs: Long): JsPage? =
+        // com o navegador aberto na tela, a fila usa só 1 WebView oculto por vez (o navegador visível tem prioridade)
+        if (browserVisible) queueSoloGate.withPermit { page(url, timeoutMs, true, queueGate) } else page(url, timeoutMs, true, queueGate)
+    @Volatile var browserVisible = false
+    private val queueSoloGate = Semaphore(1)
 
     private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate): JsPage? {
         val wait = if (play) timeoutMs.coerceIn(8_000L, 18_000L) else timeoutMs

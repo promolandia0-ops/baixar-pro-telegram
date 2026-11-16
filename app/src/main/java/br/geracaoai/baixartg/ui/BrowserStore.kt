@@ -1,5 +1,6 @@
 package br.geracaoai.baixartg.ui
 
+import kotlinx.coroutines.launch
 import android.content.Context
 import androidx.compose.runtime.mutableStateListOf
 import br.geracaoai.baixartg.core.Extract
@@ -27,7 +28,9 @@ object BrowserStore {
     private fun readSites(f: File?): List<Site> = try {
         val a = JSONArray(f!!.readText()); (0 until a.length()).map { a.getJSONObject(it).let { o -> Site(o.getString("u"), o.optString("t")) } }
     } catch (_: Exception) { emptyList() }
-    private fun writeSites(f: File?, l: List<Site>) { try { f?.writeText(JSONArray(l.map { JSONObject().put("u", it.url).put("t", it.title) }).toString()) } catch (_: Exception) {} }
+    /** Grava fora da thread principal. */
+    private fun writeSites(f: File?, l: List<Site>) { kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { writeSitesNow(f, l) } }
+    @Synchronized private fun writeSitesNow(f: File?, l: List<Site>) { try { f?.writeText(JSONArray(l.map { JSONObject().put("u", it.url).put("t", it.title) }).toString()) } catch (_: Exception) {} }
 
     fun visit(url: String, title: String) {
         if (!url.startsWith("http")) return

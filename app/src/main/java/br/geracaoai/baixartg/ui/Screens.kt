@@ -393,6 +393,8 @@ private fun pipeGroup(st: Pipeline.PS) = when (st) {
     Pipeline.PS.FAIL -> 4
 }
 
+private fun isPhotoItem(t: Pipeline.PItem) = t.photo || t.f?.kind == Kind.PHOTO
+
 fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<Int>) {
     item(key = "pipe-head") {
         val paused by Pipeline.paused.collectAsState(); val running by Pipeline.running.collectAsState()
@@ -401,10 +403,12 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
         val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
         val active = l.any { it.st != Pipeline.PS.DONE && it.st != Pipeline.PS.FAIL }
+        val nPhotos = l.count { isPhotoItem(it) }; val nVideos = l.size - nPhotos
         var confirm by remember { mutableStateOf(false) }
         ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Fila de envio do Navegador", style = MaterialTheme.typography.titleMedium)
             Row { Stat("$done", "enviados", Modifier.weight(1f)); Stat("$waiting", "na fila", Modifier.weight(1f)); Stat("$fail", "falharam", Modifier.weight(1f)) }
+            Text("$nVideos vídeo${if (nVideos == 1) "" else "s"} • $nPhotos foto${if (nPhotos == 1) "" else "s"}", style = MaterialTheme.typography.bodyMedium)
             LinearProgressIndicator(progress = { if (l.isEmpty()) 0f else (done + fail).toFloat() / l.size }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
             Text("$done de ${l.size} enviados" + (if (resolving > 0) " • abrindo $resolving página(s)" else "") + (if (downs > 0) " • baixando $downs" else "") + (if (ups > 0) " • enviando $ups" else "") +
                 (if (paused) " • PAUSADO" else if (running) " • rodando em segundo plano" else ""),
@@ -425,14 +429,14 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
             dismissButton = { TextButton({ confirm = false }) { Text("Voltar") } })
     }
     // contagem por grupo numa passada só (rápido com milhares de itens)
-    val cnt = IntArray(5); for (t in l) cnt[pipeGroup(t.st)]++
+    val cnt = IntArray(7); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
     cnt[0] = l.size
     item(key = "pipe-chips") { PipeChips(filter, cnt) }
     val f = filter.value
     val shown = if (f == 0) {
         // Todos: o que está andando primeiro, depois a ordem da fila
         val a = ArrayList<Pipeline.PItem>(l.size); l.filterTo(a) { pipeGroup(it.st) == 1 }; l.filterTo(a) { pipeGroup(it.st) != 1 }; a
-    } else l.filter { pipeGroup(it.st) == f }
+    } else if (f == 5) l.filter { !isPhotoItem(it) } else if (f == 6) l.filter { isPhotoItem(it) } else l.filter { pipeGroup(it.st) == f }
     if (shown.isEmpty()) item(key = "pipe-empty") { Text("Nada aqui.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
     items(shown, key = { "pq" + it.id }, contentType = { "pipe" }) { t -> PipeRow(t) }
 }
@@ -440,7 +444,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PipeChips(filter: MutableState<Int>, cnt: IntArray) {
-    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas")
+    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos")
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         names.forEachIndexed { i, n ->
             FilterChip(selected = filter.value == i, onClick = { filter.value = i }, label = { Text("$n (${cnt[i]})", maxLines = 1) })

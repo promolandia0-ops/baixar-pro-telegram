@@ -90,7 +90,7 @@ object BrowserDetect {
     private val keys = HashMap<String, String>()
 
     fun reset() {
-        loadedHosts.clear()
+        loadedHosts.clear(); relaunched = 0
         synchronized(seenCards) {
             seenCards.clear(); keys.clear()
             hidden.values.forEach { d -> d.keys.forEach { keys[it] = d.key }; keys[d.key] = d.key }
@@ -203,27 +203,38 @@ object BrowserDetect {
     // ---------------- lista salva no disco (sobrevive a fechar/atualizar o app) ----------------
     private val loadedHosts = HashSet<String>()
     /** Repõe a lista salva deste site (aditivo). Itens já enviados/na fila não voltam. */
+    /**
+     * Lista salva do site volta como estava. Lê e filtra o arquivo fora da thread principal e aplica na tela
+     * aos poucos (o navegador abre na hora, mesmo com milhares de itens salvos e a fila rodando).
+     */
     fun restore(host: String) {
         if (host.isBlank() || !loadedHosts.add(host)) return
-        val (vs, ps) = BrowserStore.loadPanel(host)
-        var relaunch = 0
-        for (d in vs) {
-            if (list.any { it.key == d.key }) continue
-            val pk = d.keys
-            if (blocked(d.f, pk + dedupeKeys(d.f))) continue
-            synchronized(seenCards) {
-                (pk + dedupeKeys(d.f)).forEach { if (!keys.containsKey(it)) keys[it] = d.key }; keys[d.key] = d.key
-                if (d.key.startsWith("card:") || d.state != 0) { seenCards += d.f.page; cardPages += normPage(d.f.page) }
+        scope.launch {
+            val (vs, ps) = BrowserStore.loadPanel(host)
+            val okV = vs.filter { d -> !blocked(d.f, d.keys + dedupeKeys(d.f)) }
+            val okP = if (photosOn.value) ps.filter { d -> val k = d.keys.firstOrNull(); k != null && !Sent.isQueued(listOf(k)) && !Sent.anySent(listOf(k)) } else emptyList()
+            for (chunk in okV.chunked(200)) withContext(Dispatchers.Main) {
+                if (host !in loadedHosts) return@withContext
+                val have = list.mapTo(HashSet()) { it.key }
+                val add = ArrayList<Det>(chunk.size)
+                for (d in chunk) {
+                    if (!have.add(d.key)) continue
+                    val pk = d.keys
+                    synchronized(seenCards) {
+                        (pk + dedupeKeys(d.f)).forEach { if (!keys.containsKey(it)) keys[it] = d.key }; keys[d.key] = d.key
+                        if (d.key.startsWith("card:") || d.state != 0) { seenCards += d.f.page; cardPages += normPage(d.f.page) }
+                    }
+                    add += d.copy(sent = false)
+                    if (d.state == 1 && relaunched < 60) { relaunched++; resolve(d.f.page, d.f.title, d.f.page, d.f.extra) }
+                }
+                list.addAll(add)
             }
-            list += d.copy(state = if (d.state == 1 && relaunch >= 60) 1 else d.state, sent = false)
-            if (d.state == 1 && relaunch < 60) { relaunch++; resolve(d.f.page, d.f.title, d.f.page, d.f.extra) }
-        }
-        if (photosOn.value) for (d in ps) {
-            val k = d.keys.firstOrNull() ?: continue
-            if (k in photoKeys || Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k))) continue
-            photoKeys += k; photos += d
+            if (okP.isNotEmpty()) withContext(Dispatchers.Main) {
+                for (d in okP) { val k = d.keys.first(); if (k in photoKeys) continue; photoKeys += k; photos += d }
+            }
         }
     }
+    private var relaunched = 0
     fun loadedHostSet(): Set<String> = loadedHosts.toSet()
 
     /** Itens mandados baixar que ainda estavam carregando (já saíram da lista). Só na thread principal. */
@@ -412,6 +423,8 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
             val photosOn by BrowserDetect.photosOn
             val mm by BrowserDetect.mode
             MediaModeSelector(mm) { BrowserDetect.setMode(it); tab = if (it == 1) 1 else 0 }
+            Text("$total vídeo${if (total == 1) "" else "s"}" + (if (mm != 0) " • ${BrowserDetect.photos.size} foto${if (BrowserDetect.photos.size == 1) "" else "s"}" else ""),
+                Modifier.padding(top = 4.dp), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (mm == 2) TabRow(tab) {
                 Tab(tab == 0, { tab = 0 }, text = { Text("Vídeos ($total)") })
                 Tab(tab == 1, { tab = 1 }, text = { Text("Fotos (${BrowserDetect.photos.size})") })

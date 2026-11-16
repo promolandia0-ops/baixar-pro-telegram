@@ -58,9 +58,10 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     fun savePanel() { val v = BrowserDetect.list.toList(); val p = BrowserDetect.photos.toList(); val h = BrowserDetect.loadedHostSet()
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { BrowserStore.savePanel(v, p, h) } }
     DisposableEffect(Unit) {
+        JsRender.browserVisible = true
         BrowserDetect.reset(); BrowserDetect.warm()
         BrowserDetect.restore(Extract.host(address))   // lista salva deste site volta como estava
-        onDispose { savePanel(); CookieManager.getInstance().flush(); web?.destroy() }
+        onDispose { JsRender.browserVisible = false; savePanel(); CookieManager.getInstance().flush(); web?.destroy() }
     }
     // grava a lista do painel no disco quando muda (sobrevive a fechar/atualizar o app)
     LaunchedEffect(Unit) {

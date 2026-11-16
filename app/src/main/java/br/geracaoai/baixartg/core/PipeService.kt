@@ -1,5 +1,9 @@
 package br.geracaoai.baixartg.core
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.conflate
 import android.app.*
 import android.content.BroadcastReceiver
 import android.content.Context
@@ -40,8 +44,10 @@ class PipeService : Service() {
         } catch (_: Exception) { null }
         if (intent?.action != PAUSE) Pipeline.start()
         scope.coroutineContext.cancelChildren()
-        scope.launch {
-            combine(Pipeline.items, Pipeline.paused, Pipeline.running) { a, b, c -> Triple(a, b, c) }.collect { (l, paused, running) ->
+        scope.launch(Dispatchers.Default) {
+            // fora da thread principal e no máximo ~1 atualização por segundo (a fila emite muito com 1000+ itens)
+            combine(Pipeline.items, Pipeline.paused, Pipeline.running) { a, b, c -> Triple(a, b, c) }
+                .conflate().onEach { kotlinx.coroutines.delay(1_000) }.flowOn(Dispatchers.Default).collect { (l, paused, running) ->
                 val nm = getSystemService(NotificationManager::class.java)
                 val done = l.count { it.st == Pipeline.PS.DONE }; val fail = l.count { it.st == Pipeline.PS.FAIL }
                 val total = l.size

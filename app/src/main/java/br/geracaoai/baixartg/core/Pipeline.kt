@@ -56,7 +56,7 @@ object Pipeline {
                 }
             }
         }
-        saveNow()
+        saveAsync()
     }
 
     /** Há trabalho pendente (para retomar depois de reiniciar/atualizar). */
@@ -90,7 +90,10 @@ object Pipeline {
         if (saveJob?.isActive == true) return
         saveJob = scope.launch { delay(1500); saveNow() }
     }
-    @Synchronized fun saveNow() {
+    private val saveLock = Any()
+    /** Grava sempre fora da thread principal. */
+    private fun saveAsync() { scope.launch { saveNow() } }
+    fun saveNow(): Unit = synchronized(saveLock) {
         val fl = file ?: return
         try {
             val a = JSONArray()
@@ -147,26 +150,47 @@ object Pipeline {
             items.value = items.value + add
             n = add.size
         }
-        saveNow()
+        saveAsync()   // nada de arquivo na thread principal (tocar em Baixar não trava a tela)
         start()
         return n
     }
 
-    fun pause() { paused.value = true; engine?.cancel(); saveNow() }
-    fun resume() { paused.value = false; saveNow(); start() }
+    fun pause() { paused.value = true; engine?.cancel(); saveAsync() }
+    fun resume() { paused.value = false; saveAsync(); start() }
     fun cancelAll() {
         engine?.cancel()
         synchronized(lock) { items.value = items.value.filter { it.st !in ACTIVE } }
-        paused.value = false; saveNow()
+        paused.value = false; saveAsync()
     }
     fun retry(id: Long) { upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f) }; start() }
     fun retryFailed() { synchronized(lock) { items.value = items.value.map { if (it.st == PS.FAIL) it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "") else it } }; save(); start() }
-    fun clearDone() { synchronized(lock) { items.value = items.value.filter { it.st != PS.DONE } }; saveNow() }
+    fun clearDone() { synchronized(lock) { items.value = items.value.filter { it.st != PS.DONE } }; saveAsync() }
 
-    /** persist=false para progresso (não regrava o arquivo a cada %). */
+    /**
+     * persist=false = progresso: não regrava o arquivo e é juntado num lote aplicado no máximo ~4x/s
+     * (evita uma tempestade de recomposições/notificações com 1000+ itens).
+     */
     private fun upd(id: Long, persist: Boolean = true, fn: (PItem) -> PItem) {
-        synchronized(lock) { items.value = items.value.map { if (it.id == id) fn(it) else it } }
-        if (persist) save()
+        if (!persist) {
+            pendingProg.merge(id, fn) { old, new -> { p: PItem -> new(old(p)) } }
+            if (flusher?.isActive != true) flusher = scope.launch { delay(250); flushProg() }
+            return
+        }
+        synchronized(lock) {
+            val pf = pendingProg.remove(id)
+            items.value = items.value.map { if (it.id == id) fn(if (pf != null) pf(it) else it) else it }
+        }
+        save()
+    }
+    private val pendingProg = java.util.concurrent.ConcurrentHashMap<Long, (PItem) -> PItem>()
+    @Volatile private var flusher: Job? = null
+    private fun flushProg() {
+        if (pendingProg.isEmpty()) return
+        synchronized(lock) {
+            val m = HashMap<Long, (PItem) -> PItem>()
+            for (k in pendingProg.keys.toList()) pendingProg.remove(k)?.let { m[k] = it }
+            if (m.isNotEmpty()) items.value = items.value.map { t -> m[t.id]?.invoke(t) ?: t }
+        }
     }
     private fun claim(pred: (PItem) -> Boolean, st: PS): PItem? = synchronized(lock) {
         val l = items.value; val i = l.indexOfFirst(pred)
