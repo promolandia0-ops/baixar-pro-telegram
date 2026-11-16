@@ -74,6 +74,9 @@ object Net {
     val fast: OkHttpClient = newClient(5, 8, 8, 12, 128, 32, 64)
     /** Cliente com timeout longo para o servidor (Render pode demorar para acordar / yt-dlp). */
     val slow: OkHttpClient = http.newBuilder().connectTimeout(90, TimeUnit.SECONDS).readTimeout(300, TimeUnit.SECONDS).build()
+    /** Só do navegador (detecção): conexões e fila de pedidos próprias — nunca espera atrás dos downloads/envios da fila. */
+    val browser: OkHttpClient = newClient(8, 20, 20, 40, 64, 16, 16)
+    val browserSlow: OkHttpClient = newClient(30, 45, 45, 50, 16, 8, 8)
 }
 
 /** Executa a chamada de forma cancelável (o botão Parar cancela a conexão na hora). */

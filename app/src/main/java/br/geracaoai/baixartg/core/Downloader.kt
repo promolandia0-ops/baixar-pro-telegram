@@ -393,10 +393,10 @@ object Downloader {
     }
 
     /** Pergunta ao servidor se ele (yt-dlp) acha vídeo na página. Retorna o título ou null. */
-    suspend fun probe(server: String, pageUrl: String): String? {
+    suspend fun probe(server: String, pageUrl: String, client: okhttp3.OkHttpClient = Net.slow): String? {
         val body = session(JSONObject().put("url", pageUrl), pageUrl).toString().toRequestBody("application/json".toMediaType())
         return try {
-            Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/info").post(body).build()).await().use { r ->
+            client.newCall(Request.Builder().url(server.trimEnd('/') + "/api/info").post(body).build()).await().use { r ->
                 val raw = r.body?.string() ?: ""
                 val j = try { JSONObject(raw) } catch (_: Exception) {
                     if (!r.isSuccessful) lastProbeError = "Servidor yt-dlp: HTTP ${r.code}"

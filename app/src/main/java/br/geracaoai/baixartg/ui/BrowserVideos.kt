@@ -93,7 +93,7 @@ object BrowserDetect {
             if (!photoPosts.add(np)) continue
             scope.launch {
                 photoGate.withPermit {
-                    val ps = try { Photos.fromPost(c.href, c.text) { u -> JsRender.render(u, 15_000)?.html } } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+                    val ps = try { Photos.fromPost(c.href, c.text) { u -> photoRender.withPermit { JsRender.render(u, 15_000)?.html } } } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
                     val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
                     if (ps.isNotEmpty() && ok.isEmpty()) photoPosts.remove(np)   // nome diferente: pode voltar se mudar a busca
                     if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false) }
@@ -145,8 +145,15 @@ object BrowserDetect {
     }
     fun toggle(key: String, v: Boolean) { val i = list.indexOfFirst { it.key == key }; if (i >= 0 && !list[i].sent) list[i] = list[i].copy(sel = v) }
     val pending = mutableIntStateOf(0)
+    /** Cards desta página que já estão na fila ou já foram enviados (não são abertos de novo). */
+    val alreadyHere = mutableIntStateOf(0)
+    /** Quando a página atual começou a abrir (para o "Procurando…" ter fim). */
+    val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
+    fun newPage() { alreadyHere.intValue = 0; pageAt.longValue = System.currentTimeMillis() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(3)
+    /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
+    private val photoRender = Semaphore(1)
     private val seenCards = HashSet<String>()
     private val keys = HashMap<String, String>()
 
@@ -425,19 +432,34 @@ object BrowserDetect {
     }
 
     private fun resolve(card: String, title: String, page: String, cardCtx: String = "") {
+        // Causa do "Procurando vídeos…" sem fim: cards que já estavam na fila/enviados eram abertos de novo
+        // (página + WebView com play + servidor), ocupando as 3 vagas do navegador por muito tempo; os novos
+        // ficavam esperando atrás deles e a lista não aparecia. Agora já na fila/enviado = pula na hora.
+        if (!Extract.isVideoUrl(card)) {
+            val pk = listOf("ip:" + normPage(card), "p:" + normPage(card))
+            val f = Found(card, card, "vídeo", Kind.SERVER)
+            val skip = try { blocked(f, pk) } catch (_: Exception) { false }
+            if (skip) {
+                val k = "card:" + normPage(card)
+                synchronized(seenCards) { pk.forEach { if (!keys.containsKey(it)) keys[it] = "x:$k" } }
+                scope.launch(Dispatchers.Main) { alreadyHere.intValue++ }
+                return
+            }
+        }
         scope.launch(Dispatchers.Main) { pending.intValue++ }
         val t0 = TitleFix.pick(title, cardCtx.take(150))
         cardPages += normPage(card)
         if (!Extract.isVideoUrl(card)) placeholder(card, t0, cardCtx)
         jobs[normPage(card)] = scope.launch {
             try {
-                gate.withPermit {
+                // cada card tem prazo: nada fica "carregando…" para sempre
+                val ok = withTimeoutOrNull(75_000) { gate.withPermit {
                     var t = TitleFix.pick(title, cardCtx.take(150))
                     val tEarly = t.ifBlank { TitleFix.pick(pageInfo[normPage(page)]?.first, Extract.fileName(card)).ifBlank { "vídeo" } }
                     if (Extract.isVideoUrl(card)) { publish(Found(card, page, tEarly, Extract.mediaKindOf(card) ?: Kind.DIRECT, ref = page, extra = tEarly)); return@withPermit }
                     if (Extract.YTDLP_HOSTS.containsMatchIn(card)) { publish(Found(card, card, tEarly, Kind.SERVER, extra = tEarly)); return@withPermit }
                     val html = try {
-                        Net.fast.newCall(Request.Builder().url(card).header("Referer", page).build()).await().use { r ->
+                        Net.browser.newCall(Request.Builder().url(card).header("Referer", page).build()).await().use { r ->
                             val ct = r.header("Content-Type") ?: ""
                             if (r.isSuccessful && (ct.isEmpty() || ct.contains("html", true))) r.body?.string()?.take(1_500_000) else null
                         }
@@ -456,10 +478,11 @@ object BrowserDetect {
                         publish(wv.copy(page = card, ref = wv.ref ?: card, title = tt, extra = listOf(tt, ctxAll, wv.extra).joinToString(" ").trim()), listOf("ip:" + normPage(card)))
                         return@withPermit
                     }
-                    val pt = Downloader.probe(Prefs.server, card)
+                    val pt = withTimeoutOrNull(40_000) { Downloader.probe(Prefs.server, card, Net.browserSlow) }
                     if (pt != null) publish(Found(card, card, TitleFix.pick(tt, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(ctxAll, pt).joinToString(" ")), listOf("ip:" + normPage(card)))
                     else markFailed(card)
-                }
+                } }
+                if (ok == null) markFailed(card)
             } catch (e: Exception) { if (e is CancellationException) throw e; markFailed(card) }
             finally { withContext(NonCancellable + Dispatchers.Main) { pending.intValue-- } }
         }

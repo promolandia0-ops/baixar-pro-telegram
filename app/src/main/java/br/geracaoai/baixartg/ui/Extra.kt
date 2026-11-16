@@ -125,7 +125,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                     if (!request.isForMainFrame) return false
                     return br.geracaoai.baixartg.web.AdBlock.blockNavigation(request.url.toString(), v.url ?: current, request.hasGesture(), request.isRedirect)
                 }
-                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { if (url != current) BrowserDetect.newPage(); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
                 override fun onPageFinished(v: WebView, url: String) {
                     if (url.startsWith("http")) { br.geracaoai.baixartg.Prefs.browserUrl = url; BrowserStore.visit(url, v.title ?: ""); BrowserDetect.restore(Extract.host(url)) }
                     current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; scheduleCollect(400) }
@@ -167,10 +167,18 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
             web = this
             if (address.length > 8) loadUrl(address)
         } }, modifier = Modifier.fillMaxSize().padding(pad))
-        if (detected > 0 || pendingN > 0 || phN > 0) Box(Modifier.fillMaxSize().padding(pad).padding(16.dp), contentAlignment = Alignment.BottomEnd) {
+        val already by BrowserDetect.alreadyHere
+        val pageAt by BrowserDetect.pageAt
+        var now by remember { mutableStateOf(System.currentTimeMillis()) }
+        LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); now = System.currentTimeMillis() } }
+        // "Procurando" tem prazo: sem nada novo em 20 s (ou nada mais abrindo), diz que não há vídeo novo
+        val searching = detected == 0 && phN == 0 && pendingN > 0 && (pageAt == 0L || now - pageAt < 20_000)
+        if (detected > 0 || pendingN > 0 || phN > 0 || already > 0) Box(Modifier.fillMaxSize().padding(pad).padding(16.dp), contentAlignment = Alignment.BottomEnd) {
             ExtendedFloatingActionButton(onClick = { if (detected > 0 || phN > 0) sheet = true },
-                icon = { if (detected == 0) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.VideoLibrary, null) },
-                text = { Text(if (detected > 0) (if (BrowserDetect.term.value.isNotBlank()) "$marked de $detected marcados" else "$detected vídeos") + (if (pendingN > 0) " (+$pendingN…)" else "") else if (phN > 0) "$phN fotos" else "Procurando vídeos…") })
+                icon = { if (searching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.VideoLibrary, null) },
+                text = { Text(if (detected > 0) (if (BrowserDetect.term.value.isNotBlank()) "$marked de $detected marcados" else "$detected vídeos") + (if (pendingN > 0) " (+$pendingN…)" else "")
+                    else if (phN > 0) "$phN fotos" else if (searching) "Procurando vídeos…"
+                    else "Nenhum vídeo novo nesta página" + (if (already > 0) " • $already já na fila/enviados" else "")) })
         }
     }
     if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }) { term ->

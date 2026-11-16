@@ -31,14 +31,22 @@ object Pipeline {
     val running = MutableStateFlow(false)
     private lateinit var app: Context
     private var file: File? = null
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    /** Threads da fila com prioridade de segundo plano: a tela e o navegador sempre ganham a CPU, a fila usa o resto. */
+    private val bgDispatcher = java.util.concurrent.Executors.newCachedThreadPool { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run() }, "pipe").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
+    /** Comparação por imagem: 1 thread de prioridade mínima (não disputa com nada). */
+    val hashDispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST); r.run() }, "pipe-hash").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
+    private val scope = CoroutineScope(SupervisorJob() + bgDispatcher)
     private var engine: Job? = null
     private val lock = Any()
     private var nextId = 1L
     private val ACTIVE = setOf(PS.WAIT, PS.RESOLVING, PS.READY, PS.DOWN, PS.UP)
-    private const val RESOLVERS = 4
-    private const val DOWNLOADERS = 3
-    private const val UPLOADERS = 2
+    private const val RESOLVERS = 5
+    private const val DOWNLOADERS = 4
+    private const val UPLOADERS = 3
     private const val RESOLVE_TIMEOUT = 100_000L   // estático + ~30 s de página + servidor
     private const val OPEN_GAP = 350L
     private const val STALL_MS = 60_000L
@@ -370,7 +378,7 @@ object Pipeline {
             var vfp: VisualHash.Fp? = null
             if (Prefs.visualDedupe && f.kind != Kind.PHOTO && !t.force) {
                 upd(t.id, persist = false) { it.copy(msg = "Comparando com os já enviados…") }
-                vfp = try { withTimeoutOrNull(45_000) { withContext(Dispatchers.Default) { VisualHash.fingerprint(file, t.title) } } } catch (e: Exception) { if (e is CancellationException && e !is TimeoutCancellationException) throw e; null }
+                vfp = try { withTimeoutOrNull(60_000) { withContext(hashDispatcher) { VisualHash.fingerprint(file, t.title) } } } catch (e: Exception) { if (e is CancellationException && e !is TimeoutCancellationException) throw e; null }
                 if (vfp != null) {
                     val m = VisualHash.claim(t.id, vfp)
                     if (m != null) {
@@ -408,7 +416,7 @@ object Pipeline {
             if (vfp != null) VisualHash.markSent(t.id, vfp)
             else if (f.kind != Kind.PHOTO && Prefs.visualDedupe) {
                 // enviado sem checagem (Enviar mesmo assim): guarda a impressão para os próximos
-                try { withContext(Dispatchers.Default) { VisualHash.fingerprint(file, t.title) }?.let { VisualHash.markSent(t.id, it) } } catch (e: Exception) { if (e is CancellationException) throw e }
+                try { withContext(hashDispatcher) { VisualHash.fingerprint(file, t.title) }?.let { VisualHash.markSent(t.id, it) } } catch (e: Exception) { if (e is CancellationException) throw e }
             }
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
         } catch (e: CancellationException) { throw e
