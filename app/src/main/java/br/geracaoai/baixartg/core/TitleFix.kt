@@ -1,5 +1,15 @@
 package br.geracaoai.baixartg.core
 
+// expressões fixas compiladas uma vez (antes: recompiladas a cada chamada)
+private val RX_TITLEFIX_1 = Regex("""\s+""")
+private val RX_TITLEFIX_2 = Regex("""\s+""")
+private val RX_TITLEFIX_3 = Regex("""\s*[\(\[].*?[\)\]]\s*""")
+private val RX_TITLEFIX_4 = Regex("""\s+""")
+private val RX_TITLEFIX_5 = Regex("""\s+""")
+private val RX_TITLEFIX_6 = Regex("""\s+[|–—·•]\s+""")
+private val RX_TITLEFIX_7 = Regex("""(?i)\.(vtt|srt|ass|ssa|ttml|dfxp)(?:$|[?#])|/(?:subtitles?|captions?|legendas?|subs)/""")
+
+
 /** Rejeita "títulos" que são rótulos de player: idiomas de áudio/legenda, qualidade, menus, nomes de arquivo genéricos. */
 object TitleFix {
     private val LANGS = setOf(
@@ -23,15 +33,15 @@ object TitleFix {
     private val QUALITY = Regex("""(?i)^(?:\d{3,4}p\d{0,2}|[1-8]k|\d{3,4}x\d{3,4}|\d+(?:\.\d+)?\s*(?:kbps|mbps|mb|gb|kb)|(?:low|medium|high|best|worst)(?:\s*quality)?)$""")
     private val FILEISH = Regex("""(?i)^[\w.\-]+\.(?:mp4|m3u8|mpd|webm|mkv|mov|m4v|ts|vtt|srt|php|html?)$|^[0-9a-f]{12,}$|^[\w\-]{20,}$""")
 
-    private fun n(s: String) = NameFilter.norm(s).replace(Regex("""\s+"""), " ").trim()
+    private fun n(s: String) = NameFilter.norm(s).replace(RX_TITLEFIX_1, " ").trim()
     private val LANGS_N by lazy { LANGS.map { n(it) }.toHashSet() }
     private val GENERIC_N by lazy { GENERIC.map { n(it) }.toHashSet() }
 
     fun isJunk(t0: String?): Boolean {
-        val t = t0?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
+        val t = t0?.replace(RX_TITLEFIX_2, " ")?.trim().orEmpty()
         if (t.length < 2) return true
         val x = n(t)
-        val noParen = n(t.replace(Regex("""\s*[\(\[].*?[\)\]]\s*"""), " "))
+        val noParen = n(t.replace(RX_TITLEFIX_3, " "))
         if (x in LANGS_N || noParen in LANGS_N || x in GENERIC_N || noParen in GENERIC_N) return true
         if (QUALITY.matches(t)) return true
         if (FILEISH.matches(t)) return true
@@ -43,22 +53,22 @@ object TitleFix {
 
     /** Remove trechos-lixo de um texto de contexto (mantém o resto). */
     fun clean(t: String?): String {
-        val s = t?.replace(Regex("""\s+"""), " ")?.trim().orEmpty()
+        val s = t?.replace(RX_TITLEFIX_4, " ")?.trim().orEmpty()
         if (s.isEmpty() || isJunk(s)) return ""
         return s
     }
 
     /** Primeiro candidato que não é lixo. */
-    fun pick(vararg c: String?): String = c.firstOrNull { !isJunk(it) }?.replace(Regex("""\s+"""), " ")?.trim()?.take(150).orEmpty()
+    fun pick(vararg c: String?): String = c.firstOrNull { !isJunk(it) }?.replace(RX_TITLEFIX_5, " ")?.trim()?.take(150).orEmpty()
 
     /** "Título | Site" -> "Título". */
     fun stripSite(t: String, site: String = ""): String {
         var s = t.trim()
         if (site.length > 2) s = s.replace(Regex("""\s*[|\-–—:·•]\s*""" + Regex.escape(site) + """\s*$""", RegexOption.IGNORE_CASE), "")
-        val parts = s.split(Regex("""\s+[|–—·•]\s+"""))
+        val parts = s.split(RX_TITLEFIX_6)
         if (parts.size >= 2 && parts.last().length <= 30) s = parts.dropLast(1).joinToString(" | ")
         return s.trim()
     }
 
-    fun isSubtitleUrl(u: String) = Regex("""(?i)\.(vtt|srt|ass|ssa|ttml|dfxp)(?:$|[?#])|/(?:subtitles?|captions?|legendas?|subs)/""").containsMatchIn(u)
+    fun isSubtitleUrl(u: String) = RX_TITLEFIX_7.containsMatchIn(u)
 }

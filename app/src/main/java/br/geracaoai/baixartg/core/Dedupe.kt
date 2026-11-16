@@ -14,9 +14,12 @@ import java.io.File
 /**
  * "Limpar repetidos" das Mensagens Salvas. Só lê metadados (nunca baixa arquivo).
  * Iguais = mesmo arquivo do Telegram (unique_id) OU mesmo tamanho + mesma duração (±1 s) + mesma largura/altura.
- * De cada grupo fica a mensagem MAIS RECENTE; as outras são apagadas só depois da confirmação.
+ * De cada grupo fica a cópia de MAIOR QUALIDADE (resolução, depois taxa de bits, depois tamanho; empate = a mais recente);
+ * as outras são apagadas só depois da confirmação. Nunca apaga a única cópia.
  */
 object Dedupe {
+    /** Regra única dos dois modos: maior resolução → maior taxa de bits (tamanho/duração) → maior arquivo → mais recente. */
+    private val QUALITY = compareBy<E>({ it.w.toLong() * it.h }, { if (it.dur > 0) it.size / it.dur else it.size }, { it.size }, { it.date }, { it.id })
     /** Entrada compacta (sem guardar a mensagem inteira). kind: 0 vídeo, 1 documento-vídeo, 2 foto. */
     class E(val id: Long, val date: Int, val size: Long, val dur: Int, val w: Int, val h: Int, val uid: String, val kind: Int, val cap: String,
             val thumbId: Int = 0, val miniD: Long = 0, val miniP: Long = 0, val miniOk: Boolean = false)
@@ -61,6 +64,7 @@ object Dedupe {
     fun toggle(id: Long, v: Boolean) { excluded.value = if (v) excluded.value - id else excluded.value + id }
     fun setAll(v: Boolean) { excluded.value = if (v) emptySet() else groups.flatMap { it.dels.toList() }.toSet() }
     /** Modo por imagem: marca só os grupos de alta confiança (nunca automático). */
+    fun allCount(): Int = groups.sumOf { it.dels.size }
     fun markSuggested() { excluded.value = groups.filter { !it.sure }.flatMap { it.dels.toList() }.toSet() }
 
     fun cancel() { job?.cancel(); if (phase.value == Phase.SCANNING) phase.value = Phase.IDLE }
@@ -203,7 +207,7 @@ object Dedupe {
                     }
                     if (members.size < 2) continue
                     members.forEach { used += it.id }
-                    val keep = members.maxWith(compareBy<E>({ it.w.toLong() * it.h }, { it.size }, { it.date }, { it.id }))   // maior qualidade fica
+                    val keep = members.maxWith(QUALITY)   // maior qualidade fica
                     val sure = members.all { m -> m === keep || (near(full[m.id]!!, full[keep.id]!!, VSURE) && m.miniOk && keep.miniOk &&
                         VisualHash.ham(m.miniD, keep.miniD) <= VSURE && VisualHash.ham(m.miniP, keep.miniP) <= VSURE) }
                     gs += G(keep.id, members.filter { it !== keep }.map { it.id }.toLongArray(), sure)
@@ -258,8 +262,8 @@ object Dedupe {
         val comp = HashMap<Int, MutableList<E>>()
         for (i in 0 until n) comp.getOrPut(find(i)) { ArrayList(2) } += all[i]
         return comp.values.filter { it.size > 1 }.map { l ->
-            val s = l.sortedWith(compareByDescending<E> { it.date }.thenByDescending { it.id })   // mais recente primeiro
-            G(s[0].id, s.drop(1).map { it.id }.toLongArray())
+            val keep = l.maxWith(QUALITY)   // maior qualidade fica (cópias idênticas: a mais recente)
+            G(keep.id, l.filter { it !== keep }.map { it.id }.toLongArray())
         }
     }
 

@@ -13,6 +13,24 @@ import org.jsoup.nodes.Element
 import java.net.URI
 import kotlin.coroutines.coroutineContext
 
+// expressões fixas compiladas uma vez (antes: recompiladas a cada chamada)
+private val RX_CRAWLER_1 = Regex("""\.m3u8(?:$|[?/])""", RegexOption.IGNORE_CASE)
+private val RX_CRAWLER_2 = Regex("""\.mpd(?:$|[?/])""", RegexOption.IGNORE_CASE)
+private val RX_CRAWLER_3 = Regex("""\b(icon|logo|sprite|avatar|emoji|badge)\b""", RegexOption.IGNORE_CASE)
+private val RX_CRAWLER_4 = Regex("""\b(thumb|thumbnail|poster|preview|cover|capa|sprite)\b""")
+private val RX_CRAWLER_5 = Regex("\\s+")
+private val RX_CRAWLER_6 = Regex("h[1-6]")
+private val RX_CRAWLER_7 = Regex("\\s+")
+private val RX_CRAWLER_8 = Regex("\\s+")
+private val RX_CRAWLER_9 = Regex("\\s+")
+private val RX_CRAWLER_10 = Regex("\\s+")
+private val RX_CRAWLER_11 = Regex("\\s+")
+private val RX_CRAWLER_12 = Regex("\\s+")
+private val RX_CRAWLER_13 = Regex("^function/\\d+/")
+private val RX_CRAWLER_14 = Regex("\\}\\s*,\\s*\\{")
+private val RX_CRAWLER_15 = Regex("""https?://\S+""")
+
+
 enum class Kind { DIRECT, HLS, SERVER, MEGA, PHOTO }
 
 /** ref = Referer no download; extra = texto associado com folga curta (nunca o título da página inteira). */
@@ -107,8 +125,8 @@ object Extract {
 
     fun isVideoUrl(u: String) = VIDEO_EXT.containsMatchIn(u.substringBefore('#'))
     fun isPhotoUrl(u: String) = PHOTO_EXT.containsMatchIn(u.substringBefore('#'))
-    fun isHls(u: String) = Regex("""\.m3u8(?:$|[?/])""", RegexOption.IGNORE_CASE).containsMatchIn(u)
-    fun isDash(u: String) = Regex("""\.mpd(?:$|[?/])""", RegexOption.IGNORE_CASE).containsMatchIn(u)
+    fun isHls(u: String) = RX_CRAWLER_1.containsMatchIn(u)
+    fun isDash(u: String) = RX_CRAWLER_2.containsMatchIn(u)
     fun skipPage(u: String) = SKIP_EXT.containsMatchIn(u) || isVideoUrl(u) || isPhotoUrl(u)
 
     fun isIconOrSprite(u: String, el: Element? = null): Boolean {
@@ -117,7 +135,7 @@ object Extract {
         val h = el?.attr("height")?.toIntOrNull() ?: el?.attr("data-height")?.toIntOrNull() ?: 0
         if ((w in 1..64) || (h in 1..64)) return true
         val cls = (el?.className().orEmpty() + " " + el?.id().orEmpty() + " " + el?.attr("alt"))
-        if (Regex("""\b(icon|logo|sprite|avatar|emoji|badge)\b""", RegexOption.IGNORE_CASE).containsMatchIn(cls)) return true
+        if (RX_CRAWLER_3.containsMatchIn(cls)) return true
         var p = el?.parent()
         var hops = 0
         while (p != null && hops < 4) {
@@ -142,7 +160,7 @@ object Extract {
         if (isVideoThumb(u)) return true
         if (el == null) return false
         val cls = (el.className() + " " + el.id() + " " + el.attr("alt") + " " + el.attr("itemprop")).lowercase()
-        if (Regex("""\b(thumb|thumbnail|poster|preview|cover|capa|sprite)\b""").containsMatchIn(cls)) return true
+        if (RX_CRAWLER_4.containsMatchIn(cls)) return true
         if (el.closest("video") != null) return true
         fun isPlayer(e: Element?): Boolean {
             if (e == null) return false
@@ -195,7 +213,7 @@ object Extract {
     fun parseSrcset(base: String, srcset: String): String? {
         var best: Pair<String, Int>? = null
         for (part in srcset.split(',')) {
-            val bits = part.trim().split(Regex("\\s+"))
+            val bits = part.trim().split(RX_CRAWLER_5)
             if (bits.isEmpty()) continue
             val u = abs(base, bits[0]) ?: continue
             val desc = bits.getOrNull(1)?.lowercase().orEmpty()
@@ -256,20 +274,20 @@ object Extract {
         val pageText: String = "",
     )
 
-    private fun isHeading(e: Element) = e.tagName().matches(Regex("h[1-6]")) || e.hasClass("title") || e.hasClass("name")
+    private fun isHeading(e: Element) = e.tagName().matches(RX_CRAWLER_6) || e.hasClass("title") || e.hasClass("name")
 
     private fun isTrivial(e: Element): Boolean {
         val t = e.tagName()
         if (t in setOf("br", "hr", "script", "style", "link", "meta", "noscript", "svg", "path")) return true
         if (t in MEDIA_TAGS) return true
         if (t == "a" && e.select("img,video,source").isNotEmpty() && e.ownText().trim().length < 3) return true
-        val text = e.text().replace(Regex("\\s+"), " ").trim()
+        val text = e.text().replace(RX_CRAWLER_7, " ").trim()
         return text.length <= 2 && e.select("img,video,iframe,source").isEmpty()
     }
 
     private fun isSubstantial(e: Element): Boolean {
         if (e.tagName() in setOf("section", "article", "nav", "header", "footer", "main", "aside")) return true
-        val text = e.ownText().ifBlank { e.text() }.replace(Regex("\\s+"), " ").trim()
+        val text = e.ownText().ifBlank { e.text() }.replace(RX_CRAWLER_8, " ").trim()
         return text.length >= 40 && e.select("video,img,iframe").isEmpty()
     }
 
@@ -302,7 +320,7 @@ object Extract {
 
     fun nearby(e: Element): String {
         val bits = ArrayList<String>()
-        fun add(s: String?) { val t = s?.replace(Regex("\\s+"), " ")?.trim().orEmpty(); if (t.length > 1 && !TitleFix.isJunk(t)) bits += t }
+        fun add(s: String?) { val t = s?.replace(RX_CRAWLER_9, " ")?.trim().orEmpty(); if (t.length > 1 && !TitleFix.isJunk(t)) bits += t }
         add(e.attr("alt")); add(e.attr("title")); add(e.attr("aria-label")); add(e.attr("data-title")); add(e.attr("data-name")); add(e.attr("data-caption"))
         add(e.ownText())
         val short = e.text().trim()
@@ -323,11 +341,11 @@ object Extract {
             wrap.selectFirst("figcaption")?.let { add(it.text()) }
             add(wrap.attr("title")); add(wrap.attr("aria-label")); add(wrap.attr("data-title")); add(wrap.attr("data-name"))
         }
-        return bits.joinToString(" ").replace(Regex("\\s+"), " ").trim().take(400)
+        return bits.joinToString(" ").replace(RX_CRAWLER_10, " ").trim().take(400)
     }
 
     private fun putCtx(ctx: MutableMap<String, String>, url: String, text: String?) {
-        val t = text?.replace(Regex("\\s+"), " ")?.trim().orEmpty(); if (t.length < 2) return
+        val t = text?.replace(RX_CRAWLER_11, " ")?.trim().orEmpty(); if (t.length < 2) return
         val old = ctx[url]
         if (old.isNullOrBlank()) ctx[url] = t.take(400) else if (!old.contains(t.take(40))) ctx[url] = (old + " " + t).trim().take(500)
     }
@@ -359,7 +377,7 @@ object Extract {
             doc.selectFirst("meta[property=og:description]")?.attr("content"), doc.selectFirst("meta[name=description]")?.attr("content"),
             doc.selectFirst("meta[name=author]")?.attr("content"), doc.selectFirst("[itemprop=author]")?.text(), doc.selectFirst("a[rel=author]")?.text(),
             doc.select("[class*=channel],[class*=author],[class*=uploader],[class*=teacher],[class*=professor],[class*=instrutor],[class*=instructor]").take(3).joinToString(" ") { it.text().take(120) },
-        ).joinToString(" ").replace(Regex("\\s+"), " ").trim().take(600)
+        ).joinToString(" ").replace(RX_CRAWLER_12, " ").trim().take(600)
         fun addVideo(u: String?, text: String? = null, kind: Kind? = null) {
             val a = abs(pageUrl, u) ?: return
             if (TitleFix.isSubtitleUrl(a)) return
@@ -422,7 +440,7 @@ object Extract {
             val u = m.value
             if (isPhotoUrl(u)) addPhoto(u) else addVideo(u)
         }
-        KVS.findAll(raw).forEach { addVideo(it.groupValues[1].replace(Regex("^function/\\d+/"), "")) }
+        KVS.findAll(raw).forEach { addVideo(it.groupValues[1].replace(RX_CRAWLER_13, "")) }
         REL_MEDIA.findAll(raw).forEach { m ->
             val u = m.groupValues[1]
             if (isPhotoUrl(u)) addPhoto(u) else addVideo(u)
@@ -435,7 +453,7 @@ object Extract {
         // JSON-LD: name/description só no contentUrl/embedUrl do mesmo objeto.
         doc.select("script[type=application/ld+json], script[type=application/json]").forEach { s ->
             val body = s.data().replace("\\/", "/")
-            val objects = body.split(Regex("\\}\\s*,\\s*\\{")).map { it.trim().trimStart('[', '{').trimEnd(']', '}') }
+            val objects = body.split(RX_CRAWLER_14).map { it.trim().trimStart('[', '{').trimEnd(']', '}') }
             val chunks = if (objects.size <= 1) listOf(body) else objects
             for (chunk in chunks) {
                 val urls = LD_VIDEO.findAll(chunk).map { it.groupValues[1] }.toList()
@@ -1034,7 +1052,7 @@ class Crawler(
                 left.remove(u); okShapes += shape(u); diag.resolvedYtdlp.incrementAndGet()
                 emit(Found(u, u, TitleFix.pick(pageTitles[u], t).ifBlank { t }, Kind.SERVER, extra = listOfNotNull(pageTitles[u], t).joinToString(" ")))
             }
-            diag.ytdlp = if (okShapes.isNotEmpty()) "ok (reconhece o site)" else (Downloader.lastProbeError?.let { "falhou: " + it.replace(Regex("""https?://\S+"""), "<url>").take(120) } ?: "não reconheceu")
+            diag.ytdlp = if (okShapes.isNotEmpty()) "ok (reconhece o site)" else (Downloader.lastProbeError?.let { "falhou: " + it.replace(RX_CRAWLER_15, "<url>").take(120) } ?: "não reconheceu")
             if (okShapes.isNotEmpty()) {
                 for (chunk in left.toList().take(60).chunked(4)) {
                     coroutineContext.ensureActive()

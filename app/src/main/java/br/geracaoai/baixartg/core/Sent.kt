@@ -18,8 +18,28 @@ object Sent {
     private var qfile: File? = null
 
     fun init(dir: File) { file = File(dir, "sent_keys.txt"); qfile = File(dir, "queued_keys.txt"); load() }
+    /**
+     * Índice do histórico para hasCanonical (antes: percorria TODAS as chaves, com URI + regex em cada uma, na thread
+     * da tela, a cada vídeo detectado). Mesmo resultado: mídia canônica e "stem" de cada chave guardados uma vez.
+     */
+    private val canonIdx: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val stemIdx: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private fun index(key: String) {
+        try {
+            when {
+                key.startsWith("c:") -> canonIdx += key.removePrefix("c:")
+                key.startsWith("s:") -> stemIdx += key.removePrefix("s:")
+                key.startsWith("v:") -> {
+                    val u0 = key.removePrefix("v:"); val u = if (u0.startsWith("http")) u0 else "https://$u0"
+                    canonIdx += MediaIdentity.canonicalMedia(u)
+                    stemIdx += MediaIdentity.fileStem(u)
+                }
+            }
+        } catch (_: Exception) {}
+    }
     private fun load() {
-        set.clear(); file?.takeIf { it.exists() }?.forEachLine { if (it.isNotBlank()) set += it.trim() }
+        set.clear(); canonIdx.clear(); stemIdx.clear()
+        file?.takeIf { it.exists() }?.forEachLine { if (it.isNotBlank()) { val k = it.trim(); set += k; index(k) } }
         queued.clear(); qfile?.takeIf { it.exists() }?.forEachLine { if (it.isNotBlank()) queued += it.trim() }
     }
     @Synchronized fun markQueued(keys: Collection<String>) {
@@ -28,9 +48,10 @@ object Sent {
     }
     fun isQueued(keys: Collection<String>) = keys.any { it in queued }
     val size get() = set.size
-    @Synchronized fun clear() { set.clear(); file?.delete(); queued.clear(); qfile?.delete() }
+    @Synchronized fun clear() { set.clear(); canonIdx.clear(); stemIdx.clear(); file?.delete(); queued.clear(); qfile?.delete() }
     @Synchronized private fun addAll(keys: Collection<String>): Int {
         val new = keys.filter { set.add(it) }
+        new.forEach { index(it) }
         if (new.isNotEmpty()) file?.appendText(new.joinToString("\n", postfix = "\n"))
         return new.size
     }
@@ -75,18 +96,8 @@ object Sent {
         val media = MediaIdentity.canonicalMedia(f.url)
         val stem = MediaIdentity.fileStem(f.url)
         if (media.isBlank()) return false
-        return set.any { key ->
-            when {
-                key.startsWith("c:") -> key.removePrefix("c:") == media
-                key.startsWith("s:") -> MediaIdentity.usefulStem(stem) && stem.length >= 8 && key.removePrefix("s:") == stem
-                key.startsWith("v:") -> {
-                    val u = key.removePrefix("v:")
-                    MediaIdentity.canonicalMedia(if (u.startsWith("http")) u else "https://$u") == media ||
-                        (MediaIdentity.usefulStem(stem) && stem.length >= 8 && MediaIdentity.fileStem(if (u.startsWith("http")) u else "https://$u") == stem)
-                }
-                else -> false
-            }
-        }
+        if (media in canonIdx) return true
+        return MediaIdentity.usefulStem(stem) && stem.length >= 8 && stem in stemIdx
     }
 
     /** Grava depois do envio com sucesso (chaves do item + chaves extras: página do card, hash do arquivo). */

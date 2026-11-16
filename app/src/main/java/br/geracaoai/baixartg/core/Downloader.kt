@@ -44,7 +44,11 @@ object Downloader {
                 if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
             }
             Kind.PHOTO -> retry { direct(f.url, ref, dir, f.title, progress) }
-            Kind.HLS -> hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight)
+            // stream falhou: tenta a página pelo servidor yt-dlp (antes o item falhava direto)
+            Kind.HLS -> try { hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight) } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (f.page.isNotBlank() && f.page != f.url && !Extract.isVideoUrl(f.page)) viaServer(f.page, dir, server, progress) else throw e
+            }
             Kind.SERVER -> viaServer(f.url, dir, server, progress)
             Kind.MEGA -> Mega.download(f, dir, progress)
         }

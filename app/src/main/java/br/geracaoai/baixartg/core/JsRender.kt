@@ -146,6 +146,8 @@ object JsRender {
     }
     @Volatile var browserVisible = false
     private val queueSoloGate = Semaphore(1)
+    /** Com o navegador na tela: no máximo 1 página oculta NO TOTAL (navegador + fila), porque todas dividem o motor de páginas. */
+    private val visibleGate = Semaphore(1)
 
     private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000): JsPage? {
         val wait = if (play) timeoutMs.coerceIn(8_000L, 18_000L) else timeoutMs
@@ -185,6 +187,8 @@ object JsRender {
         if (!available()) { lastUnavailable = true; return null }
         lastUnavailable = false
         if (!acquire(pool, slotWait)) return null
+        val vis = browserVisible
+        if (vis && !acquire(visibleGate, slotWait)) { pool.release(); return null }
         return try {
             val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return null
             alive.incrementAndGet()
@@ -211,6 +215,9 @@ object JsRender {
                             val wv = buildView(act, hits, url, block)
                             view = wv
                             val box = PassThrough(act)
+                            // transparente: o Android não desenha (nem compõe na GPU) a página oculta; ela continua
+                            // "na tela" para o site carregar e tocar normalmente
+                            box.alpha = 0f
                             holder = box
                             val dm = act.resources.displayMetrics
                             box.addView(wv, FrameLayout.LayoutParams(dm.widthPixels.coerceAtLeast(720), dm.heightPixels.coerceAtLeast(1280)))
@@ -224,7 +231,7 @@ object JsRender {
                     }
                 }
             } } finally { alive.decrementAndGet() }
-        } finally { pool.release() }
+        } finally { pool.release(); if (vis) visibleGate.release() }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -252,7 +259,8 @@ object JsRender {
             override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 val u = request.url?.toString().orEmpty()
                 if (isHit(u)) synchronized(hits) { hits += u }
-                else if (block && br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, pageUrl, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
+                // bloqueador também nas páginas de play (antes elas abriam com todos os anúncios, pesando no navegador)
+                else if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, pageUrl, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                 else if (!block && !request.isForMainFrame && u.startsWith("http") && !STATIC.containsMatchIn(u.substringBefore('#')) && API_PATH.containsMatchIn(u) &&
                     !br.geracaoai.baixartg.web.AdBlock.isAdHost(request.url?.host.orEmpty())) {
                     synchronized(hits) { if (hits.count { it.startsWith("api:") } < 20) hits += "api:$u" }

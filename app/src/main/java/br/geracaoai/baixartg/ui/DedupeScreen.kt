@@ -34,12 +34,13 @@ fun DedupeScreen(onClose: () -> Unit) {
     var photos by remember { mutableStateOf(false) }
     var byImage by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf(false) }
+    var confirmAll by remember { mutableStateOf(false) }
     Scaffold(topBar = { TopAppBar(title = { Text("Limpar repetidos", fontWeight = FontWeight.SemiBold) },
         navigationIcon = { IconButton(onClose) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)) }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text(if (byImage || (phase == Dedupe.Phase.RESULT && Dedupe.visual)) "Por imagem: compara a duração e a miniatura que o Telegram já tem de cada vídeo (baixa só as miniaturas, nunca os vídeos). Bem rigoroso. Nada vem marcado: você confere as miniaturas lado a lado e marca o que é igual. De cada grupo fica sempre a cópia de maior qualidade."
-                else "Procura vídeos repetidos nas suas Mensagens Salvas do Telegram. Só lê as informações (arquivo, tamanho, duração) — não baixa nada. De cada vídeo repetido fica a cópia MAIS RECENTE. Nada é apagado sem você confirmar",
+                else "Procura vídeos repetidos nas suas Mensagens Salvas do Telegram. Só lê as informações (arquivo, tamanho, duração) — não baixa nada. De cada vídeo repetido fica a cópia de MAIOR QUALIDADE (empate: a mais recente). Nada é apagado sem você confirmar",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             when (phase) {
                 Dedupe.Phase.IDLE, Dedupe.Phase.ERROR -> {
@@ -77,9 +78,11 @@ fun DedupeScreen(onClose: () -> Unit) {
                     } }
                     if (gs.isNotEmpty()) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if (Dedupe.visual) FilledTonalButton({ Dedupe.markSuggested() }, Modifier.weight(1f), enabled = gs.any { it.sure }) { Text("Marcar sugeridos (${gs.count { it.sure }})", maxLines = 1) }
-                            else FilledTonalButton({ Dedupe.setAll(true) }, Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
-                            OutlinedButton({ Dedupe.setAll(false) }, Modifier.weight(1f)) { Text("Desmarcar todos", maxLines = 1) }
+                            if (Dedupe.visual) {
+                                FilledTonalButton({ Dedupe.markSuggested() }, Modifier.weight(1f), enabled = gs.any { it.sure }) { Text("Sugeridos (${gs.count { it.sure }})", maxLines = 1) }
+                                FilledTonalButton({ confirmAll = true }, Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
+                            } else FilledTonalButton({ Dedupe.setAll(true) }, Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
+                            OutlinedButton({ Dedupe.setAll(false) }, Modifier.weight(1f)) { Text("Desmarcar", maxLines = 1) }
                         }
                         Button({ confirm = true }, Modifier.fillMaxWidth(), enabled = n > 0, colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) {
                             Icon(Icons.Rounded.DeleteSweep, null); Spacer(Modifier.width(8.dp)); Text("Apagar ${Dedupe.fmtN(n)} repetidos") }
@@ -91,12 +94,20 @@ fun DedupeScreen(onClose: () -> Unit) {
             }
         }
     }
+    if (confirmAll) {
+        val n = Dedupe.allCount()
+        AlertDialog(onDismissRequest = { confirmAll = false }, icon = { Icon(Icons.Rounded.SelectAll, null) },
+            title = { Text("Marcar todos os ${Dedupe.fmtN(n)} repetidos?") },
+            text = { Text("Vão ficar marcadas ${Dedupe.fmtN(n)} cópias em ${Dedupe.fmtN(Dedupe.groups.size)} grupos. De cada grupo fica a de maior qualidade (a marcada como FICA). Nada é apagado agora: você ainda confere e toca em Apagar.") },
+            confirmButton = { TextButton({ confirmAll = false; Dedupe.setAll(true) }) { Text("Marcar todos") } },
+            dismissButton = { TextButton({ confirmAll = false }) { Text("Cancelar") } })
+    }
     if (confirm) {
         val n = Dedupe.toDeleteCount()
         AlertDialog(onDismissRequest = { confirm = false }, icon = { Icon(Icons.Rounded.Warning, null) },
             title = { Text("Apagar ${Dedupe.fmtN(n)} mensagens?") },
             text = { Text(if (Dedupe.visual) "Vão ser apagadas só as cópias que você marcou. De cada grupo fica sempre pelo menos uma cópia. Isso não pode ser desfeito."
-                else "Vão ser apagadas das suas Mensagens Salvas só as cópias repetidas. De cada vídeo fica a mensagem mais recente. Isso não pode ser desfeito.") },
+                else "Vão ser apagadas das suas Mensagens Salvas só as cópias repetidas. De cada vídeo fica a cópia de maior qualidade. Isso não pode ser desfeito.") },
             confirmButton = { TextButton({ confirm = false; Dedupe.startDelete() }, colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Text("Apagar") } },
             dismissButton = { TextButton({ confirm = false }) { Text("Cancelar") } })
     }
@@ -111,7 +122,7 @@ private fun GroupRow(g: Dedupe.G, excluded: Set<Long>) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text(keep?.cap?.ifBlank { null } ?: "Vídeo sem legenda", maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
-                    Text("Fica: ${dt(keep?.date ?: 0)} • ${mb(keep?.size ?: 0)} • ${g.dels.size} cópia(s) a apagar", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Fica (maior qualidade): ${dt(keep?.date ?: 0)} • ${mb(keep?.size ?: 0)} • ${g.dels.size} cópia(s) a apagar", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Icon(if (open) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore, null)
             }

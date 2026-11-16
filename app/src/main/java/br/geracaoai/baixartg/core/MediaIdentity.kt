@@ -3,6 +3,11 @@ package br.geracaoai.baixartg.core
 import java.net.URI
 import java.net.URLDecoder
 
+// expressões fixas compiladas uma vez (antes: recompiladas a cada chamada)
+private val RX_MEDIAIDENTITY_1 = Regex("""\.(mp4|webm|m3u8|mpd|mov|m4v|mkv|ts)$""", RegexOption.IGNORE_CASE)
+private val RX_MEDIAIDENTITY_2 = Regex("[-_.]{2,}")
+
+
 /**
  * Agrupa URLs do mesmo vídeo (qualidades, tokens de CDN, a mesma aula em duas páginas)
  * e escolhe a maior qualidade.
@@ -98,7 +103,7 @@ object MediaIdentity {
             try { URLDecoder.decode(raw, "UTF-8") } catch (_: Exception) { raw }
         } catch (_: Exception) { url.substringBefore('?').substringBefore('#') }
         val file = path.substringAfterLast('/').substringBefore('?')
-        val noExt = file.replace(Regex("""\.(mp4|webm|m3u8|mpd|mov|m4v|mkv|ts)$""", RegexOption.IGNORE_CASE), "")
+        val noExt = file.replace(RX_MEDIAIDENTITY_1, "")
         return stripQuality(noExt).trim('-', '_', '.').lowercase()
     }
 
@@ -160,7 +165,7 @@ object MediaIdentity {
         var t = s
         t = HEIGHT.replace(t, "-")
         t = NAMED_RE.replace(t, "-")
-        t = t.replace(Regex("[-_.]{2,}"), "-").trim('-', '_', '.')
+        t = t.replace(RX_MEDIAIDENTITY_2, "-").trim('-', '_', '.')
         return t
     }
 }

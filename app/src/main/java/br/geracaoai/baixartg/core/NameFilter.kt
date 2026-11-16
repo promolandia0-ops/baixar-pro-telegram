@@ -5,6 +5,12 @@ import java.net.URLDecoder
 import java.text.Normalizer
 import java.util.concurrent.ConcurrentHashMap
 
+// expressões fixas compiladas uma vez (antes: recompiladas a cada chamada)
+private val RX_NAMEFILTER_1 = Regex("[^\\p{L}\\p{N}]+")
+private val RX_NAMEFILTER_2 = Regex("[/\\\\]+")
+private val RX_NAMEFILTER_3 = Regex("[-_.]+")
+
+
 /**
  * Filtro por nome (busca nomeada e “Filtrar por nome”).
  * Sem acento/maiúsculas; palavras inteiras; várias palavras = E (todas).
@@ -17,7 +23,7 @@ object NameFilter {
     private val tokenCache = ConcurrentHashMap<Found, Set<String>>()
 
     fun norm(s: String): String = Normalizer.normalize(s, Normalizer.Form.NFD).replace(MARKS, "").lowercase()
-        .replace(Regex("[^\\p{L}\\p{N}]+"), " ").trim()
+        .replace(RX_NAMEFILTER_1, " ").trim()
 
     fun words(q: String): List<String> = norm(q).split(' ').filter { it.isNotEmpty() }
 
@@ -36,8 +42,8 @@ object NameFilter {
             if (u != null) (u.path ?: "") else raw
         } catch (_: Exception) { raw }
         val file = EXT.replace(path.substringAfterLast('/'), "")
-        val bits = (file + " " + EXT.replace(path, "")).replace(Regex("[/\\\\]+"), " ")
-        return norm(bits.replace(Regex("[-_.]+"), " ")).split(' ').filter { it.isNotEmpty() }
+        val bits = (file + " " + EXT.replace(path, "")).replace(RX_NAMEFILTER_2, " ")
+        return norm(bits.replace(RX_NAMEFILTER_3, " ")).split(' ').filter { it.isNotEmpty() }
     }
 
     fun tokens(f: Found): Set<String> = tokenCache.getOrPut(f) {

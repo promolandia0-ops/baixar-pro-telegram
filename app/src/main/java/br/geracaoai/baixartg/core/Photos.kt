@@ -4,6 +4,8 @@ import org.json.JSONArray
 import org.json.JSONTokener
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import kotlinx.coroutines.joinAll
+import kotlinx.coroutines.launch
 
 /**
  * Fotos de verdade postadas na página (ex.: diagramas de escala) — opcional ("Fotos também").
@@ -16,7 +18,7 @@ object Photos {
 
     const val MIN_SIDE = 500
 
-    val BAD_URL = Regex("""(?i)(thumb|thumbnail|poster|preview|cover|sprite|storyboard|/vi/|/vi_webp/|hqdefault|mqdefault|sddefault|maxresdefault|avatar|gravatar|logo|icon|favicon|emoji|badge|banner|placeholder|blank\.|spacer|pixel|/ads?/|doubleclick|adserver)""")
+    val BAD_URL = Regex("""(?i)(?:^|[/_.=\-])(?:thumbs?|thumbnails?|posters?|previews?|covers?|sprites?|storyboards?|avatars?|gravatar|logos?|icons?|favicon|emojis?|badges?|banners?|placeholders?|blank|spacer|pixel)(?=$|[/_.=\-\d])|/vi/|/vi_webp/|hqdefault|mqdefault|sddefault|maxresdefault|/ads?/|doubleclick|adserver""")
     private val SIZE_SUFFIX = Regex("""(?i)[-_@](\d{2,4}x\d{2,4}|\d{2,4}w|\d)x?(?=\.(jpe?g|png|webp|gif|avif)$)""")
     private val SIZE_PARAMS = setOf("w", "h", "width", "height", "resize", "fit", "quality", "q", "crop", "size", "s", "dpr", "auto", "format", "fm", "ver", "v")
 
@@ -43,17 +45,23 @@ object Photos {
         Extract.isVideoThumb(u) || u.contains(".svg", true) || u.contains(".gif", true)
 
     /**
-     * Coleta no navegador (DOM renderizado: usa naturalWidth/Height). Leve: sem innerText (não força layout),
-     * busca de "tem vídeo dentro" só nos 2 níveis mais próximos (antes subia 6 níveis e pegava a página inteira,
-     * descartando TODA foto de qualquer página que tivesse um vídeo). Cada imagem/card isolado em try/catch.
-     * Devolve também os motivos de descarte (diagnóstico).
+     * Coleta no navegador (DOM renderizado). Leve e incremental: cada imagem/card é decidido uma vez (marcado no
+     * próprio elemento); imagens ainda carregando são olhadas de novo; nada roda se a página não mudou.
+     * Tamanho real: com srcset o navegador informa a largura da TELA (naturalWidth corrigido pela densidade, ~400 no
+     * celular) — por isso toda foto boa caía em "pequena". Agora usa a largura declarada do maior candidato do srcset,
+     * ou deixa sem tamanho (o app mede o arquivo de verdade).
      */
     const val JS = """(function(){
-      var out=[],cards=[],seenC={},rej={};
-      var W=window,NI=document.images.length;
-      // já olhou a página inteira e nada mudou: não refaz nada (custo quase zero)
-      if(W.__bptPh&&W.__bptPh.u===location.href&&W.__bptPh.n===NI&&W.__bptPh.done)return JSON.stringify({p:[],c:[],r:{},n:NI,same:1});
-      var ST=(W.__bptPh&&W.__bptPh.u===location.href)?W.__bptPh:{u:location.href,i:0,j:0};ST.n=NI;ST.done=false;W.__bptPh=ST;
+      var out=[],cards=[],rej={};
+      var W=window,D=document,imgs=D.images,NI=imgs.length,NA=D.links.length;
+      var ST=W.__bptPh;
+      if(!ST||ST.u!==location.href){ST={u:location.href,dirty:1,pend:0};W.__bptPh=ST}
+      if(!W.__bptPhMO){W.__bptPhMO=1;
+        try{new MutationObserver(function(){if(W.__bptPh)W.__bptPh.dirty=1}).observe(D.documentElement,{childList:true,subtree:true,attributes:true,attributeFilter:['src','srcset','data-src','data-srcset','href','class']})}catch(x){W.__bptPhNoMO=1}
+        try{D.addEventListener('load',function(e){var t=e.target;if(t&&t.tagName==='IMG'&&W.__bptPh)W.__bptPh.dirty=1},true)}catch(x){}
+      }
+      if(!ST.dirty&&!ST.pend&&ST.ni===NI&&ST.na===NA&&!W.__bptPhNoMO)return JSON.stringify({p:[],c:[],r:{},n:NI,same:1});
+      ST.dirty=0;ST.ni=NI;ST.na=NA;
       var T0=Date.now();function over(){return Date.now()-T0>40}
       function small(e){return !e.childElementCount||e.childElementCount<=12}
       function R(k){rej[k]=(rej[k]||0)+1}
@@ -74,20 +82,23 @@ object Photos {
       }
       var bad={},h1t='';
       try{
-        document.querySelectorAll('meta[property="og:image"],meta[name="og:image"],meta[name="twitter:image"],meta[property="twitter:image"],link[rel=image_src]').forEach(function(m){var u=m.content||m.href;if(u)bad[u.split('?')[0]]=1});
-        document.querySelectorAll('video[poster]').forEach(function(v){var u=v.poster;if(u)bad[u.split('?')[0]]=1});
-        var h1=document.querySelector('h1');h1t=tc(h1,200);
+        D.querySelectorAll('meta[property="og:image"],meta[name="og:image"],meta[name="twitter:image"],meta[property="twitter:image"],link[rel=image_src]').forEach(function(m){var u=m.content||m.href;if(u)bad[u.split('?')[0]]=1});
+        D.querySelectorAll('video[poster]').forEach(function(v){var u=v.poster;if(u)bad[u.split('?')[0]]=1});
+        var h1=D.querySelector('h1');h1t=tc(h1,200);
       }catch(x){}
-      var PLAYER=/(player|(^|[\s_-])video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|icon|emoji|badge|sponsor|advert|(^|[\s_-])ads?([\s_-]|$)|banner|related|carousel|duration|(^|[\s_-])play)/i;
+      // só o elemento e o pai (antes: 5 níveis, e "icon"/"post-thumbnail" derrubavam galerias e a foto do post)
+      var PLAYER=/(player|(^|[\s_-])video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|emoji|badge|sponsor|advert|(^|[\s_-])ads?([\s_-]|$)|banner|related|duration|(^|[\s_-])play)/i;
+      var NOTTHUMB=/post-thumbnail|wp-post-image|has-post-thumbnail/gi;
       var IMGRE=/\.(jpe?g|png|webp|avif)(\?|#|$)/i;
-      function pick(ss,cur){var u=cur.u,bw=cur.w;(ss||'').split(',').forEach(function(p){var a=p.trim().split(/\s+/);if(!a[0])return;var w=parseInt(a[1]||'0')||1;if(w>=bw){bw=w;u=a[0]}});return {u:u,w:bw}}
+      function pick(ss,cur){var u=cur.u,bw=cur.w;(ss||'').split(',').forEach(function(p){var a=p.trim().split(/\s+/);if(!a[0])return;var d=a[1]||'';var w=/w$/i.test(d)?(parseInt(d)||1):1;if(w>=bw){bw=w;u=a[0]}});return {u:u,w:bw}}
       function best(img){
         var c={u:'',w:0};
         c=pick(img.getAttribute('srcset')||img.getAttribute('data-srcset')||'',c);
         if(!c.u){try{var pic=img.closest('picture');if(pic)pic.querySelectorAll('source').forEach(function(s){c=pick(s.getAttribute('srcset')||s.getAttribute('data-srcset')||'',c)})}catch(x){}}
         var ds=img.getAttribute('data-full')||img.getAttribute('data-large')||img.getAttribute('data-orig-file')||img.getAttribute('data-large-file')||img.getAttribute('data-original')||img.getAttribute('data-src')||img.getAttribute('data-lazy-src')||img.getAttribute('data-lazy')||img.getAttribute('data-url');
-        var u=c.u||ds||img.currentSrc||img.src||'';
-        try{return new URL(u,location.href).href}catch(e){return ''}
+        var big=img.getAttribute('data-full')||img.getAttribute('data-large')||img.getAttribute('data-orig-file')||img.getAttribute('data-large-file');
+        var u=big||c.u||ds||img.currentSrc||img.src||'';
+        try{return {u:new URL(u,location.href).href,w:(big||!c.u)?0:c.w,ss:!!c.u}}catch(e){return {u:'',w:0,ss:false}}
       }
       function ctxText(img){
         var t=[img.alt||'',img.title||''];
@@ -95,57 +106,70 @@ object Photos {
         var p=img.parentElement,n=0;
         while(p&&n<4){try{var h=p.querySelector('h1,h2,h3,h4');if(h){t.push(tc(h,200));break}}catch(x){}p=p.parentElement;n++}
         t.push(h1t);
+        if(!h1t&&D.title)t.push(D.title);
         return t.join(' ').replace(/\s+/g,' ').trim().slice(0,400);
       }
-      var imgs=[];try{imgs=document.querySelectorAll('img')}catch(x){}
-      var i=ST.i;
-      for(;i<imgs.length&&out.length<300;i++){
-        if(over())break;
-        try{
-          var img=imgs[i];
-          if(img.closest('video,iframe,header,nav,footer,aside,[role=banner],[role=navigation]')){R('menu/rodapé');continue}
-          var skip='',e=img,d=0;
-          while(e&&d<5){
-            if(PLAYER.test(cls(e))){skip='player/miniatura';break}
-            if(d>0&&d<=2&&small(e)&&e.querySelector&&e.querySelector(VSEL)){skip='perto de vídeo';break}
-            e=e.parentElement;d++}
-          if(skip){R(skip);continue}
-          var a=img.closest('a[href]');
-          var u=best(img);
-          if(a){ if(IMGRE.test(a.href)) u=a.href; else {R('dentro de link (card)');continue} }
-          if(!u){R('sem endereço');continue}
-          if(bad[u.split('?')[0]]){R('capa/og:image');continue}
-          var lazy=!!(img.getAttribute('data-src')||img.getAttribute('data-srcset')||img.getAttribute('data-original')||img.getAttribute('data-lazy')||img.getAttribute('data-lazy-src')||img.loading==='lazy');
-          var w=img.naturalWidth||0,h=img.naturalHeight||0;
-          var loaded=img.complete&&w>0&&!/^data:/.test(img.currentSrc||'')&&(img.currentSrc||img.src||'').split('?')[0]===u.split('?')[0];
-          if(!loaded||Math.min(w,h)<500){ if(lazy||!loaded){w=0;h=0} else {R('pequena (<500px)');continue} }
-          var alt=(img.alt||'')+' '+cls(img);
-          if(/(avatar|logo|icon|emoji|profile|perfil|thumbnail|miniatura|capa|cover|poster)/i.test(alt)){R('avatar/logo/capa');continue}
-          out.push({u:u,t:ctxText(img),w:w,h:h});
-        }catch(x){R('erro')}
+      /** null = ainda carregando (olha de novo depois); string = motivo de descarte; objeto = foto. */
+      function decide(img){
+        if(img.closest('video,iframe,nav,footer,aside,[role=banner],[role=navigation]'))return 'menu/rodapé';
+        var hd=img.closest('header');if(hd&&!hd.closest('article,main,[role=main]'))return 'menu/rodapé';
+        var a=img.closest('a[href]');var bigLink=!!(a&&IMGRE.test(a.href));
+        if(!bigLink){var e=img,d=0;while(e&&d<2){if(PLAYER.test(cls(e).replace(NOTTHUMB,' ')))return 'player/miniatura';e=e.parentElement;d++}}
+        var e2=img.parentElement,d2=1;while(e2&&d2<=2){if(small(e2)&&e2.querySelector&&e2.querySelector(VSEL))return 'perto de vídeo';e2=e2.parentElement;d2++}
+        if(a&&!bigLink)return 'dentro de link (card)';
+        var b=best(img);var u=bigLink?a.href:b.u;
+        if(!u)return 'sem endereço';
+        if(bad[u.split('?')[0]])return 'capa/og:image';
+        var al=(img.alt||'')+' '+cls(img).replace(NOTTHUMB,' ');
+        if(/(avatar|logo|emoji|profile|perfil)/i.test(al))return 'avatar/logo';
+        if(!bigLink&&/(thumbnail|miniatura|capa|cover|poster)/i.test(al))return 'capa/miniatura';
+        var cur=img.currentSrc||img.src||'';
+        var lazy=!!(img.getAttribute('data-src')||img.getAttribute('data-srcset')||img.getAttribute('data-original')||img.getAttribute('data-lazy')||img.getAttribute('data-lazy-src'));
+        var placeholder=!cur||/^data:/.test(cur);
+        if(!img.complete&&!placeholder){var t0=img.__bptW||(img.__bptW=Date.now());if(Date.now()-t0<5000)return null}
+        var nw=img.naturalWidth||0,nh=img.naturalHeight||0,w=0,h=0;
+        if(!placeholder&&nw>0){
+          if(b.w>10&&!bigLink){w=b.w;h=Math.round(b.w*nh/nw)}
+          else if(!b.ss&&cur.split('?')[0]===u.split('?')[0]){w=nw;h=nh}
+        }
+        if(w>0&&Math.min(w,h)<500)return 'pequena (<500px)';
+        return {u:u,t:ctxText(img),w:w,h:h};
       }
-      ST.i=i;var imgsDone=i>=imgs.length;
-      var as=[];try{as=document.querySelectorAll('a[href]')}catch(x){}
-      var j=ST.j;
-      for(;j<as.length&&cards.length<120;j++){
-        if(over())break;
+      var pend=0,more=false;
+      for(var i=0;i<imgs.length&&out.length<300;i++){
+        var img=imgs[i];
+        var sig=(img.currentSrc||img.src||'')+'|'+(img.getAttribute('srcset')||'')+'|'+(img.getAttribute('data-src')||'');
+        if(img.__bptD===sig)continue;
+        if(over()){more=true;break}
         try{
-          var A=as[j]; var im=A.querySelector('img'); if(!im)continue;
+          var r=decide(img);
+          if(r===null){pend++;continue}
+          img.__bptD=sig;
+          if(typeof r==='string')R(r);else out.push(r);
+        }catch(x){img.__bptD=sig;R('erro')}
+      }
+      var as=D.links;
+      for(var j=0;j<as.length&&cards.length<120;j++){
+        var A=as[j];var hr0=(A.href||'').split('#')[0];
+        if(A.__bptC===hr0)continue;
+        if(over()){more=true;break}
+        try{
+          var im=A.querySelector('img');if(!im){A.__bptC=hr0;continue}
+          A.__bptC=hr0;
           if(A.closest('header,nav,footer,aside,[role=banner],[role=navigation]'))continue;
-          var hr=(A.href||'').split('#')[0]; if(!/^https?:/.test(hr)||IMGRE.test(hr)||hr===location.href.split('#')[0])continue;
+          var hr=hr0; if(!/^https?:/.test(hr)||IMGRE.test(hr)||hr===location.href.split('#')[0])continue;
           var U=new URL(hr);
           if(U.host!==location.host)continue;
           if(/\/(video|videos|watch|embed|v|tag|tags|category|categories|search|login|user|users|profile|channel)s?(\/|\?|$)/i.test(U.pathname)){R('card: link de vídeo/categoria');continue}
           if(videoCard(A)){R('card: tem vídeo');continue}
-          var al=(im.alt||'')+' '+cls(im);
-          if(/(avatar|logo|icon|emoji|profile|perfil)/i.test(al))continue;
-          if(seenC[hr])continue; seenC[hr]=1;
+          var al2=(im.alt||'')+' '+cls(im);
+          if(/(avatar|logo|emoji|profile|perfil)/i.test(al2))continue;
           var tt=[A.getAttribute('title')||'',A.getAttribute('aria-label')||'',tc(A,200),im.alt||''];
           var p=A.parentElement,n=0; while(p&&n<3){var hh=p.querySelector('h1,h2,h3,h4,figcaption');if(hh){tt.push(tc(hh,200));break}p=p.parentElement;n++}
           cards.push({h:hr,t:tt.join(' ').replace(/\s+/g,' ').trim().slice(0,300)});
         }catch(x){}
       }
-      ST.j=j;ST.done=imgsDone&&j>=as.length;
+      ST.pend=pend;if(more)ST.dirty=1;
       return JSON.stringify({p:out,c:cards,r:rej,n:imgs.length});
     })()"""
 
@@ -196,7 +220,7 @@ object Photos {
             }
             if (vid) continue
             val im = a.selectFirst("img") ?: continue
-            if (Regex("(?i)(avatar|logo|icon|emoji|profile|perfil)").containsMatchIn(im.attr("alt") + " " + im.className())) continue
+            if (AVATAR.containsMatchIn(im.attr("alt") + " " + im.className())) continue
             var heading = ""; var p = a.parent(); var n = 0
             while (p != null && n < 3) { val hh = p.selectFirst("h1,h2,h3,h4,figcaption"); if (hh != null) { heading = hh.text(); break }; p = p.parent(); n++ }
             out.putIfAbsent(h, Card(h, listOf(a.attr("title"), a.text().take(200), im.attr("alt"), heading).filter { it.isNotBlank() }.distinct().joinToString(" ").take(300)))
@@ -243,16 +267,18 @@ object Photos {
      * Abre a página de um post de foto e pega as fotos grandes do corpo/galeria. og:image só aqui (post sem vídeo) e só se não achar outra.
      * Tamanho conferido no arquivo de verdade (≥ 500 px no lado menor).
      */
-    suspend fun fromPost(post: String, cardText: String, render: (suspend (String) -> String?)?): List<Photo> {
-        var html = PageResolver.fetch(post, null)
-        if (html != null && strongVideo(html)) return emptyList()
+    suspend fun fromPost(post: String, cardText: String, render: (suspend (String) -> String?)?, deadlineMs: Long = 30_000): List<Photo> = kotlinx.coroutines.coroutineScope {
+        val end = System.currentTimeMillis() + deadlineMs
+        fun left() = (end - System.currentTimeMillis()).coerceAtLeast(1)
+        var html = kotlinx.coroutines.withTimeoutOrNull(left()) { PageResolver.fetch(post, null) }
+        if (html != null && strongVideo(html)) return@coroutineScope emptyList()
         var ps = html?.let { fromHtml(post, it) }.orEmpty()
-        if (ps.isEmpty() && html != null && weakVideo(post, html)) return emptyList()
+        if (ps.isEmpty() && html != null && weakVideo(post, html)) return@coroutineScope emptyList()
         if (ps.isEmpty() && render != null) {
-            html = render(post) ?: html
-            if (html != null && strongVideo(html)) return emptyList()
+            html = kotlinx.coroutines.withTimeoutOrNull(left()) { render(post) } ?: html
+            if (html != null && strongVideo(html)) return@coroutineScope emptyList()
             ps = html?.let { fromHtml(post, it) }.orEmpty()
-            if (ps.isEmpty() && html != null && weakVideo(post, html)) return emptyList()
+            if (ps.isEmpty() && html != null && weakVideo(post, html)) return@coroutineScope emptyList()
         }
         val doc = html?.let { try { Jsoup.parse(it, post) } catch (_: Exception) { null } }
         val title = listOf(doc?.selectFirst("meta[property=og:title]")?.attr("content").orEmpty(), doc?.selectFirst("h1")?.text().orEmpty(), doc?.title().orEmpty())
@@ -261,13 +287,20 @@ object Photos {
             val og = doc.selectFirst("meta[property=og:image],meta[name=og:image]")?.absUrl("content").orEmpty()
             if (og.startsWith("http") && !badUrl(og)) ps = listOf(Photo(og, "", 0, 0))
         }
-        val out = ArrayList<Photo>()
-        for (p in ps.take(30)) {
-            val wh = if (p.w > 0 && p.h > 0 && minOf(p.w, p.h) >= MIN_SIDE) p.w to p.h else probeSize(p.url, post) ?: continue
-            if (minOf(wh.first, wh.second) < MIN_SIDE) continue
-            out += Photo(p.url, listOf(p.text, title, cardText).filter { it.isNotBlank() }.distinct().joinToString(" ").take(500), wh.first, wh.second)
-        }
-        return out.distinctBy { key(it.url) }
+        // mede em paralelo (6 por vez) e, se o prazo acabar, fica com as já medidas (antes: perdia todas)
+        val got = java.util.Collections.synchronizedList(ArrayList<Pair<Int, Photo>>())
+        val gate = kotlinx.coroutines.sync.Semaphore(6)
+        val jobs = ps.take(30).mapIndexed { i, p -> launch {
+            gate.acquire()
+            try {
+                val wh = if (p.w > 0 && p.h > 0 && minOf(p.w, p.h) >= MIN_SIDE) p.w to p.h else probeSize(p.url, post)
+                if (wh != null && minOf(wh.first, wh.second) >= MIN_SIDE)
+                    got += i to Photo(p.url, listOf(p.text, title, cardText).filter { it.isNotBlank() }.distinct().joinToString(" ").take(500), wh.first, wh.second)
+            } finally { gate.release() }
+        } }
+        kotlinx.coroutines.withTimeoutOrNull(left()) { jobs.joinAll() }
+        jobs.forEach { it.cancel() }
+        synchronized(got) { got.sortedBy { it.first }.map { it.second } }.distinctBy { key(it.url) }
     }
 
     /** Coleta no HTML estático (busca/varredura): mesmas regras; tamanho conferido pelos atributos e depois ao baixar. */
@@ -277,39 +310,52 @@ object Photos {
         doc.select("meta[property=og:image],meta[name=og:image],meta[name=twitter:image],meta[property=twitter:image],link[rel=image_src]")
             .forEach { bad += (it.absUrl("content").ifBlank { it.absUrl("href") }).substringBefore('?') }
         doc.select("video[poster]").forEach { bad += it.absUrl("poster").substringBefore('?') }
-        val player = Regex("""(?i)(player|(^|[\s_-])video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|icon|emoji|badge|sponsor|advert|(^|[\s_-])ads?([\s_-]|$)|banner|related|duration|(^|[\s_-])play)""")
+        val player = PLAYER_CLS
         val out = ArrayList<Photo>()
         val h1 = doc.selectFirst("h1")?.text().orEmpty()
         for (img in doc.select("img")) {
-            if (img.parents().any { it.tagName() in setOf("video", "header", "nav", "footer", "aside", "iframe") }) continue
+            val ps = img.parents()
+            if (ps.any { it.tagName() in MENU_TAGS }) continue
+            if (ps.any { it.tagName() == "header" } && ps.none { it.tagName() == "article" || it.tagName() == "main" }) continue
+            val a = img.closest("a[href]")
+            val href = a?.absUrl("href").orEmpty()
+            val bigLink = a != null && Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)
             var skip = false; var e: Element? = img; var d = 0
-            while (e != null && d < 5) {
-                if (player.containsMatchIn(e.className() + " " + e.id())) { skip = true; break }
+            // só o elemento e o pai (antes 5 níveis: "gallery-icon", "post-thumbnail" etc. derrubavam fotos de verdade)
+            while (e != null && d <= 2) {
+                if (!bigLink && d < 2 && player.containsMatchIn((e.className() + " " + e.id()).replace(NOT_THUMB, " "))) { skip = true; break }
                 if (d in 1..2 && e.select("video,[class*=duration],[class*=play-icon],[class*=playicon],[class*=btn-play],[class*=play-button]").isNotEmpty()) { skip = true; break }
                 e = e.parent(); d++
             }
             if (skip) continue
-            var u = bestSrc(img)
-            val a = img.closest("a[href]")
-            if (a != null) { val href = a.absUrl("href"); if (Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) u = href else continue }
+            if (a != null && !bigLink) continue
+            val u = if (bigLink) href else bestSrc(img)
             if (u.isBlank() || u.substringBefore('?') in bad || badUrl(u)) continue
             val w = img.attr("width").toIntOrNull() ?: 0; val h = img.attr("height").toIntOrNull() ?: 0
-            if (w > 0 && h > 0 && minOf(w, h) < MIN_SIDE) continue
-            if (Regex("(?i)(avatar|logo|icon|emoji|profile|perfil|thumbnail|miniatura|capa|cover|poster)").containsMatchIn(img.attr("alt") + " " + img.className())) continue
+            if (!bigLink && img.attr("srcset").isBlank() && w > 0 && h > 0 && minOf(w, h) < MIN_SIDE) continue
+            val al = img.attr("alt") + " " + img.className().replace(NOT_THUMB, " ")
+            if (AVATAR.containsMatchIn(al) || (!bigLink && THUMB_WORD.containsMatchIn(al))) continue
             val cap = img.closest("figure")?.selectFirst("figcaption")?.text().orEmpty()
             var heading = ""; var p = img.parent(); var n = 0
             while (p != null && n < 4) { val hh = p.selectFirst("h1,h2,h3,h4"); if (hh != null) { heading = hh.text(); break }; p = p.parent(); n++ }
-            out += Photo(u, listOf(img.attr("alt"), img.attr("title"), cap, heading, h1).filter { it.isNotBlank() }.distinct().joinToString(" ").take(400), w, h)
+            out += Photo(u, listOf(img.attr("alt"), img.attr("title"), cap, heading, h1, doc.title()).filter { it.isNotBlank() }.distinct().joinToString(" ").take(400), if (bigLink || minOf(w, h) < MIN_SIDE) 0 else w, if (bigLink || minOf(w, h) < MIN_SIDE) 0 else h)
             if (out.size >= 300) break
         }
         return out.distinctBy { key(it.url) }
     }
 
+    private val PLAYER_CLS = Regex("""(?i)(player|(^|[\s_-])video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|emoji|badge|sponsor|advert|(^|[\s_-])ads?([\s_-]|$)|banner|related|duration|(^|[\s_-])play)""")
+    private val NOT_THUMB = Regex("""(?i)post-thumbnail|wp-post-image|has-post-thumbnail""")
+    private val AVATAR = Regex("(?i)(avatar|logo|emoji|profile|perfil)")
+    private val THUMB_WORD = Regex("(?i)(thumbnail|miniatura|capa|cover|poster)")
+    private val MENU_TAGS = setOf("video", "nav", "footer", "aside", "iframe")
+    private val WS = Regex("\\s+")
+
     private fun bestSrc(img: Element): String {
         val ss = img.attr("srcset").ifBlank { img.attr("data-srcset") }
         var best = ""; var bw = -1
         if (ss.isNotBlank()) for (part in ss.split(',')) {
-            val a = part.trim().split(Regex("\\s+")); if (a.isEmpty() || a[0].isBlank()) continue
+            val a = part.trim().split(WS); if (a.isEmpty() || a[0].isBlank()) continue
             val w = a.getOrNull(1)?.filter(Char::isDigit)?.toIntOrNull() ?: 1
             if (w >= bw) { bw = w; best = a[0] }
         }

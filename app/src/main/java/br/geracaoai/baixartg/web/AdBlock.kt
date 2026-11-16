@@ -6,6 +6,10 @@ import br.geracaoai.baixartg.core.Extract
 import java.io.ByteArrayInputStream
 import java.util.zip.GZIPInputStream
 
+// expressões fixas compiladas uma vez (antes: recompiladas a cada chamada)
+private val RX_ADBLOCK_1 = Regex("""(?i)/(popunder|pu\.js|pop\.js|adserver|prebid)""")
+
+
 /**
  * Bloqueador forte do Navegador: lista de domínios (StevenBlack/hosts, MIT) por sufixo + padrões de URL de anúncios,
  * pop-ups/popunders e filtro cosmético. Nunca bloqueia o próprio site, streams de vídeo nem o servidor yt-dlp.
@@ -63,7 +67,7 @@ object AdBlock {
         val firstParty = pageHost != null && base(host) == base(pageHost)
         if (!firstParty && isAdHost(host)) return true
         val path = url.substringAfter(host)
-        return URL_PAT.containsMatchIn(path) && !firstParty || (firstParty && Regex("""(?i)/(popunder|pu\.js|pop\.js|adserver|prebid)""").containsMatchIn(path))
+        return URL_PAT.containsMatchIn(path) && !firstParty || (firstParty && RX_ADBLOCK_1.containsMatchIn(path))
     }
 
     fun empty(): WebResourceResponse = WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
@@ -111,15 +115,21 @@ object AdBlock {
         }catch(x){}
         return false;
       }
-      function hideAds(){
-        try{var els=document.querySelectorAll(sel);for(var i=0;i<els.length;i++){var e=els[i];if(e.__bptK)continue;e.__bptK=1;if(keep(e))continue;e.style.setProperty('display','none','important')}}catch(x){}
+      // mesmas regras; mais leve: depois da primeira varredura, olha só o que foi adicionado à página
+      // (varredura completa no máximo a cada 3 s) e só mede estilo de quem pode ser fixo (offsetParent nulo)
+      function hideIn(list){for(var i=0;i<list.length;i++){var e=list[i];if(e.__bptK)continue;e.__bptK=1;if(keep(e))continue;e.style.setProperty('display','none','important')}}
+      function hideAds(root){
+        try{
+          if(!root){hideIn(document.querySelectorAll(sel));return}
+          var l=[];if(root.matches&&root.matches(sel))l.push(root);if(root.querySelectorAll){var q=root.querySelectorAll(sel);for(var i=0;i<q.length;i++)l.push(q[i])}hideIn(l);
+        }catch(x){}
       }
-      function sweep(){
-        hideAds();
+      function overlays(els){
         try{
           var vw=window.innerWidth,vh=window.innerHeight,host=location.hostname.split('.').slice(-2).join('.');
-          var els=document.body?document.body.querySelectorAll('a,div'):[];
-          for(var i=0;i<els.length;i++){var e=els[i];var cs=getComputedStyle(e);
+          for(var i=0;i<els.length;i++){var e=els[i];
+            if(e.offsetParent!==null||!e.isConnected)continue;
+            var cs=getComputedStyle(e);
             if(cs.position!=='fixed')continue;
             if((parseInt(cs.zIndex)||0)<999)continue;
             var r=e.getBoundingClientRect();if(r.width*r.height<vw*vh*0.5)continue;
@@ -133,8 +143,20 @@ object AdBlock {
           }
         }catch(x){}
       }
+      var lastFull=0;
+      function sweep(){lastFull=Date.now();hideAds(null);overlays(document.body?document.body.querySelectorAll('a,div'):[])}
+      var added=[],t=0,tf=0;
+      function part(){
+        var nodes=added;added=[];
+        for(var i=0;i<nodes.length;i++){var n=nodes[i];if(n.nodeType!==1||!n.isConnected)continue;hideAds(n);
+          var l=[];var tn=n.tagName;if(tn==='A'||tn==='DIV')l.push(n);var q=n.querySelectorAll('a,div');for(var k=0;k<q.length;k++)l.push(q[k]);overlays(l)}
+      }
       sweep();
-      try{var t=0;new MutationObserver(function(){clearTimeout(t);t=setTimeout(sweep,300)}).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}
+      try{new MutationObserver(function(ms){
+        for(var i=0;i<ms.length;i++){var a=ms[i].addedNodes;for(var k=0;k<a.length;k++)added.push(a[k])}
+        clearTimeout(t);t=setTimeout(part,300);
+        if(!tf){var wait=Math.max(0,3000-(Date.now()-lastFull));tf=setTimeout(function(){tf=0;sweep()},wait)}
+      }).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}
       setTimeout(sweep,1500);setTimeout(sweep,4000);
       return 'ok';
     })()"""

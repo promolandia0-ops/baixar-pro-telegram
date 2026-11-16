@@ -124,17 +124,20 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         val now = System.currentTimeMillis()
         if (collectState.busy && now - collectState.lastAt < 10_000) return@Runnable
         collectState.busy = true; collectState.lastAt = now
-        v.evaluateJavascript(JsScripts.COLLECT) { raw ->
+        // só o que mudou desde a última vez (nada, se a página não mudou)
+        v.evaluateJavascript(JsScripts.COLLECT_INC) { raw ->
             BrowserDiag.timed(System.currentTimeMillis() - now)
             collectScope.launch {
                 val c = JsScripts.parseCollected(raw)
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    try { c?.let { BrowserDetect.onCollected(page, it) } } catch (_: Exception) {}
+                    try { c?.takeIf { !it.same }?.let { BrowserDetect.onCollected(page, it) } } catch (_: Exception) {}
                     // fotos: script separado, depois do de vídeo (um erro nele nunca atrapalha os vídeos)
                     // no máximo a cada 4 s; o script só olha o que mudou (e para em ~40 ms por vez)
-                    val doPhotos = BrowserDetect.photosOn.value && web === v && System.currentTimeMillis() - collectState.photoAt >= 4_000
+                    val doPhotos = BrowserDetect.photosOn.value && web === v && System.currentTimeMillis() - collectState.photoAt >= 2_500
                     if (doPhotos) collectState.photoAt = System.currentTimeMillis()
-                    val reset = if (collectState.epoch != BrowserDetect.photoEpoch) { collectState.epoch = BrowserDetect.photoEpoch; "window.__bptPh=null;" } else ""
+                    // nome trocado / fotos religadas: relê as fotos da página (limpa as marcas de "já decidido")
+                    val reset = if (collectState.epoch != BrowserDetect.photoEpoch) { collectState.epoch = BrowserDetect.photoEpoch
+                        "window.__bptPh=null;try{var _i=document.images;for(var _k=0;_k<_i.length;_k++)_i[_k].__bptD=null;var _l=document.links;for(var _k=0;_k<_l.length;_k++)_l[_k].__bptC=null}catch(e){};" } else ""
                     if (doPhotos) v.evaluateJavascript(reset + Photos.JS) { praw ->
                         collectScope.launch {
                             val ps = Photos.parse(praw); val cs = Photos.parseCards(praw); val (rj, n) = Photos.parseRejects(praw)

@@ -97,8 +97,11 @@ object BrowserDetect {
     private fun photoMatches(f: Found) = term.value.isBlank() || matches(f)
 
     /** Adiciona fotos já conferidas (tamanho real ≥ 500 px). Só thread principal. */
-    private fun addPhotos(page: String, ps: List<Photos.Photo>, checkThumbs: Boolean) {
-        val vt = videoTokens()
+    private fun addPhotos(page: String, ps: List<Photos.Photo>, checkThumbs: Boolean, ownPages: List<String> = emptyList()) {
+        // a página do próprio post (e a aberta agora) não conta como "vídeo": antes o número do post no nome da foto
+        // (album-555777-01.jpg) batia com a própria página e a foto era descartada como miniatura
+        val own = HashSet<String>().apply { (ownPages + page + browsing).forEach { addAll(Photos.idTokens(it)) } }
+        val vt = videoTokens().let { v -> if (own.isEmpty()) v else v.filterTo(HashSet()) { it !in own } }
         for (p in ps) {
             if (br.geracaoai.baixartg.web.AdBlock.isAdHost(Extract.host(p.url))) continue
             val k = Photos.key(p.url)
@@ -125,28 +128,30 @@ object BrowserDetect {
             // Antes: todo link com imagem também vira "card de vídeo" no detector de vídeos, e aqui era pulado por isso
             // → nenhum post de foto era aberto (fotos = 0). Agora só pula se já virou um vídeo de verdade.
             if (list.any { it.state == 0 && normPage(it.f.page) == np }) { BrowserDiag.rej("post: é vídeo"); continue }
-            // card que o detector de vídeo está abrindo: só vira post de foto se o vídeo não carregar (sem abrir 2x)
-            if (np in cardPages && jobs[np]?.isActive == true) { photoDeferred[np] = page to c; continue }
+            // abre o post na hora (antes esperava o detector de vídeo desistir dele: até 75 s por card, 3 por vez)
             if (!photoPosts.add(np)) continue
             BrowserDiag.inc("posts de foto achados")
             busy(1)
             scope.launch {
                 try { photoGate.withPermit {
                     // só HTML (sem página oculta: elas dividem o motor de páginas com o navegador visível e travavam a rolagem)
-                    val ps = try { withTimeoutOrNull(30_000) { Photos.fromPost(c.href, c.text, null) }.orEmpty() } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+                    val ps = try { Photos.fromPost(c.href, c.text, null, deadlineMs = 30_000) } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
                     val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
                     BrowserDiag.inc("posts abertos"); if (ps.isEmpty()) BrowserDiag.rej("post: sem foto grande (ou é vídeo)")
                     if (ps.isNotEmpty() && ok.isEmpty()) BrowserDiag.rej("post: nome não bate", ps.size)
                     if (ps.isNotEmpty() && ok.isEmpty()) photoPosts.remove(np)   // nome diferente: pode voltar se mudar a busca
-                    if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false) }
+                    if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false, ownPages = listOf(c.href, page)) }
                 } } finally { busy(-1) }
             }
         }
     }
 
     /** Fotos coletadas do DOM (Photos.JS). Nunca mexe na lista de vídeos. Só thread principal. */
-    fun onPhotos(page: String, ps0: List<Photos.Photo>) {
-        if (!photosOn.value || ps0.isEmpty()) return
+    fun onPhotos(page: String, ps00: List<Photos.Photo>) {
+        if (!photosOn.value || ps00.isEmpty()) return
+        // foto aberta sozinha (endereço da própria imagem): herda o título/texto da página de onde você veio
+        val ps0 = if (Extract.isPhotoUrl(page) && !Extract.isVideoUrl(page) && lastRefText.isNotBlank())
+            ps00.map { it.copy(text = listOf(it.text, lastRefText).filter { t -> t.isNotBlank() }.joinToString(" ").take(500)) } else ps00
         // tamanho desconhecido (lazy/placeholder): confere no arquivo de verdade antes de listar
         // antes: os de tamanho desconhecido eram medidos de novo a cada coleta (a cada 2,5 s), até 60 seguidos — tempestade de pedidos
         val unknown = ps0.filter { it.w <= 0 || it.h <= 0 }.filter { Photos.key(it.url) !in photoKeys && probing.add(it.url) }.take(24)
@@ -157,11 +162,11 @@ object BrowserDetect {
                 val wh = Photos.probeSize(p.url, page)
                 when { wh == null -> BrowserDiag.rej("não deu pra medir"); minOf(wh.first, wh.second) < Photos.MIN_SIDE -> BrowserDiag.rej("pequena (<500px)"); else -> ok += p.copy(w = wh.first, h = wh.second) }
             } }.awaitAll() }
-            if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(page, ok.toList(), checkThumbs = true) }
+            if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(page, ok.toList(), checkThumbs = true, ownPages = listOf(lastRefPage)) }
         } finally { busy(-1) } } }
         val ps = ps0.filter { it.w > 0 && it.h > 0 }
         if (ps.isEmpty()) return
-        addPhotos(page, ps, checkThumbs = true)
+        addPhotos(page, ps, checkThumbs = true, ownPages = listOf(lastRefPage))
     }
     @Suppress("unused") private fun onPhotosOld(page: String, ps: List<Photos.Photo>) {
         if (!photosOn.value || ps.isEmpty()) return
@@ -243,55 +248,76 @@ object BrowserDetect {
     }
     private fun markFailed(card: String) = scope.launch(Dispatchers.Main) {
         // vídeo não carregou: se o card também parecia post de foto, agora procura as fotos dele
-        photoDeferred.remove(normPage(card))?.let { (pg, c) -> jobs.remove(normPage(card)); onPhotoCards(pg, listOf(c)) }
         val hk = "card:" + normPage(card)
         hidden[hk]?.let { if (it.state == 1) hidden[hk] = it.copy(state = 2) }
         val i = list.indexOfFirst { it.key == "card:" + normPage(card) && it.state == 1 }
-        if (i >= 0) list[i] = list[i].copy(state = 2, sel = false)
+        if (i >= 0) list[i] = list[i].copy(state = 2)
     }
 
     private fun isRealVideo(f: Found): Boolean =
-        f.kind != Kind.PHOTO && !(Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) && !Extract.isVideoThumb(f.url) &&
+        f.kind != Kind.PHOTO && !(Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) &&
+            // "capa/thumb/poster" no caminho só derruba quando NÃO é arquivo de vídeo (antes derrubava até .mp4 de verdade)
+            !(Extract.isVideoThumb(f.url) && !Extract.isVideoUrl(f.url) && !Extract.isHls(f.url)) &&
             (f.kind == Kind.SERVER || f.kind == Kind.HLS || Extract.isVideoUrl(f.url) || f.kind == Kind.DIRECT)
 
-    /** Adiciona (ou troca por qualidade maior) — dedupe por identidade do vídeo. */
+    /**
+     * Adiciona (ou troca por qualidade maior) — dedupe por identidade do vídeo.
+     * As conferências de "já enviado/na fila" (histórico inteiro + fila) rodam FORA da tela; só o resultado vai
+     * para a thread principal (antes travava a tela a cada vídeo detectado). Mesmas regras de antes.
+     */
     private fun publish(f0: Found, extraKeys: List<String> = emptyList()) {
         val f = MediaIdentity.withQuality(f0)
         if (!isRealVideo(f) || TitleFix.isSubtitleUrl(f.url)) return
         val ks = (extraKeys + dedupeKeys(f)).distinct()
-        scope.launch(Dispatchers.Main) {
-            val hitKey = synchronized(seenCards) { ks.firstNotNullOfOrNull { keys[it] } }
-            if (hitKey != null) {
-                // item que o usuário já mandou baixar enquanto ainda carregava: guarda o vídeo resolvido para enviar
-                hidden[hitKey]?.let { h ->
-                    if (h.state != 0 || MediaIdentity.isBetter(f, h.f)) {
-                        val nf = if (h.state != 0 && !TitleFix.isJunk(h.f.title) && TitleFix.isJunk(f.title)) f.copy(title = h.f.title) else f
-                        hidden[hitKey] = h.copy(f = nf, state = 0, keys = (h.keys + ks.filter { it.startsWith("ip:") || it.startsWith("p:") }).distinct())
-                    }
-                    synchronized(seenCards) { ks.forEach { keys[it] = hitKey } }
-                    return@launch
-                }
-                val i = list.indexOfFirst { it.key == hitKey }
-                if (i >= 0) {
-                    val better = list[i].state != 0 || MediaIdentity.isBetter(f, list[i].f)
-                    val sent = list[i].sent || Sent.isSent(f) || Sent.hasCanonical(f)
-                    val nf = if (better) f else list[i].f
-                    val pk = (list[i].keys + ks.filter { it.startsWith("ip:") || it.startsWith("p:") }).distinct()
-                    val sent2 = sent || Jobs.isQueuedOrSent(nf, pk)
-                    val keepTitle = if (list[i].state != 0 && !TitleFix.isJunk(list[i].f.title) && TitleFix.isJunk(nf.title)) nf.copy(title = list[i].f.title) else nf
-                    if (sent2) list.removeAt(i)
-                    else list[i] = list[i].copy(f = keepTitle, sel = list[i].sel, keys = pk, state = 0)
+        val ksPage = ks.filter { it.startsWith("ip:") || it.startsWith("p:") }
+        scope.launch {
+            var preKey: String? = null; var preSent = false; var preBlocked = false
+            try {
+                preKey = synchronized(seenCards) { ks.firstNotNullOfOrNull { keys[it] } }
+                val cur = preKey?.let { k -> list.toList().firstOrNull { it.key == k } }
+                if (cur != null) {
+                    val better = cur.state != 0 || MediaIdentity.isBetter(f, cur.f)
+                    val nf = if (better) f else cur.f
+                    val pk = (cur.keys + ksPage).distinct()
+                    preSent = cur.sent || Sent.isSent(f) || Sent.hasCanonical(f) || Jobs.isQueuedOrSent(nf, pk)
+                } else if (preKey == null) preBlocked = blocked(f, ks)
+            } catch (_: Exception) {}
+            withContext(Dispatchers.Main) { publishMain(f, ks, ksPage, preKey, preSent, preBlocked) }
+        }
+    }
+    private fun publishMain(f: Found, ks: List<String>, ksPage: List<String>, preKey: String?, preSent: Boolean, preBlocked: Boolean) {
+        val hitKey = synchronized(seenCards) { ks.firstNotNullOfOrNull { keys[it] } }
+        if (hitKey != null) {
+            // item que o usuário já mandou baixar enquanto ainda carregava: guarda o vídeo resolvido para enviar
+            hidden[hitKey]?.let { h ->
+                if (h.state != 0 || MediaIdentity.isBetter(f, h.f)) {
+                    val nf = if (h.state != 0 && !TitleFix.isJunk(h.f.title) && TitleFix.isJunk(f.title)) f.copy(title = h.f.title) else f
+                    hidden[hitKey] = h.copy(f = nf, state = 0, keys = (h.keys + ksPage).distinct())
                 }
                 synchronized(seenCards) { ks.forEach { keys[it] = hitKey } }
-                return@launch
+                return
             }
-            val k = ks.first()
-            val pk = ks.filter { it.startsWith("ip:") || it.startsWith("p:") }
-            // já mandado baixar/enviado (nesta ou em outra sessão, mesmo com outra URL): nunca reaparece
-            if (blocked(f, ks)) { synchronized(seenCards) { ks.forEach { keys[it] = "x:$k" } }; return@launch }
-            synchronized(seenCards) { ks.forEach { keys[it] = k } }
-            list += Det(k, f, sel = matches(f), keys = pk)
+            val i = list.indexOfFirst { it.key == hitKey }
+            if (i >= 0) {
+                val better = list[i].state != 0 || MediaIdentity.isBetter(f, list[i].f)
+                val nf = if (better) f else list[i].f
+                val pk = (list[i].keys + ksPage).distinct()
+                // conferido fora da tela; se o item mudou nesse meio tempo, confere de novo (raro)
+                val sent2 = if (preKey == hitKey) preSent || list[i].sent
+                    else list[i].sent || Sent.isSent(f) || Sent.hasCanonical(f) || Jobs.isQueuedOrSent(nf, pk)
+                val keepTitle = if (list[i].state != 0 && !TitleFix.isJunk(list[i].f.title) && TitleFix.isJunk(nf.title)) nf.copy(title = list[i].f.title) else nf
+                if (sent2) list.removeAt(i)
+                else list[i] = list[i].copy(f = keepTitle, sel = list[i].sel, keys = pk, state = 0)
+            }
+            synchronized(seenCards) { ks.forEach { keys[it] = hitKey } }
+            return
         }
+        val k = ks.first()
+        // já mandado baixar/enviado (nesta ou em outra sessão, mesmo com outra URL): nunca reaparece
+        val isBlocked = if (preKey == null) preBlocked else blocked(f, ks)
+        if (isBlocked) { synchronized(seenCards) { ks.forEach { keys[it] = "x:$k" } }; return }
+        synchronized(seenCards) { ks.forEach { keys[it] = k } }
+        list += Det(k, f, sel = matches(f), keys = ksPage)
     }
 
     private val QUALITY_TOK = Regex("""(?i)(?:[_.\-/]|^)(?:\d{3,4}p\d{0,2}|[1-8]k|uhd|fhd|hd|sd|ld|hq|lq|low|high|medium|mobile|source|original|\d{3,4}x\d{3,4}|\d{3,5}k)(?=$|[_.\-/])""")
@@ -416,7 +442,7 @@ object BrowserDetect {
         return "${todo.size} vídeo(s) na fila de envio (veja na Fila)."
     }
 
-    fun setAll(v: Boolean) { for (i in list.indices) { val d = list[i]; val nv = v && !d.sent && d.state != 2; if (d.sel != nv) list[i] = d.copy(sel = nv) } }
+    fun setAll(v: Boolean) { for (i in list.indices) { val d = list[i]; val nv = v && !d.sent; if (d.sel != nv) list[i] = d.copy(sel = nv) } }
 
     /** Mídia interceptada pelo navegador (pedido de rede de vídeo). */
     fun intercepted(url: String, page: String, title: String) {
@@ -434,6 +460,10 @@ object BrowserDetect {
     fun onCollected(page: String, c: JsScripts.Collected, background: Boolean = false) {
         if (!background) browsing = page
         val prevInfo = pageInfo.put(normPage(page), c.bestPageTitle to c.pageText)
+        if (!background && !(Extract.isPhotoUrl(page) && !Extract.isVideoUrl(page))) {
+            lastRefPage = page
+            lastRefText = listOf(c.bestPageTitle, prevInfo?.first.orEmpty().takeIf { c.bestPageTitle.isBlank() }.orEmpty()).filter { it.isNotBlank() }.joinToString(" ")
+        }
         // mídias já listadas desta página ganham o título real (antes podiam ter vindo como "arquivo"/idioma)
         val pt = c.bestPageTitle
         // só quando o título da página muda (antes percorria a lista inteira a cada coleta, na thread da tela)
@@ -452,7 +482,8 @@ object BrowserDetect {
             val href = a.href.substringBefore('#')
             // (volta a examinar se o link ganhar miniatura/texto depois — lazy-load)
             if (!processed.add(href + "|" + a.thumb.isNotBlank() + "|" + a.ctx.length + "|" + a.nav)) continue
-            if (a.thumb.isNotBlank()) thumbKeys += Photos.key(a.thumb)
+            // miniatura de card: só a imagem do próprio link (ou do pai); link que aponta para a foto grande não é miniatura
+            if (a.thumb.startsWith("http") && a.thumbLevel <= 1 && !(Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href))) thumbKeys += Photos.key(a.thumb)
             if (a.nav) continue
             if (a.thumb.isBlank() && !Extract.looksLikeVideoPage(a.href) && !DURATION.containsMatchIn(a.ctx)) continue
             if (Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) continue
@@ -467,10 +498,11 @@ object BrowserDetect {
         if (nx.startsWith("http") && Extract.host(nx) == root && nx != page && (term.value.isNotBlank() || SiteSearch.isSearchUrl(page) || background) &&
             followed.size < 30 && followed.add(normPage(nx) + "?" + nx.substringAfter('?', ""))) {
             scope.launch {
-                val js = JsRender.listing(nx, 30_000)
-                js?.collected?.let { col -> withContext(Dispatchers.Main) { onCollected(nx, col, background = true) } }
+                // próxima página: só o HTML (sem página oculta: ela dividia o motor de páginas com o navegador visível)
+                val h = PageResolver.fetch(nx, page)
+                val col = h?.let { staticCollect(nx, it) }
+                if (col != null && col.anchors.isNotEmpty()) withContext(Dispatchers.Main) { onCollected(nx, col, background = true) }
                 // fotos também nas próximas páginas da busca ("Só fotos" / "Vídeos e fotos")
-                val h = js?.html
                 if (photosOn.value && h != null) {
                     val ps = Photos.fromHtml(nx, h); val cs = Photos.cardsFromHtml(nx, h)
                     withContext(Dispatchers.Main) { onPhotos(nx, ps); onPhotoCards(nx, cs) }
@@ -479,12 +511,43 @@ object BrowserDetect {
         }
     }
 
+    /** Página anterior (não-imagem) aberta no navegador: título/texto herdados por uma foto aberta sozinha. */
+    @Volatile private var lastRefPage = ""
+    @Volatile private var lastRefText = ""
+
+    private val CARD_SEL = "article,li,figure,[class*=card],[class*=item],[class*=video],[class*=post],[class*=thumb]"
+    private val NEXT_TXT = Regex("""(?i)^(pr[oó]xim[ao]|next|seguinte|mais|›|»|>|>>|next page|pr[oó]xima p[aá]gina)$""")
+    /** Mesmo formato da coleta do navegador, a partir do HTML (próximas páginas da busca). */
+    private fun staticCollect(url: String, html: String): JsScripts.Collected? = try {
+        val doc = org.jsoup.Jsoup.parse(html, url)
+        val seen = HashSet<String>(); val anchors = ArrayList<JsScripts.Anchor>()
+        for (a in doc.select("a[href]")) {
+            val h = a.absUrl("href"); if (!h.startsWith("http") || !seen.add(h)) continue
+            val img = a.selectFirst("img[alt]")
+            val hd = a.selectFirst("h1,h2,h3,h4,[class*=title]")
+            val txt = (listOfNotNull(hd?.text()) + listOf(a.attr("title"), a.attr("aria-label"), a.text(), img?.attr("alt").orEmpty())).filter { it.trim().length > 1 }.joinToString("\n").take(400)
+            var th = ""; var lvl = 9; var p: org.jsoup.nodes.Element? = a; var k = 0
+            while (p != null && k < 4) { val i = p.selectFirst("img,picture,video,[style*=background-image]"); if (i != null) { th = i.absUrl("src").ifBlank { i.absUrl("data-src") }.ifBlank { "1" }; lvl = k; break }; p = p.parent(); k++ }
+            val nav = a.parents().any { it.tagName() in setOf("nav", "header", "footer") }
+            val ctx = a.closest(CARD_SEL)?.text()?.replace(Regex("\\s+"), " ")?.trim()?.take(300).orEmpty()
+            anchors += JsScripts.Anchor(h, txt, th, nav, ctx, lvl)
+            if (anchors.size >= 4000) break
+        }
+        val nx = doc.selectFirst("link[rel=next],a[rel~=next]")?.absUrl("href").orEmpty().ifBlank {
+            doc.select("a[href]").firstOrNull { val t = it.text().trim().ifBlank { it.attr("aria-label").trim() }; t.length < 20 && NEXT_TXT.matches(t) }?.absUrl("href").orEmpty() }
+        val vids = doc.select("video[src],video source[src],source[src]").map { it.absUrl("src") }.filter { it.startsWith("http") }.distinct()
+        val pt = listOf(doc.selectFirst("meta[property=og:title]")?.attr("content").orEmpty(), doc.selectFirst("meta[name=twitter:title]")?.attr("content").orEmpty(), doc.selectFirst("h1")?.text().orEmpty(), doc.title()).filter { it.length > 1 }
+        val pd = listOf(doc.selectFirst("meta[property=og:description]")?.attr("content").orEmpty(), doc.selectFirst("meta[name=description]")?.attr("content").orEmpty()).joinToString(" ").take(600)
+        JsScripts.Collected(doc.title(), false, anchors, vids, url, pt, pd, nx)
+    } catch (_: Exception) { null }
+
     /** Baixar / Baixar marcados: resolve antes os que ainda estão carregando, depois envia (uma vez só). */
     fun sendAsync(ds: List<Det>, onMsg: (String) -> Unit) {
         scope.launch(Dispatchers.Main) {
             val want = ds.map { it.key }.toHashSet()
             // pega a versão atual de cada item (pode ter acabado de carregar)
-            val cur = list.filter { it.key in want && !it.sent && it.state != 2 }
+            // "não carregou" também vai: a fila abre a página de novo e tenta o servidor
+            val cur = list.filter { it.key in want && !it.sent }
             if (cur.isEmpty()) { onMsg("Nada novo para enviar."); return@launch }
             val curKeys = cur.map { it.key }.toHashSet()
             list.removeAll { it.key in curKeys }   // somem da lista na hora
@@ -608,10 +671,10 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     items(visible, key = { it.key }) { d ->
                         ListItem(
                             headlineContent = { Text(d.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text(when (d.state) { 1 -> "carregando…"; 2 -> "não carregou"; else -> d.f.typeLabel + " • " + (if (d.f.kind == Kind.SERVER) "via servidor" else "pronto") } + if (d.sent) " • Já enviado" else "") },
+                            supportingContent = { Text(when (d.state) { 1 -> "carregando…"; 2 -> "não carregou aqui (a fila tenta de novo)"; else -> d.f.typeLabel + " • " + (if (d.f.kind == Kind.SERVER) "via servidor" else "pronto") } + if (d.sent) " • Já enviado" else "") },
                             leadingContent = { Checkbox(d.sel && !d.sent, { v -> BrowserDetect.toggle(d.key, v) }, enabled = !d.sent) },
                             trailingContent = {
-                                TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent && d.state != 2) { Text("Baixar") }
+                                TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent) { Text("Baixar") }
                             })
                     }
                 }
