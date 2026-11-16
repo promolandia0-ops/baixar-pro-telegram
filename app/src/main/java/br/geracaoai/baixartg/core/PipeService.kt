@@ -52,7 +52,7 @@ class PipeService : Service() {
                 val done = l.count { it.st == Pipeline.PS.DONE }; val fail = l.count { it.st == Pipeline.PS.FAIL }
                 val total = l.size
                 if (!running && !paused) {
-                    if (l.none { it.st != Pipeline.PS.DONE && it.st != Pipeline.PS.FAIL }) {
+                    if (l.all { Pipeline.isFinal(it.st) }) {
                         stopForeground(STOP_FOREGROUND_REMOVE)
                         nm.notify(ID + 1, Notification.Builder(this@PipeService, WorkService.CHANNEL).setSmallIcon(R.drawable.ic_stat).setContentTitle("Fila concluída")
                             .setContentText("$done de $total enviados" + (if (fail > 0) " • $fail falharam" else "")).setAutoCancel(true).setContentIntent(openIntent()).build())

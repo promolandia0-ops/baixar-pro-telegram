@@ -85,7 +85,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         val page = v.url ?: return@Runnable
         if (!page.startsWith("http")) return@Runnable
         v.evaluateJavascript(JsScripts.COLLECT) { raw -> JsScripts.parseCollected(raw)?.let { c -> BrowserDetect.onCollected(page, c) } }
-        if (BrowserDetect.photosOn.value) v.evaluateJavascript(Photos.JS) { raw -> BrowserDetect.onPhotos(page, Photos.parse(raw)) }
+        if (BrowserDetect.photosOn.value) v.evaluateJavascript(Photos.JS) { raw -> BrowserDetect.onPhotos(page, Photos.parse(raw)); BrowserDetect.onPhotoCards(page, Photos.parseCards(raw)) }
     } }
     fun scheduleCollect(delayMs: Long = 700) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs) }
     LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_500); if (web != null) scheduleCollect(0) } }

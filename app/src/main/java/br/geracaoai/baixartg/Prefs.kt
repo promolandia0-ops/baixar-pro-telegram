@@ -19,6 +19,8 @@ object Prefs {
     var mediaMode: Int get() = p.getInt("media_mode", if (p.getBoolean("photos", false)) 2 else 0); set(v) = p.edit().putInt("media_mode", v).apply()
     var photos: Boolean get() = mediaMode != 0; set(v) { mediaMode = if (v) 2 else 0 }
     /** Enviar legenda (título/link) junto com a mídia. Padrão: desligado (só a mídia). */
+    var visualDedupe: Boolean get() = p.getBoolean("visual_dedupe", true); set(v) = p.edit().putBoolean("visual_dedupe", v).apply()
+    var replaceHigher: Boolean get() = p.getBoolean("replace_higher", false); set(v) = p.edit().putBoolean("replace_higher", v).apply()
     var sendCaption: Boolean get() = p.getBoolean("send_caption", false); set(v) = p.edit().putBoolean("send_caption", v).apply()
     var pipelineMigrated: Boolean get() = p.getBoolean("pipe_migrated", false); set(v) = p.edit().putBoolean("pipe_migrated", v).apply()
     var askedBattery: Boolean get() = p.getBoolean("asked_battery", false); set(v) = p.edit().putBoolean("asked_battery", v).apply()

@@ -17,11 +17,13 @@ import java.io.File
  * Sobrevive a fechar o app, à morte do processo, a reiniciar o celular e a atualizar o app.
  */
 object Pipeline {
-    enum class PS { WAIT, RESOLVING, READY, DOWN, UP, DONE, FAIL }
+    enum class PS { WAIT, RESOLVING, READY, DOWN, UP, DONE, FAIL, SKIP }
+    /** Terminou (enviado, falhou ou pulado como repetido). */
+    fun isFinal(s: PS) = s == PS.DONE || s == PS.FAIL || s == PS.SKIP
     data class PItem(
         val id: Long, val page: String, val title: String, val extra: String, val keys: List<String>,
         val f: Found?, val st: PS, val msg: String = "", val prog: Float = 0f, val photo: Boolean = false,
-        val speed: Long = 0, val stalls: Int = 0,
+        val speed: Long = 0, val stalls: Int = 0, val force: Boolean = false,
     )
 
     val items = MutableStateFlow<List<PItem>>(emptyList())
@@ -43,6 +45,7 @@ object Pipeline {
 
     fun init(c: Context) {
         app = c.applicationContext
+        VisualHash.init(app)
         file = File(app.filesDir, "send_queue.json")
         load()
         migrate183()
@@ -78,7 +81,7 @@ object Pipeline {
                 val j = a.getJSONObject(i)
                 val ks = j.optJSONArray("keys")?.let { ka -> (0 until ka.length()).map { ka.getString(it) } } ?: emptyList()
                 l += PItem(j.getLong("id"), j.getString("page"), j.optString("title"), j.optString("extra"), ks,
-                    j.optJSONObject("f")?.let { jToF(it) }, PS.valueOf(j.optString("st", "WAIT")), j.optString("msg"), 0f, j.optBoolean("photo"))
+                    j.optJSONObject("f")?.let { jToF(it) }, PS.valueOf(j.optString("st", "WAIT")), j.optString("msg"), 0f, j.optBoolean("photo"), force = j.optBoolean("force"))
             }
             items.value = l
             nextId = (l.maxOfOrNull { it.id } ?: 0L) + 1
@@ -99,7 +102,7 @@ object Pipeline {
             val a = JSONArray()
             for (it in items.value) {
                 val j = JSONObject().put("id", it.id).put("page", it.page).put("title", it.title).put("extra", it.extra.take(600))
-                    .put("keys", JSONArray(it.keys)).put("st", it.st.name).put("msg", it.msg).put("photo", it.photo)
+                    .put("keys", JSONArray(it.keys)).put("st", it.st.name).put("msg", it.msg).put("photo", it.photo).put("force", it.force)
                 it.f?.let { f -> j.put("f", fToJ(f)) }
                 a.put(j)
             }
@@ -164,6 +167,8 @@ object Pipeline {
     }
     fun retry(id: Long) { upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f) }; start() }
     fun retryFailed() { synchronized(lock) { items.value = items.value.map { if (it.st == PS.FAIL) it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "") else it } }; save(); start() }
+    /** Item pulado como repetido pela imagem: manda mesmo assim (sem a checagem visual). */
+    fun forceSend(id: Long) { upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, force = true, stalls = 0) }; start() }
     fun clearDone() { synchronized(lock) { items.value = items.value.filter { it.st != PS.DONE } }; saveAsync() }
 
     /**
@@ -361,6 +366,24 @@ object Pipeline {
                 upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "Repetido (mesmo arquivo já enviado, pulado)") }
                 return
             }
+            // Repetido pela imagem (muito rigoroso; na dúvida envia). Nunca apaga nada: só pula e deixa "Enviar mesmo assim".
+            var vfp: VisualHash.Fp? = null
+            if (Prefs.visualDedupe && f.kind != Kind.PHOTO && !t.force) {
+                upd(t.id, persist = false) { it.copy(msg = "Comparando com os já enviados…") }
+                vfp = try { withTimeoutOrNull(45_000) { withContext(Dispatchers.Default) { VisualHash.fingerprint(file, t.title) } } } catch (e: Exception) { if (e is CancellationException && e !is TimeoutCancellationException) throw e; null }
+                if (vfp != null) {
+                    val m = VisualHash.claim(t.id, vfp)
+                    if (m != null) {
+                        if (Prefs.replaceHigher && vfp.pixels > m.pixels) {
+                            VisualHash.release(t.id)   // qualidade maior: envia esta também
+                        } else {
+                            synchronized(claimed) { claimed.removeAll(ks) }
+                            upd(t.id) { it.copy(st = PS.SKIP, prog = 0f, speed = 0, msg = "igual a: " + m.title.ifBlank { "vídeo já enviado" }.take(90)) }
+                            return
+                        }
+                    }
+                }
+            }
             val cap = f.title + "\n" + f.page + (if (f.url != f.page && !Bunkr.isCdn(f.url) && f.kind != Kind.MEGA) "\n" + f.url else "")
             alive(t.id)
             var lastP = -1f; var lastT = System.currentTimeMillis(); var lastU = 0f
@@ -382,12 +405,17 @@ object Pipeline {
                 stalled(t, ks, "envio"); return
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
             Sent.markSent(f, t.keys + listOfNotNull(fk)); History.add(f, size)
+            if (vfp != null) VisualHash.markSent(t.id, vfp)
+            else if (f.kind != Kind.PHOTO && Prefs.visualDedupe) {
+                // enviado sem checagem (Enviar mesmo assim): guarda a impressão para os próximos
+                try { withContext(Dispatchers.Default) { VisualHash.fingerprint(file, t.title) }?.let { VisualHash.markSent(t.id, it) } } catch (e: Exception) { if (e is CancellationException) throw e }
+            }
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
         } catch (e: CancellationException) { throw e
         } catch (e: Exception) {
             synchronized(claimed) { claimed.removeAll(ks) }
             upd(t.id) { it.copy(st = PS.FAIL, msg = e.message?.take(160) ?: "Erro ao enviar", speed = 0) }
-        } finally { withContext(NonCancellable) { file.delete(); Downloader.audioOf(file).delete() } }   // apaga o temporário sempre
+        } finally { VisualHash.release(t.id); withContext(NonCancellable) { file.delete(); Downloader.audioOf(file).delete() } }   // apaga o temporário sempre
     }
 
     fun fmt(b: Long): String = if (b >= 1 shl 30) "%.1f GB".format(b / 1073741824.0) else if (b >= 1 shl 20) "%.0f MB".format(b / 1048576.0) else "%.0f KB".format(b / 1024.0)

@@ -178,12 +178,30 @@ object Jobs {
             if (!stopped && Prefs.photos) try {
                 val vids = items.value.filter { it.f.kind != Kind.PHOTO }
                 val vt = vids.flatMap { Photos.idTokens(it.f.url) + Photos.idTokens(it.f.page) }.toHashSet()
-                val pages = (urls.filter { it.startsWith("http") } + (if (m == Mode.SITE) vids.map { it.f.page }.filter { it.startsWith("http") } else emptyList())).distinct().take(40)
+                // só páginas de listagem/post (páginas de vídeo só têm capa/miniatura)
+                val pages = urls.filter { it.startsWith("http") }.distinct().take(40)
+                val vidPages = vids.map { Sent.norm(it.f.page) }.toHashSet()
                 val pk = HashSet<String>()
                 for (pg in pages) {
                     coroutineContext.ensureActive()
                     crawl.value = crawl.value.copy(current = "fotos: $pg")
                     val html = PageResolver.fetch(pg, null) ?: continue
+                    // posts de foto (card com link para a página do post, sem nada de vídeo): abre o post e pega as fotos grandes
+                    val posts = Photos.cardsFromHtml(pg, html).filter { Sent.norm(it.href) !in vidPages }.take(60)
+                    val fromPosts = ArrayList<Pair<String, Photos.Photo>>()
+                    for (c in posts) {
+                        coroutineContext.ensureActive()
+                        crawl.value = crawl.value.copy(current = "fotos: ${c.href}")
+                        Photos.fromPost(c.href, c.text, null).forEach { fromPosts += c.href to it }
+                    }
+                    for ((post, p) in fromPosts) {
+                        val k = Photos.key(p.url)
+                        if (!pk.add(k) || Photos.sharesId(p.url, vt)) continue
+                        if (words.isNotEmpty() && !NameFilter.matchesText(p.text, words)) continue
+                        val f = Found(p.url, post, Photos.title(p), Kind.PHOTO, ref = post, extra = p.text)
+                        if (Sent.anySent(listOf(k)) || Sent.isQueued(listOf(k)) || Sent.isSent(f)) continue
+                        items.update { it + Item(it.size, f, sel = false, sent = false, xkeys = listOf(k)) }
+                    }
                     for (p in Photos.fromHtml(pg, html)) {
                         val k = Photos.key(p.url)
                         if (!pk.add(k) || Photos.sharesId(p.url, vt)) continue

@@ -391,6 +391,7 @@ private fun pipeGroup(st: Pipeline.PS) = when (st) {
     Pipeline.PS.WAIT, Pipeline.PS.READY -> 2
     Pipeline.PS.DONE -> 3
     Pipeline.PS.FAIL -> 4
+    Pipeline.PS.SKIP -> 7
 }
 
 private fun isPhotoItem(t: Pipeline.PItem) = t.photo || t.f?.kind == Kind.PHOTO
@@ -402,7 +403,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         val waiting = l.count { it.st == Pipeline.PS.WAIT || it.st == Pipeline.PS.READY }
         val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
         val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
-        val active = l.any { it.st != Pipeline.PS.DONE && it.st != Pipeline.PS.FAIL }
+        val active = l.any { !Pipeline.isFinal(it.st) }
         val nPhotos = l.count { isPhotoItem(it) }; val nVideos = l.size - nPhotos
         var confirm by remember { mutableStateOf(false) }
         ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -429,7 +430,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
             dismissButton = { TextButton({ confirm = false }) { Text("Voltar") } })
     }
     // contagem por grupo numa passada só (rápido com milhares de itens)
-    val cnt = IntArray(7); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
+    val cnt = IntArray(8); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
     cnt[0] = l.size
     item(key = "pipe-chips") { PipeChips(filter, cnt) }
     val f = filter.value
@@ -444,7 +445,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PipeChips(filter: MutableState<Int>, cnt: IntArray) {
-    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos")
+    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos", "Repetidos")
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         names.forEachIndexed { i, n ->
             FilterChip(selected = filter.value == i, onClick = { filter.value = i }, label = { Text("$n (${cnt[i]})", maxLines = 1) })
@@ -470,6 +471,7 @@ fun PipeRow(t: Pipeline.PItem) {
                     Pipeline.PS.UP -> if (t.msg.startsWith("Esperando")) t.msg else "enviando $pct%" + speedTxt(t.speed)
                     Pipeline.PS.DONE -> "enviado" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
                     Pipeline.PS.FAIL -> "falhou: " + t.msg.ifBlank { "erro" }
+                    Pipeline.PS.SKIP -> "repetido (não enviado) • " + t.msg
                 }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
                     color = when (t.st) { Pipeline.PS.FAIL -> cs.error; Pipeline.PS.DONE -> cs.primary; else -> cs.onSurfaceVariant })
                 if ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog > 0f) {
@@ -479,6 +481,7 @@ fun PipeRow(t: Pipeline.PItem) {
                 }
             }
             if (t.st == Pipeline.PS.FAIL) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+            if (t.st == Pipeline.PS.SKIP) TextButton({ Pipeline.forceSend(t.id) }) { Text("Enviar mesmo assim") }
         }
     }
 }
@@ -675,6 +678,10 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
                     trailingIcon = { IconButton({ showTok = !showTok }) { Icon(if (showTok) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, "Mostrar") } }, modifier = Modifier.fillMaxWidth())
                 Text("Os vídeos são enviados pela sua conta para as Mensagens Salvas (sem limite de 50 MB do bot). O token só é verificado no teste.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 SwitchRow("Envio automático", "Depois de encontrar, já baixa e envia (Início e Varrer tudo).", auto) { auto = it }
+                var visOn by remember { mutableStateOf(Prefs.visualDedupe) }
+                SwitchRow("Detectar repetidos pela imagem", "Antes de enviar, compara vários momentos do vídeo com os já enviados. Bem rigoroso: na dúvida, envia. Os pulados ficam na Fila com \"Enviar mesmo assim\".", visOn) { visOn = it; Prefs.visualDedupe = it }
+                var hiOn by remember { mutableStateOf(Prefs.replaceHigher) }
+                SwitchRow("Substituir por qualidade maior", "Se o repetido tiver resolução maior que o já enviado, envia mesmo assim (o antigo continua lá).", hiOn) { hiOn = it; Prefs.replaceHigher = it }
                 var capOn by remember { mutableStateOf(Prefs.sendCaption) }
                 SwitchRow("Enviar legenda (título/link)", "Desligado: vai só o vídeo/foto, sem título, link ou texto.", capOn) { capOn = it; Prefs.sendCaption = it }
                 FilledTonalButton({ save(); testing = true; test = ""; scope.launch { test = Jobs.testConnection(); testing = false } }, enabled = !testing, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {

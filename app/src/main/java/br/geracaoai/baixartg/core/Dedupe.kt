@@ -18,8 +18,15 @@ import java.io.File
  */
 object Dedupe {
     /** Entrada compacta (sem guardar a mensagem inteira). kind: 0 vídeo, 1 documento-vídeo, 2 foto. */
-    class E(val id: Long, val date: Int, val size: Long, val dur: Int, val w: Int, val h: Int, val uid: String, val kind: Int, val cap: String)
-    class G(val keep: Long, val dels: LongArray)
+    class E(val id: Long, val date: Int, val size: Long, val dur: Int, val w: Int, val h: Int, val uid: String, val kind: Int, val cap: String,
+            val thumbId: Int = 0, val miniD: Long = 0, val miniP: Long = 0, val miniOk: Boolean = false)
+    /** sure = sugestão de alta confiança (só no modo por imagem). */
+    class G(val keep: Long, val dels: LongArray, val sure: Boolean = false)
+
+    /** Modo do último resultado: false = exato (mesmo arquivo), true = por imagem (miniatura + duração). */
+    @Volatile var visual = false; private set
+    /** Caminho local da miniatura de cada mensagem (modo por imagem). */
+    @Volatile var thumbs: Map<Long, String> = emptyMap(); private set
 
     enum class Phase { IDLE, SCANNING, RESULT, DELETING, DONE, ERROR }
     val phase = MutableStateFlow(Phase.IDLE)
@@ -53,14 +60,18 @@ object Dedupe {
     fun toDeleteBytes(): Long { val ex = excluded.value; return groups.sumOf { g -> g.dels.filter { it !in ex }.sumOf { info[it]?.size ?: 0L } } }
     fun toggle(id: Long, v: Boolean) { excluded.value = if (v) excluded.value - id else excluded.value + id }
     fun setAll(v: Boolean) { excluded.value = if (v) emptySet() else groups.flatMap { it.dels.toList() }.toSet() }
+    /** Modo por imagem: marca só os grupos de alta confiança (nunca automático). */
+    fun markSuggested() { excluded.value = groups.filter { !it.sure }.flatMap { it.dels.toList() }.toSet() }
 
     fun cancel() { job?.cancel(); if (phase.value == Phase.SCANNING) phase.value = Phase.IDLE }
     fun reset() { if (phase.value == Phase.DELETING) return; job?.cancel(); groups = emptyList(); info = emptyMap(); excluded.value = emptySet(); phase.value = Phase.IDLE; status.value = ""
         planFile?.delete(); doneFile?.delete() }
 
     // ---------------- análise ----------------
-    fun analyze(includePhotos: Boolean) {
+    fun analyze(includePhotos: Boolean, byImage: Boolean = false) {
         if (job?.isActive == true) return
+        if (byImage) { analyzeVisual(); return }
+        visual = false; thumbs = emptyMap()
         job = scope.launch {
             phase.value = Phase.SCANNING; scanned.value = 0; status.value = "Conectando ao Telegram…"
             try {
@@ -91,6 +102,120 @@ object Dedupe {
                 excluded.value = emptySet()
                 phase.value = Phase.RESULT
                 status.value = if (gs.isEmpty()) "Nenhum repetido encontrado em ${fmtN(all.size)} arquivos." else "${fmtN(all.size)} arquivos analisados."
+            } catch (e: CancellationException) { phase.value = Phase.IDLE; status.value = "Análise cancelada."; throw e
+            } catch (e: Exception) { phase.value = Phase.ERROR; status.value = "Erro: ${e.message}" }
+        }
+    }
+
+    // ---------------- modo por imagem ----------------
+    private const val VD = 6        // agrupar: pHash ≤6 E dHash ≤6
+    private const val VSURE = 4     // sugerido: miniatura E miniatura completa ≤4
+    private class H(val d: Long, val p: Long)
+
+    private fun hashBytes(b: ByteArray?): H? {
+        if (b == null || b.isEmpty()) return null
+        val bmp = try { android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size) } catch (_: Throwable) { null } ?: return null
+        return try { if (VisualHash.usable(bmp)) H(VisualHash.dHash(bmp), VisualHash.pHash(bmp)) else null } finally { bmp.recycle() }
+    }
+    private fun hashFile(path: String): H? {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(path, o)
+        if (o.outWidth <= 0) return null
+        var ss = 1; while (o.outWidth / (ss * 2) >= 96 && o.outHeight / (ss * 2) >= 96) ss *= 2
+        val bmp = try { android.graphics.BitmapFactory.decodeFile(path, android.graphics.BitmapFactory.Options().apply { inSampleSize = ss }) } catch (_: Throwable) { null } ?: return null
+        return try { if (VisualHash.usable(bmp)) H(VisualHash.dHash(bmp), VisualHash.pHash(bmp)) else null } finally { bmp.recycle() }
+    }
+    private fun near(a: H, b: H, max: Int) = VisualHash.ham(a.d, b.d) <= max && VisualHash.ham(a.p, b.p) <= max
+
+    private fun analyzeVisual() {
+        job = scope.launch {
+            phase.value = Phase.SCANNING; scanned.value = 0; status.value = "Conectando ao Telegram…"
+            try {
+                if (!Td.awaitReady(60_000)) throw IllegalStateException("Telegram não conectado")
+                val chat = Uploader.savedChat()
+                estimate.value = try { Td.send(TdApi.GetChatMessageCount(chat, null, TdApi.SearchMessagesFilterVideo(), false)).count } catch (e: Exception) { if (e is CancellationException) throw e; 0 }
+                val all = ArrayList<E>(maxOf(1000, estimate.value))
+                var from = 0L; var empty = 0; var read = 0
+                while (isActive) {
+                    val r = flood { Td.send(TdApi.GetChatHistory(chat, from, 0, 100, false)) }
+                    if (r.messages.isEmpty()) { if (++empty >= 3) break; delay(600); continue }
+                    empty = 0
+                    for (m in r.messages) {
+                        read++
+                        val c = m.content as? TdApi.MessageVideo ?: continue
+                        val v = c.video; if (v.duration <= 0) continue
+                        val mh = hashBytes(v.minithumbnail?.data)
+                        all += E(m.id, m.date, fsize(v.video), v.duration, v.width, v.height, v.video?.remote?.uniqueId ?: "", 0,
+                            ((c.caption?.text ?: "").replace('\n', ' ').take(70)).ifBlank { v.fileName ?: "" },
+                            v.thumbnail?.file?.id ?: 0, mh?.d ?: 0, mh?.p ?: 0, mh != null)
+                    }
+                    from = r.messages.last().id
+                    scanned.value = all.size
+                    status.value = "Lendo vídeos: ${fmtN(all.size)}" + (if (estimate.value > 0) " de ~${fmtN(estimate.value)}" else "")
+                }
+                // só baixa miniatura de quem tem outro vídeo com a mesma duração (±1 s) e a mesma proporção
+                val sorted = all.sortedBy { it.dur }
+                val cand = HashSet<Long>()
+                for (i in sorted.indices) {
+                    var j = i + 1
+                    while (j < sorted.size && sorted[j].dur - sorted[i].dur <= 1) {
+                        if (VisualHash.aspectOk(sorted[i].w, sorted[i].h, sorted[j].w, sorted[j].h)) { cand += sorted[i].id; cand += sorted[j].id }
+                        j++
+                    }
+                }
+                val list = sorted.filter { it.id in cand && it.thumbId != 0 }
+                val full = java.util.concurrent.ConcurrentHashMap<Long, H>()
+                val paths = java.util.concurrent.ConcurrentHashMap<Long, String>()
+                val done = java.util.concurrent.atomic.AtomicInteger(0)
+                val gate = kotlinx.coroutines.sync.Semaphore(3)
+                estimate.value = list.size; scanned.value = 0
+                coroutineScope {
+                    for (e in list) {
+                        gate.acquire()
+                        launch {
+                            try {
+                                val f = try { flood { Td.send(TdApi.DownloadFile(e.thumbId, 1, 0, 0, true)) } } catch (x: Exception) { if (x is CancellationException) throw x; null }
+                                val p = f?.local?.path?.takeIf { f.local.isDownloadingCompleted && it.isNotBlank() }
+                                if (p != null) { paths[e.id] = p; hashFile(p)?.let { full[e.id] = it } }
+                            } finally {
+                                gate.release()
+                                val n = done.incrementAndGet(); scanned.value = n
+                                status.value = "Comparando miniaturas: ${fmtN(n)} de ${fmtN(list.size)}"
+                            }
+                        }
+                        delay(40)
+                    }
+                }
+                status.value = "Agrupando…"
+                // grupos rigorosos: cada membro bate com TODOS os outros (duração ±1 s, proporção, pHash ≤6 E dHash ≤6)
+                val byId = all.associateBy { it.id }
+                val ok = list.filter { full[it.id] != null }
+                val used = HashSet<Long>()
+                val gs = ArrayList<G>()
+                for (i in ok.indices) {
+                    val a = ok[i]; if (a.id in used) continue
+                    val members = arrayListOf(a)
+                    var j = i + 1
+                    while (j < ok.size && ok[j].dur - a.dur <= 1) {
+                        val b = ok[j]
+                        if (b.id !in used && members.all { m -> kotlin.math.abs(m.dur - b.dur) <= 1 && VisualHash.aspectOk(m.w, m.h, b.w, b.h) && near(full[m.id]!!, full[b.id]!!, VD) }) members += b
+                        j++
+                    }
+                    if (members.size < 2) continue
+                    members.forEach { used += it.id }
+                    val keep = members.maxWith(compareBy<E>({ it.w.toLong() * it.h }, { it.size }, { it.date }, { it.id }))   // maior qualidade fica
+                    val sure = members.all { m -> m === keep || (near(full[m.id]!!, full[keep.id]!!, VSURE) && m.miniOk && keep.miniOk &&
+                        VisualHash.ham(m.miniD, keep.miniD) <= VSURE && VisualHash.ham(m.miniP, keep.miniP) <= VSURE) }
+                    gs += G(keep.id, members.filter { it !== keep }.map { it.id }.toLongArray(), sure)
+                }
+                val ids = HashSet<Long>(); gs.forEach { g -> ids += g.keep; g.dels.forEach { ids += it } }
+                info = ids.mapNotNull { byId[it] }.associateBy { it.id }
+                thumbs = paths.filterKeys { it in ids }
+                groups = gs.sortedWith(compareByDescending<G> { it.sure }.thenByDescending { it.dels.size })
+                visual = true
+                excluded.value = groups.flatMap { it.dels.toList() }.toSet()   // NADA marcado: você escolhe
+                phase.value = Phase.RESULT
+                status.value = if (gs.isEmpty()) "Nenhum repetido por imagem em ${fmtN(all.size)} vídeos." else "${fmtN(all.size)} vídeos analisados. Nada vem marcado: confira as miniaturas e marque o que for igual."
             } catch (e: CancellationException) { phase.value = Phase.IDLE; status.value = "Análise cancelada."; throw e
             } catch (e: Exception) { phase.value = Phase.ERROR; status.value = "Erro: ${e.message}" }
         }
@@ -217,7 +342,7 @@ object Dedupe {
             }
             planFile?.delete(); doneFile?.delete()
             phase.value = Phase.DONE
-            status.value = "Pronto! ${fmtN(deleted)} repetidos apagados" + (if (skipped > 0) ", ${fmtN(skipped)} pulados (a outra cópia já não existia)" else "") + ". Ficou sempre a cópia mais recente."
+            status.value = "Pronto! ${fmtN(deleted)} repetidos apagados" + (if (skipped > 0) ", ${fmtN(skipped)} pulados (a outra cópia já não existia)" else "") + ". Sempre ficou uma cópia de cada."
         } catch (e: CancellationException) { status.value = "Pausado. Continua quando abrir o app."; throw e
         } catch (e: Exception) { phase.value = Phase.ERROR; status.value = "Erro ao apagar: ${e.message}. Toque em Continuar para retomar." }
     }

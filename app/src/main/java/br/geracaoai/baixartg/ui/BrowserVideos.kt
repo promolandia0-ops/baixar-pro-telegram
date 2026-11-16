@@ -39,23 +39,84 @@ object BrowserDetect {
     fun applyTerm(t: String) {
         term.value = t
         for (i in list.indices) { val d = list[i]; val v = !d.sent && matches(d.f, t); if (d.sel != v) list[i] = d.copy(sel = v) }
+        // fotos: com nome, só ficam as que batem (as outras saem e podem voltar se o nome mudar)
+        if (t.isNotBlank()) { val gone = photos.filter { !matches(it.f, t) }; if (gone.isNotEmpty()) { photos.removeAll(gone.toSet()); gone.forEach { d -> d.keys.forEach { photoKeys.remove(it) } }; photoPosts.clear() } }
+        else photoPosts.clear()
         for (i in photos.indices) { val d = photos[i]; val v = matches(d.f, t); if (d.sel != v) photos[i] = d.copy(sel = v) }
     }
 
     // ---------------- Fotos (opcional, separado dos vídeos) ----------------
     val photos = mutableStateListOf<Det>()
-    val photosOn = mutableStateOf(Prefs.photos)
+    val photosOn = mutableStateOf(Prefs.mediaMode != 0)   // "Só fotos" e "Vídeos e fotos" detectam fotos (inclusive ao reabrir o app)
     /** 0 Só vídeos, 1 Só fotos, 2 Vídeos e fotos. "Só fotos" só esconde os vídeos (continuam detectados/salvos). */
     val mode = mutableIntStateOf(Prefs.mediaMode)
     fun setMode(m: Int) { Prefs.mediaMode = m; mode.intValue = m; setPhotosOn(m != 0) }
     private val photoKeys = HashSet<String>()
     private val thumbKeys = java.util.Collections.synchronizedSet(HashSet<String>())
-    fun setPhotosOn(v: Boolean) { photosOn.value = v; if (!v) { photos.clear(); photoKeys.clear() } }
+    fun setPhotosOn(v: Boolean) { photosOn.value = v; if (!v) { photos.clear(); photoKeys.clear(); photoPosts.clear() } }
     fun togglePhoto(key: String, v: Boolean) { val i = photos.indexOfFirst { it.key == key }; if (i >= 0) photos[i] = photos[i].copy(sel = v) }
     fun setAllPhotos(v: Boolean) { for (i in photos.indices) if (photos[i].sel != v) photos[i] = photos[i].copy(sel = v) }
 
+    private fun videoTokens(): HashSet<String> {
+        val vt = HashSet<String>()
+        list.forEach { vt += Photos.idTokens(it.f.url); vt += Photos.idTokens(it.f.page) }
+        hidden.values.forEach { vt += Photos.idTokens(it.f.page) }
+        synchronized(cardPages) { cardPages.forEach { vt += Photos.idTokens(it) } }
+        return vt
+    }
+    /** Foto passa no nome (mesma regra estrita dos vídeos: legenda/título/alt/título do post). Sem nome: passa. */
+    private fun photoMatches(f: Found) = term.value.isBlank() || matches(f)
+
+    /** Adiciona fotos já conferidas (tamanho real ≥ 500 px). Só thread principal. */
+    private fun addPhotos(page: String, ps: List<Photos.Photo>, checkThumbs: Boolean) {
+        val vt = videoTokens()
+        for (p in ps) {
+            if (br.geracaoai.baixartg.web.AdBlock.isAdHost(Extract.host(p.url))) continue
+            val k = Photos.key(p.url)
+            if (k in photoKeys || (checkThumbs && k in thumbKeys) || Photos.sharesId(p.url, vt)) continue
+            val f = Found(p.url, page, Photos.title(p), Kind.PHOTO, ref = page, extra = p.text)
+            if (!photoMatches(f)) continue   // com nome: só fotos cuja legenda/título bate (não grava a chave: volta se o nome mudar)
+            photoKeys += k
+            if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k)) || Sent.isSent(f)) continue
+            photos += Det("ph:$k", f, sel = term.value.isNotBlank(), keys = listOf(k))
+        }
+    }
+    private val photoPosts = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val photoGate = Semaphore(3)
+    /** Cards de post de foto: abre a página do post (como o resolvedor de vídeo) e pega as fotos grandes de lá. */
+    fun onPhotoCards(page: String, cards: List<Photos.Card>) {
+        if (!photosOn.value || cards.isEmpty()) return
+        val words = NameFilter.words(term.value)
+        for (c in cards) {
+            val np = normPage(c.href)
+            if (np in cardPages || synchronized(seenCards) { c.href in seenCards } || list.any { normPage(it.f.page) == np }) continue   // é card de vídeo
+            if (!photoPosts.add(np)) continue
+            scope.launch {
+                photoGate.withPermit {
+                    val ps = try { Photos.fromPost(c.href, c.text) { u -> JsRender.render(u, 15_000)?.html } } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+                    val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
+                    if (ps.isNotEmpty() && ok.isEmpty()) photoPosts.remove(np)   // nome diferente: pode voltar se mudar a busca
+                    if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false) }
+                }
+            }
+        }
+    }
+
     /** Fotos coletadas do DOM (Photos.JS). Nunca mexe na lista de vídeos. Só thread principal. */
-    fun onPhotos(page: String, ps: List<Photos.Photo>) {
+    fun onPhotos(page: String, ps0: List<Photos.Photo>) {
+        if (!photosOn.value || ps0.isEmpty()) return
+        // tamanho desconhecido (lazy/placeholder): confere no arquivo de verdade antes de listar
+        val unknown = ps0.filter { it.w <= 0 || it.h <= 0 }.filter { Photos.key(it.url) !in photoKeys }
+        if (unknown.isNotEmpty()) scope.launch {
+            val ok = ArrayList<Photos.Photo>()
+            for (p in unknown.take(60)) { val wh = Photos.probeSize(p.url, page) ?: continue; if (minOf(wh.first, wh.second) >= Photos.MIN_SIDE) ok += p.copy(w = wh.first, h = wh.second) }
+            if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(page, ok, checkThumbs = true) }
+        }
+        val ps = ps0.filter { it.w > 0 && it.h > 0 }
+        if (ps.isEmpty()) return
+        addPhotos(page, ps, checkThumbs = true)
+    }
+    @Suppress("unused") private fun onPhotosOld(page: String, ps: List<Photos.Photo>) {
         if (!photosOn.value || ps.isEmpty()) return
         val vt = HashSet<String>()
         list.forEach { vt += Photos.idTokens(it.f.url); vt += Photos.idTokens(it.f.page) }
@@ -337,6 +398,12 @@ object BrowserDetect {
             scope.launch {
                 val js = JsRender.listing(nx, 30_000)
                 js?.collected?.let { col -> withContext(Dispatchers.Main) { onCollected(nx, col, background = true) } }
+                // fotos também nas próximas páginas da busca ("Só fotos" / "Vídeos e fotos")
+                val h = js?.html
+                if (photosOn.value && h != null) {
+                    val ps = Photos.fromHtml(nx, h); val cs = Photos.cardsFromHtml(nx, h)
+                    withContext(Dispatchers.Main) { onPhotos(nx, ps); onPhotoCards(nx, cs) }
+                }
             }
         }
     }
