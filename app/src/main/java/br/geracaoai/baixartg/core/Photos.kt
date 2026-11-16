@@ -75,7 +75,7 @@ object Photos {
      * celular) — por isso toda foto boa caía em "pequena". Agora usa a largura declarada do maior candidato do srcset,
      * ou deixa sem tamanho (o app mede o arquivo de verdade).
      */
-    const val JS = """(function(){
+    private const val JS0 = """(function(){
       var out=[],cards=[],rej={};
       var W=window,D=document,imgs=D.images,NI=imgs.length,NA=D.links.length;
       var ST=W.__bptPh;
@@ -172,10 +172,10 @@ object Photos {
       }
       // páginas de resultado (ex.: busca de imagens) guardam o endereço ORIGINAL com o tamanho no próprio código:
       // ["https://…/foto.jpg",altura,largura]. Lido uma vez por página (e de novo se a página crescer).
-      if(!over()&&ST.scr!==D.scripts.length){ST.scr=D.scripts.length;
-        try{var seenS={},tot=0,re=/\["((?:https?:)?\/\/(?:[^"\\]|\\.){8,1500}?)",(\d{3,5}),(\d{3,5})\]/g;
-          for(var s=0;s<D.scripts.length&&tot<4000000;s++){var sc=D.scripts[s];if(sc.src)continue;var tx=sc.textContent||'';tot+=tx.length;if(tx.indexOf('",')<0)continue;var m;
-            while((m=re.exec(tx))&&out.length<400){var su;try{su=JSON.parse('"'+m[1]+'"')}catch(x){continue}
+      if(!over()&&ST.scr!==D.scripts.length&&(!ST.scrAt||Date.now()-ST.scrAt>8000)){ST.scr=D.scripts.length;ST.scrAt=Date.now();
+        try{var seenS={},tot=0,re=/\["((?:https?:)?\/\/(?:[^"\\]|\\.){8,1500}?)",(\d{3,5}),(\d{3,5})\]/g,TS=Date.now();
+          for(var s=0;s<D.scripts.length&&tot<3000000&&Date.now()-TS<60;s++){var sc=D.scripts[s];if(sc.src)continue;var tx=sc.textContent||'';if(tx.length>1500000)continue;tot+=tx.length;if(tx.indexOf('",')<0)continue;var m;re.lastIndex=0;
+            while((m=re.exec(tx))&&out.length<400&&Date.now()-TS<60){var su;try{su=JSON.parse('"'+m[1]+'"')}catch(x){continue}
               if(su.indexOf('//')===0)su=location.protocol+su;
               var hh=parseInt(m[2]),ww=parseInt(m[3]);if(Math.min(hh,ww)<500||seenS[su])continue;
               if(/\/favicon|\.svg|\.gif|\.js(\?|$)|\.css(\?|$)/i.test(su))continue;seenS[su]=1;
@@ -203,6 +203,8 @@ object Photos {
       ST.pend=pend;if(more)ST.dirty=1;
       return JSON.stringify({p:out,c:cards,r:rej,n:imgs.length});
     })()"""
+    /** Script com proteção: qualquer erro volta como texto (vai no diagnóstico) em vez de resposta vazia. */
+    const val JS = "(function(){try{return " + JS0 + "}catch(e){try{return JSON.stringify({p:[],c:[],r:{},n:document.images.length,err:String((e&&e.message)||e).slice(0,200)})}catch(x){return '{\"p\":[],\"err\":\"?\"}'}}})()"
 
     fun parse(raw: String?): List<Photo> = try {
         var v: Any? = JSONTokener(raw ?: return emptyList()).nextValue()
@@ -221,6 +223,15 @@ object Photos {
         r?.keys()?.forEach { k -> m[k] = r.optInt(k) }
         m to o.optInt("n")
     } catch (_: Exception) { emptyMap<String, Int>() to -1 }
+
+    /** Erro do script de fotos na página (vazio = rodou bem); "sem resposta" quando o navegador não devolveu nada. */
+    fun parseErr(raw: String?): String = try {
+        if (raw.isNullOrBlank() || raw == "null") "sem resposta do script" else {
+            var v: Any? = JSONTokener(raw).nextValue()
+            if (v is String) v = JSONTokener(v).nextValue()
+            (v as? org.json.JSONObject)?.optString("err").orEmpty()
+        }
+    } catch (e: Throwable) { "resposta ilegível (" + (raw?.length ?: 0) + " letras)" }
 
     data class Card(val href: String, val text: String)
     fun parseCards(raw: String?): List<Card> = try {

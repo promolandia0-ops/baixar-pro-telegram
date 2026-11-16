@@ -127,29 +127,45 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                 val c = JsScripts.parseCollected(raw)
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
                     try { c?.takeIf { !it.same }?.let { BrowserDetect.onCollected(page, it) } } catch (_: Exception) {}
-                    // fotos: script separado, depois do de vídeo (um erro nele nunca atrapalha os vídeos)
-                    // no máximo a cada 4 s; o script só olha o que mudou (e para em ~40 ms por vez)
-                    val doPhotos = BrowserDetect.photosOn.value && web === v && System.currentTimeMillis() - collectState.photoAt >= 2_500
-                    if (doPhotos) collectState.photoAt = System.currentTimeMillis()
-                    // nome trocado / fotos religadas: relê as fotos da página (limpa as marcas de "já decidido")
-                    val reset = if (collectState.epoch != BrowserDetect.photoEpoch) { collectState.epoch = BrowserDetect.photoEpoch
-                        "window.__bptPh=null;try{var _i=document.images;for(var _k=0;_k<_i.length;_k++)_i[_k].__bptD=null;var _l=document.links;for(var _k=0;_k<_l.length;_k++)_l[_k].__bptC=null}catch(e){};" } else ""
-                    if (doPhotos) v.evaluateJavascript(reset + Photos.JS) { praw ->
-                        collectScope.launch {
-                            val ps = Photos.parse(praw); val cs = Photos.parseCards(praw); val (rj, n) = Photos.parseRejects(praw)
-                            BrowserDiag.lastImgs = n; if (collectState.photoTurn++ % 10 == 0) rj.forEach { (k, x) -> BrowserDiag.rej(k, x) }
-                            withContext(kotlinx.coroutines.Dispatchers.Main) {
-                                try { BrowserDetect.onPhotos(page, ps); BrowserDetect.onPhotoCards(page, cs) } catch (_: Exception) {}
-                                collectState.busy = false
-                            }
-                        }
-                    } else collectState.busy = false
+                    collectState.busy = false
                 }
             }
         }
     } }
-    fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs) }
-    LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(3_000); if (web != null) scheduleCollect(0) } }
+    // Fotos: corrida PRÓPRIA, independente da coleta de vídeos (antes só rodava no fim da coleta de vídeos e, se aquela
+    // resposta atrasasse ou se perdesse, o script de fotos nunca rodava: "<img> na página=-1"). Prazo de 8 s por resposta.
+    val photoState = remember { object { var busy = false; var at = 0L; var epoch = -1 } }
+    val photoRun = remember { Runnable {
+        val v = web ?: return@Runnable
+        val page = v.url ?: return@Runnable
+        if (!page.startsWith("http") || !BrowserDetect.photosOn.value) return@Runnable
+        BrowserDetect.staticPhotos(page)
+        val now = System.currentTimeMillis()
+        if (photoState.busy && now - photoState.at < 8_000) return@Runnable
+        photoState.busy = true; photoState.at = now
+        // nome trocado / fotos religadas / página nova: relê as fotos da página (limpa as marcas de "já decidido")
+        val reset = if (photoState.epoch != BrowserDetect.photoEpoch) { photoState.epoch = BrowserDetect.photoEpoch
+            "window.__bptPh=null;try{var _i=document.images;for(var _k=0;_k<_i.length;_k++)_i[_k].__bptD=null;var _l=document.links;for(var _k=0;_k<_l.length;_k++)_l[_k].__bptC=null}catch(e){};" } else ""
+        BrowserDiag.photoCalls++
+        v.evaluateJavascript(reset + Photos.JS) { praw ->
+            collectScope.launch {
+                try {
+                    BrowserDiag.photoReplies++
+                    val err = Photos.parseErr(praw); if (err.isNotBlank()) { BrowserDiag.photoErrs++; BrowserDiag.lastPhotoErr = err }
+                    val ps = Photos.parse(praw); val cs = Photos.parseCards(praw); val (rj, n) = Photos.parseRejects(praw)
+                    if (n >= 0) BrowserDiag.lastImgs = n
+                    rj.forEach { (k, x) -> BrowserDiag.rej(k, x) }   // cada imagem é decidida uma vez: soma todas as passadas
+                    withContext(kotlinx.coroutines.Dispatchers.Main) {
+                        try { BrowserDetect.onPhotos(page, ps); BrowserDetect.onPhotoCards(page, cs) } catch (e: Throwable) { BrowserDiag.lastPhotoErr = "app: " + e.javaClass.simpleName + " " + (e.message ?: "").take(120) }
+                    }
+                } catch (e: Throwable) { BrowserDiag.lastPhotoErr = "app: " + e.javaClass.simpleName + " " + (e.message ?: "").take(120) }
+                finally { withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.Main) { photoState.busy = false } }
+            }
+        }
+    } }
+    fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs)
+        if (BrowserDetect.photosOn.value) { handler.removeCallbacks(photoRun); handler.postDelayed(photoRun, delayMs + 300) } }
+    LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_000); if (web != null) scheduleCollect(0) } }
     Scaffold(topBar = {
         Column {
             TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.Rounded.Close, "Fechar") } },

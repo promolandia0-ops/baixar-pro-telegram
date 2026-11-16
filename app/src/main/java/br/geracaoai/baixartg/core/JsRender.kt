@@ -132,8 +132,8 @@ object JsRender {
             // vaga com prazo: sem vaga em 10 s a fila desiste da página oculta (vai pro servidor) — nunca fica esperando
             val solo = browserVisible
             if (solo && !acquire(queueSoloGate, 10_000)) return@run null
-            try { aliveQueue.incrementAndGet(); page(url, timeoutMs, true, queueGate, slotWait = 10_000) }
-            finally { aliveQueue.decrementAndGet(); if (solo) queueSoloGate.release() }
+            try { page(url, timeoutMs, true, queueGate, slotWait = 10_000) }
+            finally { if (solo) queueSoloGate.release() }
         }
     /** Pega uma vaga sem risco de vazar: tenta até o prazo; false = sem vaga. */
     private suspend fun acquire(s: Semaphore, waitMs: Long): Boolean {
@@ -191,7 +191,7 @@ object JsRender {
         if (vis && !acquire(visibleGate, slotWait)) { pool.release(); return null }
         return try {
             val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return null
-            alive.incrementAndGet()
+            alive.incrementAndGet(); if (pool === queueGate) aliveQueue.incrementAndGet()
             try { withTimeoutOrNull(hardMs) {
                 suspendCancellableCoroutine { cont ->
                     val finished = AtomicBoolean(false)
@@ -230,7 +230,7 @@ object JsRender {
                         } catch (_: Exception) { done(null) }
                     }
                 }
-            } } finally { alive.decrementAndGet() }
+            } } finally { alive.decrementAndGet(); if (pool === queueGate) aliveQueue.decrementAndGet() }
         } finally { pool.release(); if (vis) visibleGate.release() }
     }
 

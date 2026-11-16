@@ -35,7 +35,7 @@ class Diag {
     fun note(s: String) { if (events.size < 60) events += "+" + ((System.currentTimeMillis() - t0) / 100) / 10.0 + "s " + s }
 
     fun report(): String = buildString {
-        appendLine("Baixar Pro Telegram — diagnóstico")
+        appendLine("Baixar Pro Telegram v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME} — diagnóstico")
         appendLine("site: ${site.ifBlank { "-" }}  modo: $mode  tempo: ${(System.currentTimeMillis() - t0) / 1000}s")
         appendLine("HTTP: " + status.entries.sortedBy { it.key }.joinToString(" ") { "${it.key}×${it.value.get()}" }.ifBlank { "-" })
         appendLine("anti-bot/desafio: ${if (challenge) "SIM" else "não"}  navegador oculto: ${if (webviewAvailable) "ok" else "indisponível"}")

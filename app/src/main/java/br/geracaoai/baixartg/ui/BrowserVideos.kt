@@ -26,18 +26,20 @@ import okhttp3.Request
 object BrowserDiag {
     private fun m() = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
     val photoRejects = m(); val counters = m()
+    @Volatile var photoCalls = 0; @Volatile var photoReplies = 0; @Volatile var photoErrs = 0; @Volatile var lastPhotoErr = ""
     @Volatile var lastImgs = -1; @Volatile var collectMs = 0L; @Volatile var collectMaxMs = 0L; @Volatile var collects = 0
     fun inc(k: String, n: Int = 1) { counters.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     /** Página nova: contagens recomeçam (antes somavam todas as páginas e confundiam). */
-    fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
+    fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
     fun timed(ms: Long) { collects++; collectMs = ms; if (ms > collectMaxMs) collectMaxMs = ms }
     fun report(): String = buildString {
-        appendLine("— navegador (página atual) —")
+        appendLine("— navegador (página atual) — app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME}")
         appendLine("modo: ${listOf("só vídeos", "só fotos", "vídeos e fotos").getOrElse(BrowserDetect.mode.intValue) { "?" }}  nome: ${if (BrowserDetect.term.value.isBlank()) "-" else "sim"}")
-        appendLine("lista: ${BrowserDetect.list.size} vídeos, ${BrowserDetect.photos.size} fotos, carregando=${BrowserDetect.pending.intValue}, já na fila/enviados nesta página=${BrowserDetect.alreadyHere.intValue}")
+        appendLine("lista: ${BrowserDetect.list.size} vídeos${if (BrowserDetect.mode.intValue == 1) " (escondidos: Só fotos)" else ""}, ${BrowserDetect.photos.size} fotos, carregando=${BrowserDetect.pending.intValue}, já na fila/enviados nesta página=${BrowserDetect.alreadyHere.intValue}")
         appendLine("páginas ocultas vivas: ${br.geracaoai.baixartg.core.JsRender.alive.get()} (fila: ${br.geracaoai.baixartg.core.JsRender.aliveQueue.get()})")
         appendLine("coleta: ${collects}× última=${collectMs}ms pior=${collectMaxMs}ms  <img> na página=$lastImgs")
+        appendLine("script de fotos: ${if (BrowserDetect.photosOn.value) "ligado" else "desligado"}  rodou=$photoCalls respondeu=$photoReplies erros=$photoErrs" + (if (lastPhotoErr.isNotBlank()) "  último erro: $lastPhotoErr" else ""))
         if (counters.isNotEmpty()) appendLine("contadores: " + counters.entries.sortedBy { it.key }.joinToString("; ") { "${it.key}×${it.value.get()}" })
         if (photoRejects.isNotEmpty()) appendLine("fotos descartadas: " + photoRejects.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
         if (br.geracaoai.baixartg.core.BrowserProbeStats.fails.isNotEmpty()) appendLine("falhas ao medir foto: " + br.geracaoai.baixartg.core.BrowserProbeStats.fails.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
@@ -62,8 +64,6 @@ object BrowserDetect {
         term.value = t
         for (i in list.indices) { val d = list[i]; val v = !d.sent && matches(d.f, t); if (d.sel != v) list[i] = d.copy(sel = v) }
         // fotos: com nome, só ficam as que batem (as outras saem e podem voltar se o nome mudar)
-        if (t.isNotBlank()) { val gone = photos.filter { !matches(it.f, t) }; if (gone.isNotEmpty()) { photos.removeAll(gone.toSet()); gone.forEach { d -> d.keys.forEach { photoKeys.remove(it) } }; photoPosts.clear() } }
-        else photoPosts.clear()
         probing.clear(); photoEpoch++
         for (i in photos.indices) { val d = photos[i]; val v = matches(d.f, t); if (d.sel != v) photos[i] = d.copy(sel = v) }
     }
@@ -111,11 +111,13 @@ object BrowserDetect {
             if (k in photoKeys) continue
             if ((checkThumbs && k in thumbKeys) || Photos.sharesId(p.url, vt)) { BrowserDiag.rej("miniatura de vídeo"); continue }
             val f = Found(p.url, page, Photos.title(p), Kind.PHOTO, ref = page, extra = p.text)
-            if (!photoMatches(f)) { BrowserDiag.rej("nome não bate"); continue }
-            BrowserDiag.inc("fotos aceitas")   // com nome: só fotos cuja legenda/título bate (não grava a chave: volta se o nome mudar)
+            // nome: igual aos vídeos — a foto aparece sempre; com nome, só as que batem já vêm marcadas
+            // (antes as que não batiam sumiam: com o nome do professor digitado, quase nenhuma foto aparecia)
+            val hit = photoMatches(f)
+            BrowserDiag.inc(if (hit) "fotos listadas" else "fotos listadas sem marcar (nome não bate)")
             photoKeys += k
             if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k)) || Sent.isSent(f)) { BrowserDiag.rej("já enviada/na fila"); continue }
-            photos += Det("ph:$k", f, sel = term.value.isNotBlank(), keys = listOf(k))
+            photos += Det("ph:$k", f, sel = term.value.isNotBlank() && hit, keys = listOf(k))
         }
     }
     private val photoPosts = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -138,13 +140,30 @@ object BrowserDetect {
                 try { photoGate.withPermit {
                     // só HTML (sem página oculta: elas dividem o motor de páginas com o navegador visível e travavam a rolagem)
                     val ps = try { Photos.fromPost(c.href, c.text, null, deadlineMs = 30_000) } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
-                    val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
+                    val ok = ps   // nome só marca (addPhotos); nada some por causa do nome
                     BrowserDiag.inc("posts abertos"); if (ps.isEmpty()) BrowserDiag.rej("post: sem foto grande")
-                    if (ps.isNotEmpty() && ok.isEmpty()) BrowserDiag.rej("post: nome não bate", ps.size)
-                    if (ps.isNotEmpty() && ok.isEmpty()) photoPosts.remove(np)   // nome diferente: pode voltar se mudar a busca
                     if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false, ownPages = listOf(c.href, page)) }
                 } } finally { busy(-1) }
             }
+        }
+    }
+
+    private val staticDone = java.util.Collections.synchronizedSet(HashSet<String>())
+    /**
+     * Reforço sem depender do script na página: lê o HTML da página pela rede (com os cookies do navegador) e pega as fotos
+     * dele; se a página aberta é a própria imagem, ela entra direto. Uma vez por página. Só thread principal.
+     */
+    fun staticPhotos(page: String) {
+        if (!photosOn.value || !page.startsWith("http") || !staticDone.add(normPage(page) + "|" + photoEpoch)) return
+        if (Extract.isPhotoUrl(page) && !Extract.isVideoUrl(page)) { onPhotos(page, listOf(Photos.Photo(page, "", 0, 0, orig = true))); return }
+        busy(1)
+        scope.launch {
+            try {
+                val h = kotlinx.coroutines.withTimeoutOrNull(20_000) { PageResolver.fetch(page, null) }
+                val ps = h?.let { Photos.fromHtml(page, it) }.orEmpty()
+                BrowserDiag.inc("fotos no HTML da página", ps.size)
+                if (ps.isNotEmpty()) withContext(Dispatchers.Main) { onPhotos(page, ps) }
+            } catch (e: Exception) { if (e is CancellationException) throw e } finally { busy(-1) }
         }
     }
 
@@ -385,7 +404,7 @@ object BrowserDetect {
                         if (d.key.startsWith("card:") || d.state != 0) { seenCards += d.f.page; cardPages += normPage(d.f.page) }
                     }
                     add += d.copy(sent = false)
-                    if (d.state == 1 && relaunched < 60) { relaunched++; resolve(d.f.page, d.f.title, d.f.page, d.f.extra) }
+                    if (d.state == 1 && relaunched < 60 && mode.intValue != 1) { relaunched++; resolve(d.f.page, d.f.title, d.f.page, d.f.extra) }
                 }
                 list.addAll(add)
             }
@@ -569,6 +588,7 @@ object BrowserDetect {
     }
 
     private fun resolve(card: String, title: String, page: String, cardCtx: String = "") {
+        if (mode.intValue == 1) return   // "Só fotos": nenhuma página de vídeo é aberta
         // Causa do "Procurando vídeos…" sem fim: cards que já estavam na fila/enviados eram abertos de novo
         // (página + WebView com play + servidor), ocupando as 3 vagas do navegador por muito tempo; os novos
         // ficavam esperando atrás deles e a lista não aparecia. Agora já na fila/enviado = pula na hora.
