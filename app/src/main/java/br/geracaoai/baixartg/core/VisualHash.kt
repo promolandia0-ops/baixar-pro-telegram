@@ -18,7 +18,11 @@ import kotlin.math.sqrt
 object VisualHash {
     val POS = doubleArrayOf(0.05, 0.20, 0.35, 0.50, 0.65, 0.80, 0.95)
     const val MAX_DIST = 6
-    const val MIN_FRAMES = 4
+    const val MIN_FRAMES = 3
+    /** Só 3 momentos (20%, 50%, 80%) e em tamanho pequeno: bem mais leve; os 3 precisam bater. */
+    private val SAMPLE = intArrayOf(1, 3, 5)
+    /** Retriever em uso agora (1 por vez no app inteiro; se ocupado, a fila não espera). */
+    val busy = java.util.concurrent.atomic.AtomicBoolean(false)
 
     class Fp(val dur: Int, val w: Int, val h: Int, val d: LongArray, val p: LongArray, val ok: BooleanArray, val hist: FloatArray?, val title: String) {
         val pixels get() = w.toLong() * h
@@ -91,9 +95,9 @@ object VisualHash {
             if (rot == 90 || rot == 270) { val t = w; w = h; h = t }
             val d = LongArray(POS.size); val p = LongArray(POS.size); val ok = BooleanArray(POS.size)
             var hs: FloatArray? = null
-            for (i in POS.indices) {
+            for (i in SAMPLE) {
                 val us = (durMs * POS[i] * 1000).toLong()
-                val b = try { r.getScaledFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 160, 160) } catch (_: Exception) { null } ?: continue
+                val b = try { r.getScaledFrameAtTime(us, MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 96, 96) } catch (_: Exception) { null } ?: continue
                 try {
                     if (usable(b)) { d[i] = dHash(b); p[i] = pHash(b); ok[i] = true; if (i == 3) hs = hist(b) }
                 } finally { b.recycle() }

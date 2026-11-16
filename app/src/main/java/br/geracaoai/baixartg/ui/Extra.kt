@@ -116,7 +116,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     val handler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
     // Coleta: no máximo 1 por vez e no máximo a cada ~1,2 s (antes: a cada rolagem + a cada 2,5 s, sem esperar a anterior
     // terminar, rodando o script de vídeo e o de foto juntos). JSON lido fora da thread da tela.
-    val collectState = remember { object { var busy = false; var lastAt = 0L; var photoTurn = 0 } }
+    val collectState = remember { object { var busy = false; var lastAt = 0L; var photoTurn = 0; var photoAt = 0L; var epoch = -1 } }
     val collect = remember { Runnable {
         val v = web ?: return@Runnable
         val page = v.url ?: return@Runnable
@@ -131,7 +131,11 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
                     try { c?.let { BrowserDetect.onCollected(page, it) } } catch (_: Exception) {}
                     // fotos: script separado, depois do de vídeo (um erro nele nunca atrapalha os vídeos)
-                    if (BrowserDetect.photosOn.value && web === v) v.evaluateJavascript(Photos.JS) { praw ->
+                    // no máximo a cada 4 s; o script só olha o que mudou (e para em ~40 ms por vez)
+                    val doPhotos = BrowserDetect.photosOn.value && web === v && System.currentTimeMillis() - collectState.photoAt >= 4_000
+                    if (doPhotos) collectState.photoAt = System.currentTimeMillis()
+                    val reset = if (collectState.epoch != BrowserDetect.photoEpoch) { collectState.epoch = BrowserDetect.photoEpoch; "window.__bptPh=null;" } else ""
+                    if (doPhotos) v.evaluateJavascript(reset + Photos.JS) { praw ->
                         collectScope.launch {
                             val ps = Photos.parse(praw); val cs = Photos.parseCards(praw); val (rj, n) = Photos.parseRejects(praw)
                             BrowserDiag.lastImgs = n; if (collectState.photoTurn++ % 10 == 0) rj.forEach { (k, x) -> BrowserDiag.rej(k, x) }

@@ -31,15 +31,13 @@ object Pipeline {
     val running = MutableStateFlow(false)
     private lateinit var app: Context
     private var file: File? = null
-    /** Threads da fila com prioridade de segundo plano: a tela e o navegador sempre ganham a CPU, a fila usa o resto. */
-    private val bgDispatcher = java.util.concurrent.Executors.newCachedThreadPool { r ->
-        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run() }, "pipe").apply { isDaemon = true }
-    }.asCoroutineDispatcher()
-    /** Comparação por imagem: 1 thread de prioridade mínima (não disputa com nada). */
+    /** Comparação por imagem: 1 thread só, em segundo plano (nunca 2 decodificadores de vídeo ao mesmo tempo). */
     val hashDispatcher = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
-        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_LOWEST); r.run() }, "pipe-hash").apply { isDaemon = true }
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run() }, "pipe-hash").apply { isDaemon = true }
     }.asCoroutineDispatcher()
-    private val scope = CoroutineScope(SupervisorJob() + bgDispatcher)
+    // 1.8.9 punha a fila toda em prioridade de segundo plano: com o navegador pesado ela quase não recebia CPU
+    // e os itens ficavam parados em "abrindo página". Volta ao normal (rede/disco, não disputa a tela).
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var engine: Job? = null
     private val lock = Any()
     private var nextId = 1L
@@ -47,7 +45,8 @@ object Pipeline {
     private const val RESOLVERS = 5
     private const val DOWNLOADERS = 4
     private const val UPLOADERS = 3
-    private const val RESOLVE_TIMEOUT = 100_000L   // estático + ~30 s de página + servidor
+    private const val RESOLVE_TIMEOUT = 90_000L   // tudo junto, inclusive esperar vaga: estático + página + servidor
+    private const val RESOLVE_STALL = 100_000L
     private const val OPEN_GAP = 350L
     private const val STALL_MS = 60_000L
 
@@ -220,6 +219,16 @@ object Pipeline {
         if (!::app.isInitialized || paused.value) return
         if (engine?.isActive == true) return
         if (items.value.none { it.st in ACTIVE }) return
+        // nenhum motor rodando: o que ficou "abrindo página"/baixando/enviando volta para a etapa anterior
+        synchronized(lock) {
+            items.value = items.value.map {
+                when (it.st) {
+                    PS.RESOLVING -> it.copy(st = PS.WAIT, msg = "", prog = 0f, speed = 0)
+                    PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, speed = 0)
+                    else -> it
+                }
+            }
+        }
         PipeService.start(app)
         running.value = true
         engine = scope.launch {
@@ -236,7 +245,7 @@ object Pipeline {
                     repeat(UPLOADERS) { launch { for ((t, f) in ready) uploadOne(t, f) } }
                     launch { watchdog() }.also { w -> launch { resolvers.joinAll(); downs.joinAll(); w.cancel() } }
                 }
-            } catch (e: CancellationException) {
+            } catch (e: Throwable) {   // qualquer erro (não só cancelar): nada fica preso em "abrindo página"
                 synchronized(lock) {
                     items.value = items.value.map {
                         when (it.st) { PS.RESOLVING -> it.copy(st = PS.WAIT, prog = 0f, msg = "", speed = 0); PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, prog = 0f, msg = "", speed = 0); else -> it }
@@ -256,9 +265,9 @@ object Pipeline {
             delay(10_000)
             val now = System.currentTimeMillis()
             for (t in items.value) {
-                if (t.st != PS.DOWN && t.st != PS.UP) continue
+                if (t.st != PS.DOWN && t.st != PS.UP && t.st != PS.RESOLVING) continue
                 val last = beat[t.id] ?: continue
-                val limit = if (t.st == PS.UP && t.prog >= 0.99f) 5 * 60_000L else STALL_MS   // envio já subiu: espera a confirmação do Telegram
+                val limit = if (t.st == PS.RESOLVING) RESOLVE_STALL else if (t.st == PS.UP && t.prog >= 0.99f) 5 * 60_000L else STALL_MS   // envio já subiu: espera a confirmação do Telegram
                 if (now - last > limit) { beat[t.id] = now; itemJobs[t.id]?.cancel(StallException()) }
             }
         }
@@ -274,13 +283,26 @@ object Pipeline {
                 delay(1_000); continue
             }
             var f: Found? = null
+            var stalledOut = false
             for (attempt in 0..1) {
                 if (attempt > 0) { upd(t.id) { it.copy(msg = "Tentando de novo…") }; delay(2_000) }
-                f = try { withTimeoutOrNull(RESOLVE_TIMEOUT) { PageResolver.resolveFull(t.page, t.title, t.extra) } }
-                    catch (e: Exception) { if (e is CancellationException && e !is TimeoutCancellationException) throw e; null }
-                if (f != null) break
+                alive(t.id)
+                // prazo duro: roda à parte e o resolvedor não espera além do prazo (mesmo se algo lá dentro não parar)
+                val job = scope.async { PageResolver.resolveFull(t.page, t.title, t.extra) }
+                itemJobs[t.id] = job
+                f = try { withTimeoutOrNull(RESOLVE_TIMEOUT) { job.await() } }
+                    catch (e: CancellationException) { currentCoroutineContext().ensureActive(); stalledOut = true; null }
+                    catch (e: Exception) { null }
+                    finally { itemJobs.remove(t.id); if (job.isActive) job.cancel() }
+                if (f != null || stalledOut) break
             }
-            if (f == null) upd(t.id) { it.copy(st = PS.FAIL, msg = "Não consegui carregar o vídeo desta página.") }
+            beat.remove(t.id)
+            if (f == null && stalledOut) upd(t.id) { cur ->
+                val n = cur.stalls + 1
+                if (n >= 3) cur.copy(st = PS.FAIL, msg = "Travou ao abrir a página 3 vezes.", stalls = n)
+                else cur.copy(st = PS.WAIT, msg = "Travou ao abrir a página, tentando de novo…", stalls = n)
+            }
+            else if (f == null) upd(t.id) { it.copy(st = PS.FAIL, msg = "Não consegui carregar o vídeo desta página.") }
             else upd(t.id) { it.copy(f = f, title = TitleFix.pick(f.title, it.title).ifBlank { it.title }, st = PS.READY, msg = "") }
             delay(OPEN_GAP)   // devagar com o site
         }
@@ -376,9 +398,12 @@ object Pipeline {
             }
             // Repetido pela imagem (muito rigoroso; na dúvida envia). Nunca apaga nada: só pula e deixa "Enviar mesmo assim".
             var vfp: VisualHash.Fp? = null
-            if (Prefs.visualDedupe && f.kind != Kind.PHOTO && !t.force) {
+            // Leve e nunca trava: 1 por vez no app todo, 20 s no máximo; se ocupado, demorar ou o navegador estiver
+            // aberto (decodificador de vídeo é do navegador), envia sem essa checagem (a de arquivo igual continua).
+            if (Prefs.visualDedupe && f.kind != Kind.PHOTO && !t.force && !JsRender.browserVisible && VisualHash.busy.compareAndSet(false, true)) {
                 upd(t.id, persist = false) { it.copy(msg = "Comparando com os já enviados…") }
-                vfp = try { withTimeoutOrNull(60_000) { withContext(hashDispatcher) { VisualHash.fingerprint(file, t.title) } } } catch (e: Exception) { if (e is CancellationException && e !is TimeoutCancellationException) throw e; null }
+                val hj = scope.async(hashDispatcher) { try { VisualHash.fingerprint(file, t.title) } finally { VisualHash.busy.set(false) } }
+                vfp = try { withTimeoutOrNull(20_000) { hj.await() } } catch (e: Exception) { if (e is CancellationException && e !is TimeoutCancellationException) throw e; null }
                 if (vfp != null) {
                     val m = VisualHash.claim(t.id, vfp)
                     if (m != null) {
@@ -414,10 +439,6 @@ object Pipeline {
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
             Sent.markSent(f, t.keys + listOfNotNull(fk)); History.add(f, size)
             if (vfp != null) VisualHash.markSent(t.id, vfp)
-            else if (f.kind != Kind.PHOTO && Prefs.visualDedupe) {
-                // enviado sem checagem (Enviar mesmo assim): guarda a impressão para os próximos
-                try { withContext(hashDispatcher) { VisualHash.fingerprint(file, t.title) }?.let { VisualHash.markSent(t.id, it) } } catch (e: Exception) { if (e is CancellationException) throw e }
-            }
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
         } catch (e: CancellationException) { throw e
         } catch (e: Exception) {

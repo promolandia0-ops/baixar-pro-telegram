@@ -62,7 +62,7 @@ object BrowserDetect {
         // fotos: com nome, só ficam as que batem (as outras saem e podem voltar se o nome mudar)
         if (t.isNotBlank()) { val gone = photos.filter { !matches(it.f, t) }; if (gone.isNotEmpty()) { photos.removeAll(gone.toSet()); gone.forEach { d -> d.keys.forEach { photoKeys.remove(it) } }; photoPosts.clear() } }
         else photoPosts.clear()
-        probing.clear()
+        probing.clear(); photoEpoch++
         for (i in photos.indices) { val d = photos[i]; val v = matches(d.f, t); if (d.sel != v) photos[i] = d.copy(sel = v) }
     }
 
@@ -74,11 +74,19 @@ object BrowserDetect {
     fun setMode(m: Int) { Prefs.mediaMode = m; mode.intValue = m; setPhotosOn(m != 0) }
     private val photoKeys = HashSet<String>()
     private val thumbKeys = java.util.Collections.synchronizedSet(HashSet<String>())
-    fun setPhotosOn(v: Boolean) { photosOn.value = v; if (!v) { photos.clear(); photoKeys.clear(); photoPosts.clear(); probing.clear() } }
+    /** Muda quando as fotos precisam ser relidas da página (nome trocado / fotos religadas). */
+    @Volatile var photoEpoch = 0
+    fun setPhotosOn(v: Boolean) { photosOn.value = v; photoEpoch++; if (!v) { photos.clear(); photoKeys.clear(); photoPosts.clear(); probing.clear() } }
     fun togglePhoto(key: String, v: Boolean) { val i = photos.indexOfFirst { it.key == key }; if (i >= 0) photos[i] = photos[i].copy(sel = v) }
     fun setAllPhotos(v: Boolean) { for (i in photos.indices) if (photos[i].sel != v) photos[i] = photos[i].copy(sel = v) }
 
+    private var vtCache: HashSet<String>? = null; private var vtAt = 0L
     private fun videoTokens(): HashSet<String> {
+        val now = System.currentTimeMillis()
+        vtCache?.let { if (now - vtAt < 5_000) return it }
+        return videoTokens0().also { vtCache = it; vtAt = now }
+    }
+    private fun videoTokens0(): HashSet<String> {
         val vt = HashSet<String>()
         list.forEach { vt += Photos.idTokens(it.f.url); vt += Photos.idTokens(it.f.page) }
         hidden.values.forEach { vt += Photos.idTokens(it.f.page) }
@@ -106,6 +114,7 @@ object BrowserDetect {
     }
     private val photoPosts = java.util.Collections.synchronizedSet(HashSet<String>())
     private val probing = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val photoDeferred = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Photos.Card>>()
     private val photoGate = Semaphore(3)
     /** Cards de post de foto: abre a página do post (como o resolvedor de vídeo) e pega as fotos grandes de lá. */
     fun onPhotoCards(page: String, cards: List<Photos.Card>) {
@@ -116,12 +125,15 @@ object BrowserDetect {
             // Antes: todo link com imagem também vira "card de vídeo" no detector de vídeos, e aqui era pulado por isso
             // → nenhum post de foto era aberto (fotos = 0). Agora só pula se já virou um vídeo de verdade.
             if (list.any { it.state == 0 && normPage(it.f.page) == np }) { BrowserDiag.rej("post: é vídeo"); continue }
+            // card que o detector de vídeo está abrindo: só vira post de foto se o vídeo não carregar (sem abrir 2x)
+            if (np in cardPages && jobs[np]?.isActive == true) { photoDeferred[np] = page to c; continue }
             if (!photoPosts.add(np)) continue
             BrowserDiag.inc("posts de foto achados")
             busy(1)
             scope.launch {
                 try { photoGate.withPermit {
-                    val ps = try { Photos.fromPost(c.href, c.text) { u -> photoRender.withPermit { JsRender.render(u, 15_000)?.html } } } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+                    // só HTML (sem página oculta: elas dividem o motor de páginas com o navegador visível e travavam a rolagem)
+                    val ps = try { withTimeoutOrNull(30_000) { Photos.fromPost(c.href, c.text, null) }.orEmpty() } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
                     val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
                     BrowserDiag.inc("posts abertos"); if (ps.isEmpty()) BrowserDiag.rej("post: sem foto grande (ou é vídeo)")
                     if (ps.isNotEmpty() && ok.isEmpty()) BrowserDiag.rej("post: nome não bate", ps.size)
@@ -193,12 +205,13 @@ object BrowserDetect {
     /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
     private val photoRender = Semaphore(1)
     private val seenCards = HashSet<String>()
+    private val processed = java.util.Collections.synchronizedSet(HashSet<String>())
     private val keys = HashMap<String, String>()
 
     fun reset() {
         loadedHosts.clear(); relaunched = 0
         synchronized(seenCards) {
-            seenCards.clear(); keys.clear()
+            seenCards.clear(); keys.clear(); processed.clear()
             hidden.values.forEach { d -> d.keys.forEach { keys[it] = d.key }; keys[d.key] = d.key }
         }
         list.clear(); followed.clear()
@@ -213,15 +226,24 @@ object BrowserDetect {
     private fun placeholder(card: String, title: String, ctx: String) {
         val pk = listOf("ip:" + normPage(card), "p:" + normPage(card))
         val f = Found(card, card, title.ifBlank { "vídeo" }, Kind.SERVER, extra = listOf(title, ctx).joinToString(" ").trim())
-        scope.launch(Dispatchers.Main) {
-            if (synchronized(seenCards) { pk.any { keys.containsKey(it) } }) return@launch
+        scope.launch {
+            // conferência completa (fila/enviados/lista da busca) fora da thread da tela
+            val isBlocked = try { blocked(f, pk) } catch (_: Exception) { false }
+            withContext(Dispatchers.Main) { placeholderMain(card, f, pk, isBlocked) }
+        }
+    }
+    private fun placeholderMain(card: String, f: Found, pk: List<String>, isBlocked: Boolean) {
+        run {
+            if (synchronized(seenCards) { pk.any { keys.containsKey(it) } }) return
             val k = "card:" + normPage(card)
-            if (blocked(f, pk)) { synchronized(seenCards) { pk.forEach { keys[it] = "x:$k" } }; return@launch }
+            if (isBlocked) { synchronized(seenCards) { pk.forEach { keys[it] = "x:$k" } }; return }
             synchronized(seenCards) { pk.forEach { keys[it] = k }; keys[k] = k }
             list += Det(k, f, sel = matches(f), keys = pk, state = 1)
         }
     }
     private fun markFailed(card: String) = scope.launch(Dispatchers.Main) {
+        // vídeo não carregou: se o card também parecia post de foto, agora procura as fotos dele
+        photoDeferred.remove(normPage(card))?.let { (pg, c) -> jobs.remove(normPage(card)); onPhotoCards(pg, listOf(c)) }
         val hk = "card:" + normPage(card)
         hidden[hk]?.let { if (it.state == 1) hidden[hk] = it.copy(state = 2) }
         val i = list.indexOfFirst { it.key == "card:" + normPage(card) && it.state == 1 }
@@ -425,11 +447,14 @@ object BrowserDetect {
         }
         val root = Extract.host(page)
         for (v in c.videos) if (!v.startsWith("blob:")) intercepted(v, page, "")
-        for (a in c.anchors) if (a.thumb.isNotBlank()) thumbKeys += Photos.key(a.thumb)
+        // cada link é examinado uma vez só (antes: todos os links da página, a cada coleta, na thread da tela)
         for (a in c.anchors) {
+            val href = a.href.substringBefore('#')
+            // (volta a examinar se o link ganhar miniatura/texto depois — lazy-load)
+            if (!processed.add(href + "|" + a.thumb.isNotBlank() + "|" + a.ctx.length + "|" + a.nav)) continue
+            if (a.thumb.isNotBlank()) thumbKeys += Photos.key(a.thumb)
             if (a.nav) continue
             if (a.thumb.isBlank() && !Extract.looksLikeVideoPage(a.href) && !DURATION.containsMatchIn(a.ctx)) continue
-            val href = a.href.substringBefore('#')
             if (Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) continue
             if (Extract.host(href) != root && !Extract.YTDLP_HOSTS.containsMatchIn(href)) continue
             if (href.trimEnd('/') == page.substringBefore('#').trimEnd('/')) continue
@@ -476,8 +501,8 @@ object BrowserDetect {
         // ficavam esperando atrás deles e a lista não aparecia. Agora já na fila/enviado = pula na hora.
         if (!Extract.isVideoUrl(card)) {
             val pk = listOf("ip:" + normPage(card), "p:" + normPage(card))
-            val f = Found(card, card, "vídeo", Kind.SERVER)
-            val skip = try { blocked(f, pk) } catch (_: Exception) { false }
+            // só consultas rápidas aqui (thread da tela); a conferência completa roda fora dela, no placeholder
+            val skip = try { val all = pk + ("pg:" + Sent.norm(card)); Sent.isQueued(all) || Sent.anySent(all) } catch (_: Exception) { false }
             if (skip) {
                 val k = "card:" + normPage(card)
                 synchronized(seenCards) { pk.forEach { if (!keys.containsKey(it)) keys[it] = "x:$k" } }
@@ -491,6 +516,9 @@ object BrowserDetect {
         if (!Extract.isVideoUrl(card)) placeholder(card, t0, cardCtx)
         jobs[normPage(card)] = scope.launch {
             try {
+                if (!Extract.isVideoUrl(card) && blocked(Found(card, card, "vídeo", Kind.SERVER), listOf("ip:" + normPage(card), "p:" + normPage(card)))) {
+                    withContext(Dispatchers.Main) { alreadyHere.intValue++ }; return@launch
+                }
                 // cada card tem prazo: nada fica "carregando…" para sempre
                 val ok = withTimeoutOrNull(75_000) { gate.withPermit {
                     var t = TitleFix.pick(title, cardCtx.take(150))

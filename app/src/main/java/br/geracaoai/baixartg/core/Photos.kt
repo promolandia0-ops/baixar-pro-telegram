@@ -50,6 +50,12 @@ object Photos {
      */
     const val JS = """(function(){
       var out=[],cards=[],seenC={},rej={};
+      var W=window,NI=document.images.length;
+      // já olhou a página inteira e nada mudou: não refaz nada (custo quase zero)
+      if(W.__bptPh&&W.__bptPh.u===location.href&&W.__bptPh.n===NI&&W.__bptPh.done)return JSON.stringify({p:[],c:[],r:{},n:NI,same:1});
+      var ST=(W.__bptPh&&W.__bptPh.u===location.href)?W.__bptPh:{u:location.href,i:0,j:0};ST.n=NI;ST.done=false;W.__bptPh=ST;
+      var T0=Date.now();function over(){return Date.now()-T0>40}
+      function small(e){return !e.childElementCount||e.childElementCount<=12}
       function R(k){rej[k]=(rej[k]||0)+1}
       function cls(e){try{var c=e.className;if(c&&c.baseVal!==undefined)c=c.baseVal;return (typeof c==='string'?c:'')+' '+(e.id||'')}catch(x){return ''}}
       function tc(e,n){try{return ((e&&e.textContent)||'').replace(/\s+/g,' ').trim().slice(0,n)}catch(x){return ''}}
@@ -59,8 +65,10 @@ object Photos {
         var e=el,d=0;
         while(e&&d<2){
           if(VID.test(cls(e)))return true;
-          try{if(e.querySelector&&e.querySelector(VSEL))return true}catch(x){}
-          if(DUR.test(tc(e,200)))return true;
+          if(d===0||small(e)){
+            try{if(e.querySelector&&e.querySelector(VSEL))return true}catch(x){}
+            if(DUR.test(tc(e,200)))return true;
+          }
           e=e.parentElement;d++}
         return false;
       }
@@ -90,14 +98,16 @@ object Photos {
         return t.join(' ').replace(/\s+/g,' ').trim().slice(0,400);
       }
       var imgs=[];try{imgs=document.querySelectorAll('img')}catch(x){}
-      for(var i=0;i<imgs.length&&out.length<300&&i<1500;i++){
+      var i=ST.i;
+      for(;i<imgs.length&&out.length<300;i++){
+        if(over())break;
         try{
           var img=imgs[i];
           if(img.closest('video,iframe,header,nav,footer,aside,[role=banner],[role=navigation]')){R('menu/rodapé');continue}
           var skip='',e=img,d=0;
           while(e&&d<5){
             if(PLAYER.test(cls(e))){skip='player/miniatura';break}
-            if(d>0&&d<=2&&e.querySelector&&e.querySelector(VSEL)){skip='perto de vídeo';break}
+            if(d>0&&d<=2&&small(e)&&e.querySelector&&e.querySelector(VSEL)){skip='perto de vídeo';break}
             e=e.parentElement;d++}
           if(skip){R(skip);continue}
           var a=img.closest('a[href]');
@@ -114,8 +124,11 @@ object Photos {
           out.push({u:u,t:ctxText(img),w:w,h:h});
         }catch(x){R('erro')}
       }
+      ST.i=i;var imgsDone=i>=imgs.length;
       var as=[];try{as=document.querySelectorAll('a[href]')}catch(x){}
-      for(var j=0;j<as.length&&cards.length<120&&j<4000;j++){
+      var j=ST.j;
+      for(;j<as.length&&cards.length<120;j++){
+        if(over())break;
         try{
           var A=as[j]; var im=A.querySelector('img'); if(!im)continue;
           if(A.closest('header,nav,footer,aside,[role=banner],[role=navigation]'))continue;
@@ -132,6 +145,7 @@ object Photos {
           cards.push({h:hr,t:tt.join(' ').replace(/\s+/g,' ').trim().slice(0,300)});
         }catch(x){}
       }
+      ST.j=j;ST.done=imgsDone&&j>=as.length;
       return JSON.stringify({p:out,c:cards,r:rej,n:imgs.length});
     })()"""
 

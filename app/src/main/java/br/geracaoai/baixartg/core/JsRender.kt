@@ -46,14 +46,16 @@ object JsRender {
     private const val PLAY_JS = """
         (function(){
           function q(s){try{return document.querySelectorAll(s)}catch(e){return []}}
-          function lbl(el){return ((el.innerText||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('title')||'')).replace(/\s+/g,' ').trim()}
+          // textContent (não força recalcular o layout da página, que é dividida com o navegador visível)
+          function lbl(el){return ((el.textContent||'')+' '+(el.getAttribute('aria-label')||'')+' '+(el.getAttribute('title')||'')).replace(/\s+/g,' ').trim()}
           function consent(){
             var re=/^(aceitar|aceito|aceitar todos|accept|accept all|allow all|concordo|agree|i agree|entendi|got it|continuar|continue|fechar|close|dismiss|ok)$/i;
             q('button,[role=button],a[class*=close],[class*=consent] a,[class*=cookie] a').forEach(function(el){var t=lbl(el);if(t.length<25&&re.test(t)){try{el.click()}catch(e){}}});
           }
           function playText(){
             var re=/^(assistir|assista|assistir agora|assistir aula|assistir v[ií]deo|watch|watch now|watch video|play|play video|reproduzir|ver v[ií]deo|ver aula|iniciar|iniciar aula|come[cç]ar|start)$/i;
-            q('button,a,[role=button],[class*=play],[class*=watch],[class*=assistir]').forEach(function(el){
+            var all=q('button,a,[role=button],[class*=play],[class*=watch],[class*=assistir]'),k=0;
+            Array.prototype.slice.call(all,0,400).forEach(function(el){
               var t=lbl(el);if(!t||t.length>30||!re.test(t))return;
               if(el.tagName==='A'){var h=el.getAttribute('href')||'';if(window.__bptNav)return;
                 if(h&&h.indexOf('http')===0&&h.indexOf(location.host)<0)return; window.__bptNav=1;}
@@ -61,6 +63,10 @@ object JsRender {
             });
           }
           function go(){
+            // no máximo 1 vez a cada 1,5 s e só nos primeiros ~25 s (antes: ~3x por segundo, sem fim)
+            var now=Date.now(); window.__bptT0=window.__bptT0||now;
+            if(window.__bptLast&&now-window.__bptLast<1400)return; window.__bptLast=now;
+            if(now-window.__bptT0>25000){if(window.__bptPlay){clearInterval(window.__bptPlay)}return}
             q('video,audio').forEach(function(v){
               try{v.muted=true;v.defaultMuted=true;v.playsInline=true;v.setAttribute('playsinline','');var p=v.play();if(p&&p.catch)p.catch(function(){})}catch(e){}
             });
@@ -122,17 +128,28 @@ object JsRender {
     /** Página com play para a fila de envio (pool separado). */
     suspend fun renderQueue(url: String, timeoutMs: Long): JsPage? =
         // com o navegador aberto na tela, a fila usa só 1 WebView oculto por vez (o navegador visível tem prioridade)
-        if (browserVisible) queueSoloGate.withPermit { queuePage(url, timeoutMs) } else queuePage(url, timeoutMs)
-    private suspend fun queuePage(url: String, timeoutMs: Long): JsPage? {
-        aliveQueue.incrementAndGet()
-        try { return page(url, timeoutMs, true, queueGate) } finally { aliveQueue.decrementAndGet() }
+        run {
+            // vaga com prazo: sem vaga em 10 s a fila desiste da página oculta (vai pro servidor) — nunca fica esperando
+            val solo = browserVisible
+            if (solo && !acquire(queueSoloGate, 10_000)) return@run null
+            try { aliveQueue.incrementAndGet(); page(url, timeoutMs, true, queueGate, slotWait = 10_000) }
+            finally { aliveQueue.decrementAndGet(); if (solo) queueSoloGate.release() }
+        }
+    /** Pega uma vaga sem risco de vazar: tenta até o prazo; false = sem vaga. */
+    private suspend fun acquire(s: Semaphore, waitMs: Long): Boolean {
+        val end = System.currentTimeMillis() + waitMs
+        while (true) {
+            if (s.tryAcquire()) return true
+            if (System.currentTimeMillis() >= end) return false
+            kotlinx.coroutines.delay(150)
+        }
     }
     @Volatile var browserVisible = false
     private val queueSoloGate = Semaphore(1)
 
-    private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate): JsPage? {
+    private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000): JsPage? {
         val wait = if (play) timeoutMs.coerceIn(8_000L, 18_000L) else timeoutMs
-        return drive(url, wait + 3_000, !play, pool) { wv, hits, done ->
+        return drive(url, wait + 3_000, !play, pool, slotWait) { wv, hits, done ->
             val start = System.currentTimeMillis()
             var firstHitAt = 0L
             fun finish() {
@@ -163,12 +180,13 @@ object JsRender {
     }
 
     /** Cria o WebView na janela, roda [drive] e devolve o JsPage (ou null em timeout/sem Activity). */
-    private suspend fun drive(url: String, hardMs: Long, block: Boolean, pool: Semaphore = gate, body: (WebView, MutableSet<String>, (JsPage) -> Unit) -> Unit): JsPage? {
+    private suspend fun drive(url: String, hardMs: Long, block: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, body: (WebView, MutableSet<String>, (JsPage) -> Unit) -> Unit): JsPage? {
         if (!url.startsWith("http", true)) return null
         if (!available()) { lastUnavailable = true; return null }
         lastUnavailable = false
-        return pool.withPermit {
-            val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return@withPermit null
+        if (!acquire(pool, slotWait)) return null
+        return try {
+            val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return null
             alive.incrementAndGet()
             try { withTimeoutOrNull(hardMs) {
                 suspendCancellableCoroutine { cont ->
@@ -206,7 +224,7 @@ object JsRender {
                     }
                 }
             } } finally { alive.decrementAndGet() }
-        }
+        } finally { pool.release() }
     }
 
     @SuppressLint("SetJavaScriptEnabled")
