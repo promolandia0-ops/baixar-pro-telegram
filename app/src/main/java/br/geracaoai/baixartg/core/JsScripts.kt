@@ -38,7 +38,6 @@ object JsScripts {
         out.pd=[mc('meta[property="og:description"]'),mc('meta[name="description"]'),mc('meta[name="author"]')].concat(ch).join(' ').replace(/\s+/g,' ').slice(0,600);
       }catch(e){}
       try{
-        var b=(document.body?document.body.innerText:'')||'';
         out.ch=/just a moment|attention required|checking your browser|verify you are human|um momento|verificando/i.test(document.title||'')
           ||!!document.querySelector('#challenge-form,#cf-challenge-running,.cf-browser-verification,[name=cf-turnstile-response],#challenge-stage,iframe[src*="challenges.cloudflare.com"]');
         var seen={},vseen={},cnt=0;

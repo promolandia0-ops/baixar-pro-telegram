@@ -157,12 +157,13 @@ fun BigButton(text: String, icon: ImageVector, enabled: Boolean, onClick: () -> 
 
 /** Copia o relatório da última busca (sem links/domínios) para colar no chat. */
 @Composable
-fun DiagButton() {
+fun DiagButton(always: Boolean = false) {
     val rep by Jobs.diagReport.collectAsState(); val ctx = LocalContext.current
-    if (rep.isBlank()) return
+    if (rep.isBlank() && !always) return
     OutlinedButton(onClick = {
         val cm = ctx.getSystemService(ClipboardManager::class.java)
-        cm?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", rep))
+        val full = listOf(rep, BrowserDiag.report()).filter { it.isNotBlank() }.joinToString("\n")
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", full))
         Toast.makeText(ctx, "Diagnóstico copiado (sem links). Cole no chat.", Toast.LENGTH_SHORT).show()
     }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.ContentCopy, null); Spacer(Modifier.width(8.dp)); Text("Copiar diagnóstico") }
 }

@@ -38,6 +38,44 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+private val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.SupervisorJob() + Dispatchers.Default)
+
+/**
+ * Botão de vídeos/fotos detectados, isolado: o relógio de 1 s e as contagens da lista só redesenham ESTE botão
+ * (na 1.8.9 o relógio redesenhava a tela inteira do navegador a cada segundo, contando a lista toda duas vezes).
+ */
+@Composable
+private fun DetectFab(modifier: Modifier, onOpen: () -> Unit) {
+    val mode by BrowserDetect.mode
+    val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
+    val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
+    val phN by remember { derivedStateOf { BrowserDetect.photos.size } }
+    val pendingN by BrowserDetect.pending
+    val photoBusy by BrowserDetect.photoBusy
+    val already by BrowserDetect.alreadyHere
+    val pageAt by BrowserDetect.pageAt
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); now = System.currentTimeMillis() } }
+    val working = (if (mode == 1) 0 else pendingN) + (if (mode != 0) photoBusy else 0)
+    // "Procurando" tem prazo: sem nada novo em 25 s, diz que não há nada novo
+    val searching = detected == 0 && phN == 0 && working > 0 && (pageAt == 0L || now - pageAt < 25_000)
+    val what = when (mode) { 1 -> "foto"; 2 -> "vídeo ou foto"; else -> "vídeo" }
+    if (detected > 0 || working > 0 || phN > 0 || already > 0) Box(modifier, contentAlignment = Alignment.BottomEnd) {
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        ExtendedFloatingActionButton(onClick = {
+            if (detected > 0 || phN > 0) onOpen()
+            else {   // nada achado: toque copia o diagnóstico (motivo de cada foto descartada, páginas ocultas, tempos)
+                ctx.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", BrowserDiag.report()))
+                android.widget.Toast.makeText(ctx, "Diagnóstico do navegador copiado. Cole no chat.", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        },
+            icon = { if (searching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.VideoLibrary, null) },
+            text = { Text(if (detected > 0) (if (BrowserDetect.term.value.isNotBlank()) "$marked de $detected marcados" else "$detected vídeos") + (if (pendingN > 0) " (+$pendingN…)" else "") + (if (mode == 2 && phN > 0) " • $phN fotos" else "")
+                else if (phN > 0) "$phN fotos" + (if (photoBusy > 0) " (+…)" else "") else if (searching) (if (mode == 1) "Procurando fotos…" else "Procurando vídeos…")
+                else "Nenhum $what novo nesta página" + (if (already > 0) " • $already já na fila/enviados" else "")) })
+    }
+}
+
 /** Leva um link do Navegador para Filtrar ou Varrer tudo (a busca só começa quando o usuário tocar no botão). */
 object Handoff { val page = mutableStateOf<String?>(null); val site = mutableStateOf<String?>(null) }
 
@@ -75,20 +113,40 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     var showSites by remember { mutableStateOf(false) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
     var sheet by remember { mutableStateOf(false) }
-    val detected = if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent }
-    val phN = BrowserDetect.photos.size
-    val marked = BrowserDetect.list.count { it.sel && !it.sent }
-    val pendingN by BrowserDetect.pending
     val handler = remember { android.os.Handler(android.os.Looper.getMainLooper()) }
+    // Coleta: no máximo 1 por vez e no máximo a cada ~1,2 s (antes: a cada rolagem + a cada 2,5 s, sem esperar a anterior
+    // terminar, rodando o script de vídeo e o de foto juntos). JSON lido fora da thread da tela.
+    val collectState = remember { object { var busy = false; var lastAt = 0L; var photoTurn = 0 } }
     val collect = remember { Runnable {
         val v = web ?: return@Runnable
         val page = v.url ?: return@Runnable
         if (!page.startsWith("http")) return@Runnable
-        v.evaluateJavascript(JsScripts.COLLECT) { raw -> JsScripts.parseCollected(raw)?.let { c -> BrowserDetect.onCollected(page, c) } }
-        if (BrowserDetect.photosOn.value) v.evaluateJavascript(Photos.JS) { raw -> BrowserDetect.onPhotos(page, Photos.parse(raw)); BrowserDetect.onPhotoCards(page, Photos.parseCards(raw)) }
+        val now = System.currentTimeMillis()
+        if (collectState.busy && now - collectState.lastAt < 10_000) return@Runnable
+        collectState.busy = true; collectState.lastAt = now
+        v.evaluateJavascript(JsScripts.COLLECT) { raw ->
+            BrowserDiag.timed(System.currentTimeMillis() - now)
+            collectScope.launch {
+                val c = JsScripts.parseCollected(raw)
+                withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    try { c?.let { BrowserDetect.onCollected(page, it) } } catch (_: Exception) {}
+                    // fotos: script separado, depois do de vídeo (um erro nele nunca atrapalha os vídeos)
+                    if (BrowserDetect.photosOn.value && web === v) v.evaluateJavascript(Photos.JS) { praw ->
+                        collectScope.launch {
+                            val ps = Photos.parse(praw); val cs = Photos.parseCards(praw); val (rj, n) = Photos.parseRejects(praw)
+                            BrowserDiag.lastImgs = n; if (collectState.photoTurn++ % 10 == 0) rj.forEach { (k, x) -> BrowserDiag.rej(k, x) }
+                            withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                try { BrowserDetect.onPhotos(page, ps); BrowserDetect.onPhotoCards(page, cs) } catch (_: Exception) {}
+                                collectState.busy = false
+                            }
+                        }
+                    } else collectState.busy = false
+                }
+            }
+        }
     } }
-    fun scheduleCollect(delayMs: Long = 700) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs) }
-    LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_500); if (web != null) scheduleCollect(0) } }
+    fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs) }
+    LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(3_000); if (web != null) scheduleCollect(0) } }
     Scaffold(topBar = {
         Column {
             TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.Rounded.Close, "Fechar") } },
@@ -163,23 +221,11 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                     return true
                 }
             }
-            setOnScrollChangeListener { _, _, _, _, _ -> scheduleCollect(600) }
+            setOnScrollChangeListener { _, _, _, _, _ -> scheduleCollect(1_200) }
             web = this
             if (address.length > 8) loadUrl(address)
         } }, modifier = Modifier.fillMaxSize().padding(pad))
-        val already by BrowserDetect.alreadyHere
-        val pageAt by BrowserDetect.pageAt
-        var now by remember { mutableStateOf(System.currentTimeMillis()) }
-        LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); now = System.currentTimeMillis() } }
-        // "Procurando" tem prazo: sem nada novo em 20 s (ou nada mais abrindo), diz que não há vídeo novo
-        val searching = detected == 0 && phN == 0 && pendingN > 0 && (pageAt == 0L || now - pageAt < 20_000)
-        if (detected > 0 || pendingN > 0 || phN > 0 || already > 0) Box(Modifier.fillMaxSize().padding(pad).padding(16.dp), contentAlignment = Alignment.BottomEnd) {
-            ExtendedFloatingActionButton(onClick = { if (detected > 0 || phN > 0) sheet = true },
-                icon = { if (searching) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.VideoLibrary, null) },
-                text = { Text(if (detected > 0) (if (BrowserDetect.term.value.isNotBlank()) "$marked de $detected marcados" else "$detected vídeos") + (if (pendingN > 0) " (+$pendingN…)" else "")
-                    else if (phN > 0) "$phN fotos" else if (searching) "Procurando vídeos…"
-                    else "Nenhum vídeo novo nesta página" + (if (already > 0) " • $already já na fila/enviados" else "")) })
-        }
+        DetectFab(Modifier.fillMaxSize().padding(pad).padding(16.dp)) { sheet = true }
     }
     if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }) { term ->
         val v = web; val page = v?.url

@@ -30,9 +30,17 @@ import kotlin.coroutines.resume
 object JsRender {
     @Volatile private var activity: WeakReference<Activity>? = null
     private val main = Handler(Looper.getMainLooper())
-    private val gate = Semaphore(3)
-    /** WebViews próprios da fila de envio: o painel do navegador nunca toma a vez da fila (e vice-versa). */
-    private val queueGate = Semaphore(2)
+    /**
+     * Páginas ocultas ficam na MESMA janela (e no mesmo processo de renderização) do navegador visível, então
+     * cada uma tocando vídeo pesa na tela. Teto: com o navegador aberto, no máximo 3 no total (2 do navegador + 1 da fila);
+     * com ele fechado, a fila usa 3.
+     */
+    private val gate = Semaphore(2)
+    /** WebViews próprios da fila de envio. */
+    private val queueGate = Semaphore(3)
+    /** Quantos WebViews ocultos estão vivos agora (diagnóstico). */
+    val alive = java.util.concurrent.atomic.AtomicInteger(0)
+    val aliveQueue = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var lastUnavailable = false
 
     private const val PLAY_JS = """
@@ -114,7 +122,11 @@ object JsRender {
     /** Página com play para a fila de envio (pool separado). */
     suspend fun renderQueue(url: String, timeoutMs: Long): JsPage? =
         // com o navegador aberto na tela, a fila usa só 1 WebView oculto por vez (o navegador visível tem prioridade)
-        page(url, timeoutMs, true, queueGate)   // vagas próprias da fila; o navegador tem as dele (gate) e nunca espera estas
+        if (browserVisible) queueSoloGate.withPermit { queuePage(url, timeoutMs) } else queuePage(url, timeoutMs)
+    private suspend fun queuePage(url: String, timeoutMs: Long): JsPage? {
+        aliveQueue.incrementAndGet()
+        try { return page(url, timeoutMs, true, queueGate) } finally { aliveQueue.decrementAndGet() }
+    }
     @Volatile var browserVisible = false
     private val queueSoloGate = Semaphore(1)
 
@@ -157,7 +169,8 @@ object JsRender {
         lastUnavailable = false
         return pool.withPermit {
             val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return@withPermit null
-            withTimeoutOrNull(hardMs) {
+            alive.incrementAndGet()
+            try { withTimeoutOrNull(hardMs) {
                 suspendCancellableCoroutine { cont ->
                     val finished = AtomicBoolean(false)
                     var holder: PassThrough? = null
@@ -192,7 +205,7 @@ object JsRender {
                         } catch (_: Exception) { done(null) }
                     }
                 }
-            }
+            } } finally { alive.decrementAndGet() }
         }
     }
 

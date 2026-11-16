@@ -42,82 +42,97 @@ object Photos {
     fun badUrl(u: String) = BAD_URL.containsMatchIn(u.substringBefore('?')) || u.startsWith("data:") || u.startsWith("blob:") ||
         Extract.isVideoThumb(u) || u.contains(".svg", true) || u.contains(".gif", true)
 
-    /** Coleta no navegador (DOM renderizado: usa naturalWidth/Height). */
+    /**
+     * Coleta no navegador (DOM renderizado: usa naturalWidth/Height). Leve: sem innerText (não força layout),
+     * busca de "tem vídeo dentro" só nos 2 níveis mais próximos (antes subia 6 níveis e pegava a página inteira,
+     * descartando TODA foto de qualquer página que tivesse um vídeo). Cada imagem/card isolado em try/catch.
+     * Devolve também os motivos de descarte (diagnóstico).
+     */
     const val JS = """(function(){
-      var out=[],cards=[],seenC={};
-      var VID=/(duration|play|video|vjs|watch|player)/i, DUR=/(^|\s)(\d{1,2}:)?\d{1,2}:\d{2}(\s|$)/;
+      var out=[],cards=[],seenC={},rej={};
+      function R(k){rej[k]=(rej[k]||0)+1}
+      function cls(e){try{var c=e.className;if(c&&c.baseVal!==undefined)c=c.baseVal;return (typeof c==='string'?c:'')+' '+(e.id||'')}catch(x){return ''}}
+      function tc(e,n){try{return ((e&&e.textContent)||'').replace(/\s+/g,' ').trim().slice(0,n)}catch(x){return ''}}
+      var VID=/(duration|(^|[\s_-])play|video|vjs|watch|player)/i, DUR=/(^|\s)(\d{1,2}:)?\d{1,2}:\d{2}(\s|$)/;
+      var VSEL='video,iframe,[class*=duration],[class*=play-icon],[class*=playicon],[class*=btn-play],[class*=play-button],svg[class*=play]';
       function videoCard(el){
         var e=el,d=0;
-        while(e&&d<3){var c=((e.className&&e.className.baseVal!==undefined?e.className.baseVal:e.className)||'')+' '+(e.id||'');
-          if(VID.test(c))return true;
-          if(e.querySelector&&e.querySelector('video,iframe,[class*=duration],[class*=play],[class*=video],svg[class*=play]'))return true;
-          if(DUR.test((e.innerText||'').slice(0,300)))return true;
+        while(e&&d<2){
+          if(VID.test(cls(e)))return true;
+          try{if(e.querySelector&&e.querySelector(VSEL))return true}catch(x){}
+          if(DUR.test(tc(e,200)))return true;
           e=e.parentElement;d++}
         return false;
       }
+      var bad={},h1t='';
       try{
-        var bad={};
         document.querySelectorAll('meta[property="og:image"],meta[name="og:image"],meta[name="twitter:image"],meta[property="twitter:image"],link[rel=image_src]').forEach(function(m){var u=m.content||m.href;if(u)bad[u.split('?')[0]]=1});
         document.querySelectorAll('video[poster]').forEach(function(v){var u=v.poster;if(u)bad[u.split('?')[0]]=1});
-        var PLAYER=/(player|video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|icon|emoji|badge|sponsor|advert|\bads?\b|\bad-|banner|related|carousel|slider-video|duration|play)/i;
-        var IMGRE=/\.(jpe?g|png|webp|avif)(\?|#|$)/i;
-        function best(img){
-          var u='',bw=0;
-          var ss=img.getAttribute('srcset')||img.getAttribute('data-srcset')||'';
-          if(ss){ss.split(',').forEach(function(p){var a=p.trim().split(/\s+/);if(!a[0])return;var w=parseInt(a[1]||'0')||1;if(w>=bw){bw=w;u=a[0]}})}
-          if(!u){var pic=img.closest('picture');if(pic){pic.querySelectorAll('source').forEach(function(s){var x=s.getAttribute('srcset')||s.getAttribute('data-srcset')||'';x.split(',').forEach(function(p){var a=p.trim().split(/\s+/);if(!a[0])return;var w=parseInt(a[1]||'0')||1;if(w>=bw){bw=w;u=a[0]}})})}}
-          var ds=img.getAttribute('data-full')||img.getAttribute('data-large')||img.getAttribute('data-orig-file')||img.getAttribute('data-large-file')||img.getAttribute('data-original')||img.getAttribute('data-src')||img.getAttribute('data-lazy-src')||img.getAttribute('data-lazy')||img.getAttribute('data-url');
-          if(!u)u=ds||img.currentSrc||img.src||'';
-          try{return new URL(u,location.href).href}catch(e){return ''}
-        }
-        function ctxText(img){
-          var t=[img.alt||'',img.title||''];
-          var fig=img.closest('figure');if(fig){var fc=fig.querySelector('figcaption');if(fc)t.push(fc.innerText||'')}
-          var p=img.parentElement,n=0;
-          while(p&&n<4){var h=p.querySelector('h1,h2,h3,h4');if(h){t.push(h.innerText||'');break}p=p.parentElement;n++}
-          var h1=document.querySelector('h1');if(h1)t.push(h1.innerText||'');
-          return t.join(' ').replace(/\s+/g,' ').trim().slice(0,400);
-        }
-        var imgs=document.querySelectorAll('img');
-        for(var i=0;i<imgs.length&&out.length<300;i++){
+        var h1=document.querySelector('h1');h1t=tc(h1,200);
+      }catch(x){}
+      var PLAYER=/(player|(^|[\s_-])video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|icon|emoji|badge|sponsor|advert|(^|[\s_-])ads?([\s_-]|$)|banner|related|carousel|duration|(^|[\s_-])play)/i;
+      var IMGRE=/\.(jpe?g|png|webp|avif)(\?|#|$)/i;
+      function pick(ss,cur){var u=cur.u,bw=cur.w;(ss||'').split(',').forEach(function(p){var a=p.trim().split(/\s+/);if(!a[0])return;var w=parseInt(a[1]||'0')||1;if(w>=bw){bw=w;u=a[0]}});return {u:u,w:bw}}
+      function best(img){
+        var c={u:'',w:0};
+        c=pick(img.getAttribute('srcset')||img.getAttribute('data-srcset')||'',c);
+        if(!c.u){try{var pic=img.closest('picture');if(pic)pic.querySelectorAll('source').forEach(function(s){c=pick(s.getAttribute('srcset')||s.getAttribute('data-srcset')||'',c)})}catch(x){}}
+        var ds=img.getAttribute('data-full')||img.getAttribute('data-large')||img.getAttribute('data-orig-file')||img.getAttribute('data-large-file')||img.getAttribute('data-original')||img.getAttribute('data-src')||img.getAttribute('data-lazy-src')||img.getAttribute('data-lazy')||img.getAttribute('data-url');
+        var u=c.u||ds||img.currentSrc||img.src||'';
+        try{return new URL(u,location.href).href}catch(e){return ''}
+      }
+      function ctxText(img){
+        var t=[img.alt||'',img.title||''];
+        try{var fig=img.closest('figure');if(fig){var fc=fig.querySelector('figcaption');if(fc)t.push(tc(fc,300))}}catch(x){}
+        var p=img.parentElement,n=0;
+        while(p&&n<4){try{var h=p.querySelector('h1,h2,h3,h4');if(h){t.push(tc(h,200));break}}catch(x){}p=p.parentElement;n++}
+        t.push(h1t);
+        return t.join(' ').replace(/\s+/g,' ').trim().slice(0,400);
+      }
+      var imgs=[];try{imgs=document.querySelectorAll('img')}catch(x){}
+      for(var i=0;i<imgs.length&&out.length<300&&i<1500;i++){
+        try{
           var img=imgs[i];
-          if(img.closest('video,picture video,iframe,header,nav,footer,aside,[role=banner],[role=navigation]'))continue;
-          var skip=false,e=img,d=0;
-          while(e&&d<6){var c=(e.className&&e.className.baseVal!==undefined?e.className.baseVal:e.className)||'';var id=e.id||'';
-            if(PLAYER.test(c+' '+id)){skip=true;break}
-            if(e.querySelector&&d>0&&e.querySelector('video,[class*=duration],[class*=play-icon],[class*=playicon],[class*=btn-play],[class*=play-button]')){skip=true;break}
+          if(img.closest('video,iframe,header,nav,footer,aside,[role=banner],[role=navigation]')){R('menu/rodapé');continue}
+          var skip='',e=img,d=0;
+          while(e&&d<5){
+            if(PLAYER.test(cls(e))){skip='player/miniatura';break}
+            if(d>0&&d<=2&&e.querySelector&&e.querySelector(VSEL)){skip='perto de vídeo';break}
             e=e.parentElement;d++}
-          if(skip)continue;
+          if(skip){R(skip);continue}
           var a=img.closest('a[href]');
           var u=best(img);
-          if(a){ if(IMGRE.test(a.href)) u=a.href; else continue; }
+          if(a){ if(IMGRE.test(a.href)) u=a.href; else {R('dentro de link (card)');continue} }
+          if(!u){R('sem endereço');continue}
+          if(bad[u.split('?')[0]]){R('capa/og:image');continue}
           var lazy=!!(img.getAttribute('data-src')||img.getAttribute('data-srcset')||img.getAttribute('data-original')||img.getAttribute('data-lazy')||img.getAttribute('data-lazy-src')||img.loading==='lazy');
-          if(!u||bad[u.split('?')[0]])continue;
           var w=img.naturalWidth||0,h=img.naturalHeight||0;
           var loaded=img.complete&&w>0&&!/^data:/.test(img.currentSrc||'')&&(img.currentSrc||img.src||'').split('?')[0]===u.split('?')[0];
-          if(!loaded||Math.min(w,h)<500){ if(lazy||!loaded){w=0;h=0} else continue; }
-          var alt=(img.alt||'')+' '+(img.className||'');
-          if(/(avatar|logo|icon|emoji|profile|perfil|thumbnail|miniatura|capa|cover|poster)/i.test(alt))continue;
+          if(!loaded||Math.min(w,h)<500){ if(lazy||!loaded){w=0;h=0} else {R('pequena (<500px)');continue} }
+          var alt=(img.alt||'')+' '+cls(img);
+          if(/(avatar|logo|icon|emoji|profile|perfil|thumbnail|miniatura|capa|cover|poster)/i.test(alt)){R('avatar/logo/capa');continue}
           out.push({u:u,t:ctxText(img),w:w,h:h});
-        }
-        var as=document.querySelectorAll('a[href]');
-        for(var j=0;j<as.length&&cards.length<120;j++){
+        }catch(x){R('erro')}
+      }
+      var as=[];try{as=document.querySelectorAll('a[href]')}catch(x){}
+      for(var j=0;j<as.length&&cards.length<120&&j<4000;j++){
+        try{
           var A=as[j]; var im=A.querySelector('img'); if(!im)continue;
           if(A.closest('header,nav,footer,aside,[role=banner],[role=navigation]'))continue;
           var hr=(A.href||'').split('#')[0]; if(!/^https?:/.test(hr)||IMGRE.test(hr)||hr===location.href.split('#')[0])continue;
-          var U; try{U=new URL(hr)}catch(e){continue}
+          var U=new URL(hr);
           if(U.host!==location.host)continue;
-          if(/\/(video|videos|watch|embed|v|tag|tags|category|categories|search|login|user|users|profile|channel)s?(\/|\?|$)/i.test(U.pathname))continue;
-          if(videoCard(A))continue;
-          var al=(im.alt||'')+' '+(im.className||'');
+          if(/\/(video|videos|watch|embed|v|tag|tags|category|categories|search|login|user|users|profile|channel)s?(\/|\?|$)/i.test(U.pathname)){R('card: link de vídeo/categoria');continue}
+          if(videoCard(A)){R('card: tem vídeo');continue}
+          var al=(im.alt||'')+' '+cls(im);
           if(/(avatar|logo|icon|emoji|profile|perfil)/i.test(al))continue;
           if(seenC[hr])continue; seenC[hr]=1;
-          var tt=[A.getAttribute('title')||'',A.getAttribute('aria-label')||'',(A.innerText||'').slice(0,200),im.alt||''];
-          var p=A.parentElement,n=0; while(p&&n<3){var hh=p.querySelector('h1,h2,h3,h4,figcaption');if(hh){tt.push(hh.innerText||'');break}p=p.parentElement;n++}
+          var tt=[A.getAttribute('title')||'',A.getAttribute('aria-label')||'',tc(A,200),im.alt||''];
+          var p=A.parentElement,n=0; while(p&&n<3){var hh=p.querySelector('h1,h2,h3,h4,figcaption');if(hh){tt.push(tc(hh,200));break}p=p.parentElement;n++}
           cards.push({h:hr,t:tt.join(' ').replace(/\s+/g,' ').trim().slice(0,300)});
-        }
-      }catch(e){}
-      return JSON.stringify({p:out,c:cards});
+        }catch(x){}
+      }
+      return JSON.stringify({p:out,c:cards,r:rej,n:imgs.length});
     })()"""
 
     fun parse(raw: String?): List<Photo> = try {
@@ -127,6 +142,16 @@ object Photos {
         (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { o -> Photo(o.optString("u"), o.optString("t"), o.optInt("w"), o.optInt("h")) } }
             .filter { it.url.startsWith("http") && !badUrl(it.url) }
     } catch (_: Exception) { emptyList() }
+
+    /** Motivos de descarte do script do navegador (para o diagnóstico) e total de <img> na página. */
+    fun parseRejects(raw: String?): Pair<Map<String, Int>, Int> = try {
+        var v: Any? = JSONTokener(raw ?: "").nextValue()
+        if (v is String) v = JSONTokener(v).nextValue()
+        val o = v as org.json.JSONObject
+        val r = o.optJSONObject("r"); val m = LinkedHashMap<String, Int>()
+        r?.keys()?.forEach { k -> m[k] = r.optInt(k) }
+        m to o.optInt("n")
+    } catch (_: Exception) { emptyMap<String, Int>() to -1 }
 
     data class Card(val href: String, val text: String)
     fun parseCards(raw: String?): List<Card> = try {
@@ -167,17 +192,32 @@ object Photos {
     }
 
     /** Página tem vídeo? (aí não é post de foto: nada de foto dela). */
-    fun isVideoPage(url: String, html: String): Boolean {
-        if (Regex("""(?i)<video[\s>]|og:video|"@type"\s*:\s*"VideoObject"|property=["']og:type["'][^>]*video""").containsMatchIn(html)) return true
+    fun isVideoPage(url: String, html: String): Boolean = strongVideo(html) || weakVideo(url, html)
+    /** Sinal forte: a página declara que É um vídeo (og:video / VideoObject / og:type video). */
+    fun strongVideo(html: String) = Regex("""(?i)og:video|"@type"\s*:\s*"VideoObject"|property=["']og:type["'][^>]*video""").containsMatchIn(html)
+    /** Sinal fraco: tem <video>/stream em algum lugar (pode ser só vídeo relacionado na lateral). */
+    fun weakVideo(url: String, html: String): Boolean {
+        if (Regex("""(?i)<video[\s>]""").containsMatchIn(html)) return true
         return try { Extract.parse(url, html).videos.any { it.kind != Kind.SERVER } } catch (_: Exception) { false }
     }
 
-    /** Tamanho da imagem lendo só o começo do arquivo de verdade (não o placeholder). */
-    suspend fun probeSize(url: String, referer: String?): Pair<Int, Int>? = try {
-        val rq = okhttp3.Request.Builder().url(url).header("Range", "bytes=0-131071").apply { if (!referer.isNullOrBlank()) header("Referer", referer) }.build()
-        Net.fast.newCall(rq).await().use { r ->
-            if (!r.isSuccessful) null else {
-                val b = r.body?.bytes() ?: ByteArray(0)
+    /** Tamanhos já conferidos (não pede o mesmo arquivo de novo a cada coleta). 0x0 = falhou. */
+    private val sizeCache = java.util.concurrent.ConcurrentHashMap<String, Pair<Int, Int>>()
+    @Volatile var lastProbeFail = ""
+    /** Tamanho da imagem lendo só o começo do arquivo de verdade (não o placeholder). Lê no máximo 256 KB, fora da tela. */
+    suspend fun probeSize(url: String, referer: String?): Pair<Int, Int>? {
+        sizeCache[url]?.let { return it.takeIf { it.first > 0 } }
+        val r0 = probeSize0(url, referer)
+        sizeCache[url] = r0 ?: (0 to 0)
+        return r0
+    }
+    private suspend fun probeSize0(url: String, referer: String?): Pair<Int, Int>? = try {
+        val rq = okhttp3.Request.Builder().url(url).header("Range", "bytes=0-262143").apply { if (!referer.isNullOrBlank()) header("Referer", referer) }.build()
+        Net.browser.newCall(rq).await().use { r ->
+            if (!r.isSuccessful) { lastProbeFail = "HTTP ${r.code}"; null } else {
+                val b = r.body?.source()?.let { src -> val buf = okio.Buffer(); var n = 0L
+                    while (n < 262_144) { val k = src.read(buf, 262_144 - n); if (k < 0) break; n += k }
+                    buf.readByteArray() } ?: ByteArray(0)
                 val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size, o)
                 if (o.outWidth > 0) o.outWidth to o.outHeight else null
@@ -191,12 +231,14 @@ object Photos {
      */
     suspend fun fromPost(post: String, cardText: String, render: (suspend (String) -> String?)?): List<Photo> {
         var html = PageResolver.fetch(post, null)
-        if (html != null && isVideoPage(post, html)) return emptyList()
+        if (html != null && strongVideo(html)) return emptyList()
         var ps = html?.let { fromHtml(post, it) }.orEmpty()
+        if (ps.isEmpty() && html != null && weakVideo(post, html)) return emptyList()
         if (ps.isEmpty() && render != null) {
             html = render(post) ?: html
-            if (html != null && isVideoPage(post, html)) return emptyList()
+            if (html != null && strongVideo(html)) return emptyList()
             ps = html?.let { fromHtml(post, it) }.orEmpty()
+            if (ps.isEmpty() && html != null && weakVideo(post, html)) return emptyList()
         }
         val doc = html?.let { try { Jsoup.parse(it, post) } catch (_: Exception) { null } }
         val title = listOf(doc?.selectFirst("meta[property=og:title]")?.attr("content").orEmpty(), doc?.selectFirst("h1")?.text().orEmpty(), doc?.title().orEmpty())
@@ -221,15 +263,15 @@ object Photos {
         doc.select("meta[property=og:image],meta[name=og:image],meta[name=twitter:image],meta[property=twitter:image],link[rel=image_src]")
             .forEach { bad += (it.absUrl("content").ifBlank { it.absUrl("href") }).substringBefore('?') }
         doc.select("video[poster]").forEach { bad += it.absUrl("poster").substringBefore('?') }
-        val player = Regex("""(?i)(player|video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|icon|emoji|badge|sponsor|advert|\bads?\b|\bad-|banner|related|duration|play)""")
+        val player = Regex("""(?i)(player|(^|[\s_-])video|vjs|jwplayer|plyr|flowplayer|mejs|thumb|poster|preview|avatar|logo|icon|emoji|badge|sponsor|advert|(^|[\s_-])ads?([\s_-]|$)|banner|related|duration|(^|[\s_-])play)""")
         val out = ArrayList<Photo>()
         val h1 = doc.selectFirst("h1")?.text().orEmpty()
         for (img in doc.select("img")) {
             if (img.parents().any { it.tagName() in setOf("video", "header", "nav", "footer", "aside", "iframe") }) continue
             var skip = false; var e: Element? = img; var d = 0
-            while (e != null && d < 6) {
+            while (e != null && d < 5) {
                 if (player.containsMatchIn(e.className() + " " + e.id())) { skip = true; break }
-                if (d > 0 && e.select("video,[class*=duration],[class*=play-icon],[class*=playicon],[class*=btn-play],[class*=play-button]").isNotEmpty()) { skip = true; break }
+                if (d in 1..2 && e.select("video,[class*=duration],[class*=play-icon],[class*=playicon],[class*=btn-play],[class*=play-button]").isNotEmpty()) { skip = true; break }
                 e = e.parent(); d++
             }
             if (skip) continue

@@ -65,12 +65,21 @@ object PageResolver {
         val pr = html?.let { Extract.parse(card, it) }
         val t = TitleFix.pick(pr?.title, title).ifBlank { t0 }
         best(pr?.videos.orEmpty())?.let { return it.copy(page = card, ref = it.ref ?: card, title = t, extra = listOf(t, ctx, it.extra).joinToString(" ").trim()) }
+        // navegador aberto na tela: servidor yt-dlp primeiro (não abre página oculta na janela do navegador);
+        // página oculta só se o servidor não achar
+        val browserOpen = JsRender.browserVisible
+        if (browserOpen) {
+            withTimeoutOrNull(45_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) }?.let { pt ->
+                return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
+            }
+        }
         if (JsRender.available()) {
             // ~30 s no máximo na página (incluindo espera por vaga); depois cai para o servidor yt-dlp
             val (realTitle, wv) = withTimeoutOrNull(30_000) { viaWebView(card) { u -> JsRender.renderQueue(u, 18_000) } } ?: ("" to null)
             val tt = TitleFix.pick(realTitle, t).ifBlank { t }
             if (wv != null) return wv.copy(page = card, ref = wv.ref ?: card, title = tt, extra = listOf(tt, ctx, wv.extra).joinToString(" ").trim())
         }
+        if (browserOpen) return null   // o servidor já foi tentado acima
         val pt = withTimeoutOrNull(60_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) } ?: return null
         return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
     }

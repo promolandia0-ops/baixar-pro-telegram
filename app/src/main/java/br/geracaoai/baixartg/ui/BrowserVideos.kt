@@ -22,6 +22,26 @@ import okhttp3.Request
  * Navegador: detecta os cards de vídeo enquanto o usuário rola e resolve o vídeo real em segundo plano
  * (HTML estático → servidor yt-dlp). Só entra na lista o que tem stream de vídeo resolvido; nunca foto/capa.
  */
+/** Diagnóstico do navegador (vai no "Copiar diagnóstico"; sem links). */
+object BrowserDiag {
+    private fun m() = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
+    val photoRejects = m(); val counters = m()
+    @Volatile var lastImgs = -1; @Volatile var collectMs = 0L; @Volatile var collectMaxMs = 0L; @Volatile var collects = 0
+    fun inc(k: String, n: Int = 1) { counters.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
+    fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
+    fun timed(ms: Long) { collects++; collectMs = ms; if (ms > collectMaxMs) collectMaxMs = ms }
+    fun report(): String = buildString {
+        appendLine("— navegador —")
+        appendLine("modo: ${listOf("só vídeos", "só fotos", "vídeos e fotos").getOrElse(BrowserDetect.mode.intValue) { "?" }}  nome: ${if (BrowserDetect.term.value.isBlank()) "-" else "sim"}")
+        appendLine("lista: ${BrowserDetect.list.size} vídeos, ${BrowserDetect.photos.size} fotos, carregando=${BrowserDetect.pending.intValue}, já na fila/enviados nesta página=${BrowserDetect.alreadyHere.intValue}")
+        appendLine("páginas ocultas vivas: ${br.geracaoai.baixartg.core.JsRender.alive.get()} (fila: ${br.geracaoai.baixartg.core.JsRender.aliveQueue.get()})")
+        appendLine("coleta: ${collects}× última=${collectMs}ms pior=${collectMaxMs}ms  <img> na página=$lastImgs")
+        if (counters.isNotEmpty()) appendLine("contadores: " + counters.entries.sortedBy { it.key }.joinToString("; ") { "${it.key}×${it.value.get()}" })
+        if (photoRejects.isNotEmpty()) appendLine("fotos descartadas: " + photoRejects.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
+        if (br.geracaoai.baixartg.core.Photos.lastProbeFail.isNotBlank()) appendLine("última falha ao medir foto: ${br.geracaoai.baixartg.core.Photos.lastProbeFail}")
+    }
+}
+
 object BrowserDetect {
     /** state: 0 = vídeo resolvido; 1 = carregando (página do card ainda sendo aberta); 2 = não carregou. */
     data class Det(val key: String, val f: Found, val sent: Boolean = false, val sel: Boolean = false, val keys: List<String> = emptyList(), val state: Int = 0)
@@ -42,6 +62,7 @@ object BrowserDetect {
         // fotos: com nome, só ficam as que batem (as outras saem e podem voltar se o nome mudar)
         if (t.isNotBlank()) { val gone = photos.filter { !matches(it.f, t) }; if (gone.isNotEmpty()) { photos.removeAll(gone.toSet()); gone.forEach { d -> d.keys.forEach { photoKeys.remove(it) } }; photoPosts.clear() } }
         else photoPosts.clear()
+        probing.clear()
         for (i in photos.indices) { val d = photos[i]; val v = matches(d.f, t); if (d.sel != v) photos[i] = d.copy(sel = v) }
     }
 
@@ -53,7 +74,7 @@ object BrowserDetect {
     fun setMode(m: Int) { Prefs.mediaMode = m; mode.intValue = m; setPhotosOn(m != 0) }
     private val photoKeys = HashSet<String>()
     private val thumbKeys = java.util.Collections.synchronizedSet(HashSet<String>())
-    fun setPhotosOn(v: Boolean) { photosOn.value = v; if (!v) { photos.clear(); photoKeys.clear(); photoPosts.clear() } }
+    fun setPhotosOn(v: Boolean) { photosOn.value = v; if (!v) { photos.clear(); photoKeys.clear(); photoPosts.clear(); probing.clear() } }
     fun togglePhoto(key: String, v: Boolean) { val i = photos.indexOfFirst { it.key == key }; if (i >= 0) photos[i] = photos[i].copy(sel = v) }
     fun setAllPhotos(v: Boolean) { for (i in photos.indices) if (photos[i].sel != v) photos[i] = photos[i].copy(sel = v) }
 
@@ -73,15 +94,18 @@ object BrowserDetect {
         for (p in ps) {
             if (br.geracaoai.baixartg.web.AdBlock.isAdHost(Extract.host(p.url))) continue
             val k = Photos.key(p.url)
-            if (k in photoKeys || (checkThumbs && k in thumbKeys) || Photos.sharesId(p.url, vt)) continue
+            if (k in photoKeys) continue
+            if ((checkThumbs && k in thumbKeys) || Photos.sharesId(p.url, vt)) { BrowserDiag.rej("miniatura de vídeo"); continue }
             val f = Found(p.url, page, Photos.title(p), Kind.PHOTO, ref = page, extra = p.text)
-            if (!photoMatches(f)) continue   // com nome: só fotos cuja legenda/título bate (não grava a chave: volta se o nome mudar)
+            if (!photoMatches(f)) { BrowserDiag.rej("nome não bate"); continue }
+            BrowserDiag.inc("fotos aceitas")   // com nome: só fotos cuja legenda/título bate (não grava a chave: volta se o nome mudar)
             photoKeys += k
             if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k)) || Sent.isSent(f)) continue
             photos += Det("ph:$k", f, sel = term.value.isNotBlank(), keys = listOf(k))
         }
     }
     private val photoPosts = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val probing = java.util.Collections.synchronizedSet(HashSet<String>())
     private val photoGate = Semaphore(3)
     /** Cards de post de foto: abre a página do post (como o resolvedor de vídeo) e pega as fotos grandes de lá. */
     fun onPhotoCards(page: String, cards: List<Photos.Card>) {
@@ -89,15 +113,21 @@ object BrowserDetect {
         val words = NameFilter.words(term.value)
         for (c in cards) {
             val np = normPage(c.href)
-            if (np in cardPages || synchronized(seenCards) { c.href in seenCards } || list.any { normPage(it.f.page) == np }) continue   // é card de vídeo
+            // Antes: todo link com imagem também vira "card de vídeo" no detector de vídeos, e aqui era pulado por isso
+            // → nenhum post de foto era aberto (fotos = 0). Agora só pula se já virou um vídeo de verdade.
+            if (list.any { it.state == 0 && normPage(it.f.page) == np }) { BrowserDiag.rej("post: é vídeo"); continue }
             if (!photoPosts.add(np)) continue
+            BrowserDiag.inc("posts de foto achados")
+            busy(1)
             scope.launch {
-                photoGate.withPermit {
+                try { photoGate.withPermit {
                     val ps = try { Photos.fromPost(c.href, c.text) { u -> photoRender.withPermit { JsRender.render(u, 15_000)?.html } } } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
                     val ok = if (words.isEmpty()) ps else ps.filter { NameFilter.matchesText(it.text, words) }
+                    BrowserDiag.inc("posts abertos"); if (ps.isEmpty()) BrowserDiag.rej("post: sem foto grande (ou é vídeo)")
+                    if (ps.isNotEmpty() && ok.isEmpty()) BrowserDiag.rej("post: nome não bate", ps.size)
                     if (ps.isNotEmpty() && ok.isEmpty()) photoPosts.remove(np)   // nome diferente: pode voltar se mudar a busca
                     if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(c.href, ok, checkThumbs = false) }
-                }
+                } } finally { busy(-1) }
             }
         }
     }
@@ -106,12 +136,17 @@ object BrowserDetect {
     fun onPhotos(page: String, ps0: List<Photos.Photo>) {
         if (!photosOn.value || ps0.isEmpty()) return
         // tamanho desconhecido (lazy/placeholder): confere no arquivo de verdade antes de listar
-        val unknown = ps0.filter { it.w <= 0 || it.h <= 0 }.filter { Photos.key(it.url) !in photoKeys }
-        if (unknown.isNotEmpty()) scope.launch {
-            val ok = ArrayList<Photos.Photo>()
-            for (p in unknown.take(60)) { val wh = Photos.probeSize(p.url, page) ?: continue; if (minOf(wh.first, wh.second) >= Photos.MIN_SIDE) ok += p.copy(w = wh.first, h = wh.second) }
-            if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(page, ok, checkThumbs = true) }
-        }
+        // antes: os de tamanho desconhecido eram medidos de novo a cada coleta (a cada 2,5 s), até 60 seguidos — tempestade de pedidos
+        val unknown = ps0.filter { it.w <= 0 || it.h <= 0 }.filter { Photos.key(it.url) !in photoKeys && probing.add(it.url) }.take(24)
+        BrowserDiag.inc("fotos candidatas", ps0.size)
+        if (unknown.isNotEmpty()) { busy(1); scope.launch { try {
+            val ok = java.util.Collections.synchronizedList(ArrayList<Photos.Photo>())
+            unknown.chunked(4).forEach { grp -> grp.map { p -> async {
+                val wh = Photos.probeSize(p.url, page)
+                when { wh == null -> BrowserDiag.rej("não deu pra medir"); minOf(wh.first, wh.second) < Photos.MIN_SIDE -> BrowserDiag.rej("pequena (<500px)"); else -> ok += p.copy(w = wh.first, h = wh.second) }
+            } }.awaitAll() }
+            if (ok.isNotEmpty()) withContext(Dispatchers.Main) { addPhotos(page, ok.toList(), checkThumbs = true) }
+        } finally { busy(-1) } } }
         val ps = ps0.filter { it.w > 0 && it.h > 0 }
         if (ps.isEmpty()) return
         addPhotos(page, ps, checkThumbs = true)
@@ -147,6 +182,9 @@ object BrowserDetect {
     val pending = mutableIntStateOf(0)
     /** Cards desta página que já estão na fila ou já foram enviados (não são abertos de novo). */
     val alreadyHere = mutableIntStateOf(0)
+    /** Fotos sendo conferidas agora (posts abertos / tamanhos medidos). */
+    val photoBusy = mutableIntStateOf(0)
+    private fun busy(d: Int) { scope.launch(Dispatchers.Main) { photoBusy.intValue = (photoBusy.intValue + d).coerceAtLeast(0) } }
     /** Quando a página atual começou a abrir (para o "Procurando…" ter fim). */
     val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
     fun newPage() { alreadyHere.intValue = 0; pageAt.longValue = System.currentTimeMillis() }
@@ -373,10 +411,11 @@ object BrowserDetect {
     /** Cards coletados do DOM (JsScripts.COLLECT). */
     fun onCollected(page: String, c: JsScripts.Collected, background: Boolean = false) {
         if (!background) browsing = page
-        pageInfo[normPage(page)] = c.bestPageTitle to c.pageText
+        val prevInfo = pageInfo.put(normPage(page), c.bestPageTitle to c.pageText)
         // mídias já listadas desta página ganham o título real (antes podiam ter vindo como "arquivo"/idioma)
         val pt = c.bestPageTitle
-        if (pt.isNotBlank()) scope.launch(Dispatchers.Main) {
+        // só quando o título da página muda (antes percorria a lista inteira a cada coleta, na thread da tela)
+        if (pt.isNotBlank() && prevInfo?.first != pt) scope.launch(Dispatchers.Main) {
             for (i in list.indices) { val d = list[i]
                 if (normPage(d.f.page) == normPage(page) && (TitleFix.isJunk(d.f.title) || d.f.title == Extract.fileName(d.f.url))) {
                     val nf = d.f.copy(title = pt, extra = listOf(pt, c.pageText, d.f.extra).joinToString(" ").trim())
@@ -471,6 +510,8 @@ object BrowserDetect {
                     val best = vids.filter { it.kind != Kind.SERVER || vids.none { o -> o.kind != Kind.SERVER } }
                         .reduceOrNull { a, b -> if (MediaIdentity.isBetter(b, a)) b else a }
                     if (best != null) { publish(best.copy(page = card, title = t, extra = listOf(ctxAll, best.extra).joinToString(" ").trim()), listOf("ip:" + normPage(card))); return@withPermit }
+                    // "Só fotos": não abre página oculta nem servidor para card de vídeo (só pesaria; os vídeos ficam escondidos)
+                    if (mode.intValue == 1) { markFailed(card); return@withPermit }
                     // vídeo só carrega depois de abrir a página e tocar em "assistir"/play: WebView oculto com play automático
                     val (realTitle, wv) = PageResolver.viaWebView(card) { u -> JsRender.render(u, 20_000, play = true) }
                     val tt = TitleFix.pick(realTitle, t).ifBlank { t }
@@ -567,6 +608,8 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     }
                 }
             }
+            Spacer(Modifier.height(8.dp))
+            DiagButton(always = true)
             Spacer(Modifier.height(24.dp))
         }
     }
