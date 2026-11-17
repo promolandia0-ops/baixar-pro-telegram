@@ -45,7 +45,7 @@ object Pipeline {
     private const val RESOLVERS = 5
     private const val DOWNLOADERS = 4
     private const val UPLOADERS = 3
-    private const val RESOLVE_TIMEOUT = 75_000L   // tudo junto, inclusive esperar vaga: estático + página + servidor
+    private const val RESOLVE_TIMEOUT = 90_000L   // tudo junto, inclusive esperar vaga: estático + página + servidor
     private const val RESOLVE_STALL = 100_000L
     private const val OPEN_GAP = 350L
     private const val STALL_MS = 60_000L
@@ -283,13 +283,13 @@ object Pipeline {
                 delay(1_000); continue
             }
             // foto (ou link que já é a imagem): baixa direto do endereço, nunca abre página
-            if (t.photo || (Extract.isPhotoUrl(t.page) && !Extract.isVideoUrl(t.page))) {
+            if (t.photo) {
                 upd(t.id) { it.copy(f = Found(t.page, t.page, it.title, Kind.PHOTO, ref = t.page, extra = it.extra), photo = true, st = PS.READY, msg = "") }
                 beat.remove(t.id); continue
             }
             var f: Found? = null
             var stalledOut = false
-            for (attempt in 0..0) {
+            for (attempt in 0..1) {
                 if (attempt > 0) { upd(t.id) { it.copy(msg = "Tentando de novo…") }; delay(2_000) }
                 alive(t.id)
                 // prazo duro: roda à parte e o resolvedor não espera além do prazo (mesmo se algo lá dentro não parar)
@@ -304,7 +304,7 @@ object Pipeline {
             beat.remove(t.id)
             if (f == null && stalledOut) upd(t.id) { cur ->
                 val n = cur.stalls + 1
-                if (n >= 2) cur.copy(st = PS.FAIL, msg = "Não abriu a página (tempo esgotado). Toque em tentar de novo.", stalls = n)
+                if (n >= 3) cur.copy(st = PS.FAIL, msg = "Não abriu a página (tempo esgotado). Toque em tentar de novo.", stalls = n)
                 else cur.copy(st = PS.WAIT, msg = "Travou ao abrir a página, tentando de novo…", stalls = n)
             }
             else if (f == null) upd(t.id) { it.copy(st = PS.FAIL, msg = "Não consegui carregar o vídeo desta página.") }
