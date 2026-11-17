@@ -45,7 +45,7 @@ object Pipeline {
     private const val RESOLVERS = 5
     private const val DOWNLOADERS = 4
     private const val UPLOADERS = 3
-    private const val RESOLVE_TIMEOUT = 90_000L   // tudo junto, inclusive esperar vaga: estático + página + servidor
+    private const val RESOLVE_TIMEOUT = 75_000L   // tudo junto, inclusive esperar vaga: estático + página + servidor
     private const val RESOLVE_STALL = 100_000L
     private const val OPEN_GAP = 350L
     private const val STALL_MS = 60_000L
@@ -282,9 +282,14 @@ object Pipeline {
                 if (items.value.none { it.st in ACTIVE }) return
                 delay(1_000); continue
             }
+            // foto (ou link que já é a imagem): baixa direto do endereço, nunca abre página
+            if (t.photo || (Extract.isPhotoUrl(t.page) && !Extract.isVideoUrl(t.page))) {
+                upd(t.id) { it.copy(f = Found(t.page, t.page, it.title, Kind.PHOTO, ref = t.page, extra = it.extra), photo = true, st = PS.READY, msg = "") }
+                beat.remove(t.id); continue
+            }
             var f: Found? = null
             var stalledOut = false
-            for (attempt in 0..1) {
+            for (attempt in 0..0) {
                 if (attempt > 0) { upd(t.id) { it.copy(msg = "Tentando de novo…") }; delay(2_000) }
                 alive(t.id)
                 // prazo duro: roda à parte e o resolvedor não espera além do prazo (mesmo se algo lá dentro não parar)
@@ -299,7 +304,7 @@ object Pipeline {
             beat.remove(t.id)
             if (f == null && stalledOut) upd(t.id) { cur ->
                 val n = cur.stalls + 1
-                if (n >= 3) cur.copy(st = PS.FAIL, msg = "Travou ao abrir a página 3 vezes.", stalls = n)
+                if (n >= 2) cur.copy(st = PS.FAIL, msg = "Não abriu a página (tempo esgotado). Toque em tentar de novo.", stalls = n)
                 else cur.copy(st = PS.WAIT, msg = "Travou ao abrir a página, tentando de novo…", stalls = n)
             }
             else if (f == null) upd(t.id) { it.copy(st = PS.FAIL, msg = "Não consegui carregar o vídeo desta página.") }
@@ -323,10 +328,10 @@ object Pipeline {
                 delay(500); continue
             }
             val f = t.f!!
-            if (sentBefore(t)) { upd(t.id) { it.copy(st = PS.DONE, msg = "Já enviado antes (pulado)", prog = 1f) }; continue }
+            if (!t.force && sentBefore(t)) { upd(t.id) { it.copy(st = PS.SKIP, msg = "já enviado antes (pulado)", prog = 0f) }; continue }
             val ks = keysOf(t)
             val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
-            if (dup) { upd(t.id) { it.copy(st = PS.DONE, msg = "Repetido (mesmo vídeo, pulado)", prog = 1f) }; continue }
+            if (dup) { upd(t.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }; continue }
             alive(t.id)
             val job = scope.async { downloadOne(t, dir) }
             itemJobs[t.id] = job
@@ -396,8 +401,8 @@ object Pipeline {
             Uploader.savedChat()
             // Idempotência: confere de novo logo antes de enviar
             val fk = Jobs.fileKey(file)
-            if ((fk != null && Sent.has(fk)) || sentBefore(t)) {
-                upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "Repetido (mesmo arquivo já enviado, pulado)") }
+            if (!t.force && ((fk != null && Sent.has(fk)) || sentBefore(t))) {
+                upd(t.id) { it.copy(st = PS.SKIP, prog = 0f, msg = "mesmo arquivo já enviado antes (pulado)") }
                 return
             }
             // Repetido pela imagem (muito rigoroso; na dúvida envia). Nunca apaga nada: só pula e deixa "Enviar mesmo assim".

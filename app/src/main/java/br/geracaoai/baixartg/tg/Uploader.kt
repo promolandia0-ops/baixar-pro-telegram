@@ -77,7 +77,10 @@ object Uploader {
                 }
                 throw e
             } finally { job.cancel() }
-            return res.message ?: throw TdException(res.error?.code ?: 0, res.error?.message ?: "Falha no envio")
+            val msg = res.message ?: throw TdException(res.error?.code ?: 0, res.error?.message ?: "Falha no envio")
+            // só conta como enviado quando o Telegram confirmou (mensagem com id do servidor, sem estado de envio pendente/falho)
+            if (msg.sendingState != null || msg.chatId != chat) throw TdException(0, "Telegram não confirmou o envio")
+            return msg
         } finally { info.thumb?.delete() }
     }
 
