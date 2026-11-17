@@ -309,7 +309,11 @@ object Pipeline {
     }
 
     private val claimed = HashSet<String>()
-    private fun keysOf(t: PItem): Set<String> = (Jobs.sendKeys(t.f!!, t.keys) + MediaIdentity.keys(t.f)).toHashSet()
+    private fun isPhoto(t: PItem) = t.photo || t.f?.kind == Kind.PHOTO
+    /** Fotos: só a chave exata da foto (antes as chaves de vídeo — pasta/nome do arquivo — marcavam fotos diferentes como "repetido"). */
+    private fun keysOf(t: PItem): Set<String> = if (isPhoto(t)) (t.keys + PhotoGrab.key(t.f!!.url)).toHashSet()
+        else (Jobs.sendKeys(t.f!!, t.keys) + MediaIdentity.keys(t.f)).toHashSet()
+    private fun sentBefore(t: PItem): Boolean = if (isPhoto(t)) Sent.anySent(keysOf(t)) else Jobs.alreadySent(t.f!!, t.keys)
 
     private suspend fun downloaderLoop(dir: File, ready: Channel<Pair<PItem, File>>) {
         while (true) {
@@ -319,7 +323,7 @@ object Pipeline {
                 delay(500); continue
             }
             val f = t.f!!
-            if (Jobs.alreadySent(f, t.keys)) { upd(t.id) { it.copy(st = PS.DONE, msg = "Já enviado antes (pulado)", prog = 1f) }; continue }
+            if (sentBefore(t)) { upd(t.id) { it.copy(st = PS.DONE, msg = "Já enviado antes (pulado)", prog = 1f) }; continue }
             val ks = keysOf(t)
             val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
             if (dup) { upd(t.id) { it.copy(st = PS.DONE, msg = "Repetido (mesmo vídeo, pulado)", prog = 1f) }; continue }
@@ -367,7 +371,7 @@ object Pipeline {
             if (f.kind == Kind.PHOTO) {
                 val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 android.graphics.BitmapFactory.decodeFile(file.absolutePath, o)
-                if (o.outWidth <= 0 || minOf(o.outWidth, o.outHeight) < Photos.MIN_SIDE) throw DlException("Imagem pequena (miniatura/ícone), ignorada.")
+                if (o.outWidth > 0 && maxOf(o.outWidth, o.outHeight) < 200) throw DlException("Imagem pequena (miniatura/ícone), ignorada.")
             } else {
                 val k = Downloader.sniffFile(file)
                 if (k == "image" || file.extension.lowercase() in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) throw DlException("O arquivo não é um vídeo (veio uma imagem (capa)).")
@@ -392,7 +396,7 @@ object Pipeline {
             Uploader.savedChat()
             // Idempotência: confere de novo logo antes de enviar
             val fk = Jobs.fileKey(file)
-            if ((fk != null && Sent.has(fk)) || Jobs.alreadySent(f, t.keys)) {
+            if ((fk != null && Sent.has(fk)) || sentBefore(t)) {
                 upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "Repetido (mesmo arquivo já enviado, pulado)") }
                 return
             }
@@ -437,7 +441,7 @@ object Pipeline {
                 currentCoroutineContext().ensureActive()
                 stalled(t, ks, "envio"); return
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
-            Sent.markSent(f, t.keys + listOfNotNull(fk)); History.add(f, size)
+            if (isPhoto(t)) Sent.markPhotoSent(keysOf(t) + listOfNotNull(fk)) else Sent.markSent(f, t.keys + listOfNotNull(fk)); History.add(f, size)
             if (vfp != null) VisualHash.markSent(t.id, vfp)
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
         } catch (e: CancellationException) { throw e

@@ -43,7 +43,11 @@ object Downloader {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
             }
-            Kind.PHOTO -> retry { direct(f.url, ref, dir, f.title, progress) }
+            Kind.PHOTO -> try { retry { photo(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                val fb = PhotoGrab.fallback(f.url) ?: throw e
+                photo(fb, ref, dir, f.title, progress)
+            }
             // stream falhou: tenta a página pelo servidor yt-dlp (antes o item falhava direto)
             Kind.HLS -> try { hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight) } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -52,11 +56,7 @@ object Downloader {
             Kind.SERVER -> viaServer(f.url, dir, server, progress)
             Kind.MEGA -> Mega.download(f, dir, progress)
         }
-        if (f.kind == Kind.PHOTO) {
-            val k = sniffFile(raw)
-            if (k == "html") { raw.delete(); throw DlException("O link devolveu uma página, não uma foto") }
-            return raw
-        }
+        if (f.kind == Kind.PHOTO) return raw
         val k = sniffFile(raw)
         if (k == "image" || k == "html") {
             raw.delete()
@@ -136,6 +136,22 @@ object Downloader {
                 if ((r.isSuccessful || r.code == 206) && !ct.isNullOrBlank() && !ct.contains("text/html", true)) ct else null
             }
         } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+    }
+
+    /** Foto: bytes originais, com cookies/UA do navegador e Referer da página; confere pelo conteúdo que é imagem e acerta a extensão. */
+    suspend fun photo(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
+        val rq = req(url, referer).newBuilder().header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8").build()
+        Net.http.newCall(rq).await().use { r ->
+            if (!r.isSuccessful) throw DlException("HTTP ${r.code} ao baixar a foto")
+            val tmp = File(dir, safe(title) + "_" + System.nanoTime() + ".part")
+            save(r, tmp, progress)
+            val head = tmp.inputStream().use { val b = ByteArray(32); val n = it.read(b); if (n <= 0) ByteArray(0) else b.copyOf(n) }
+            val ext = PhotoGrab.imageExt(head)
+            if (ext == null) { val k = Extract.sniffMagic(head); tmp.delete(); throw DlException(if (k == "html") "O link devolveu uma página, não uma foto" else "O arquivo não é uma imagem") }
+            val out = File(dir, tmp.name.removeSuffix(".part") + "." + ext)
+            if (!tmp.renameTo(out)) { tmp.copyTo(out, true); tmp.delete() }
+            return out
+        }
     }
 
     suspend fun direct(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {

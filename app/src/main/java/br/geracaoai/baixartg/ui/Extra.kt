@@ -139,24 +139,23 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         val v = web ?: return@Runnable
         val page = v.url ?: return@Runnable
         if (!page.startsWith("http") || !BrowserDetect.photosOn.value) return@Runnable
-        BrowserDetect.staticPhotos(page)
         val now = System.currentTimeMillis()
         if (photoState.busy && now - photoState.at < 8_000) return@Runnable
         photoState.busy = true; photoState.at = now
-        // nome trocado / fotos religadas / página nova: relê as fotos da página (limpa as marcas de "já decidido")
-        val reset = if (photoState.epoch != BrowserDetect.photoEpoch) { photoState.epoch = BrowserDetect.photoEpoch
-            "window.__bptPh=null;try{var _i=document.images;for(var _k=0;_k<_i.length;_k++)_i[_k].__bptD=null;var _l=document.links;for(var _k=0;_k<_l.length;_k++)_l[_k].__bptC=null}catch(e){};" } else ""
         BrowserDiag.photoCalls++
-        v.evaluateJavascript(reset + Photos.JS) { praw ->
+        // v1.9.5: coletor simples (PhotoGrab): devolve as fotos visíveis; o app só tira lixo e repetidos
+        v.evaluateJavascript(PhotoGrab.JS) { praw ->
             collectScope.launch {
                 try {
                     BrowserDiag.photoReplies++
-                    val err = Photos.parseErr(praw); if (err.isNotBlank()) { BrowserDiag.photoErrs++; BrowserDiag.lastPhotoErr = err }
-                    val ps = Photos.parse(praw); val cs = Photos.parseCards(praw); val (rj, n) = Photos.parseRejects(praw)
-                    if (n >= 0) BrowserDiag.lastImgs = n
-                    rj.forEach { (k, x) -> BrowserDiag.rej(k, x) }   // cada imagem é decidida uma vez: soma todas as passadas
-                    withContext(kotlinx.coroutines.Dispatchers.Main) {
-                        try { BrowserDetect.onPhotos(page, ps); BrowserDetect.onPhotoCards(page, cs) } catch (e: Throwable) { BrowserDiag.lastPhotoErr = "app: " + e.javaClass.simpleName + " " + (e.message ?: "").take(120) }
+                    val r = PhotoGrab.parse(praw)
+                    if (r.err.isNotBlank()) { BrowserDiag.photoErrs++; BrowserDiag.lastPhotoErr = r.err }
+                    if (r.ok && !r.same) {
+                        BrowserDiag.lastImgs = r.imgs; BrowserDiag.lastRaw = r.raw; BrowserDiag.lastCands = r.cands.size
+                        r.rejects.forEach { (k, x) -> BrowserDiag.rej(k, x) }
+                        withContext(kotlinx.coroutines.Dispatchers.Main) {
+                            try { BrowserDetect.onGrab(page, r.cands) } catch (e: Throwable) { BrowserDiag.lastPhotoErr = "app: " + e.javaClass.simpleName + " " + (e.message ?: "").take(120) }
+                        }
                     }
                 } catch (e: Throwable) { BrowserDiag.lastPhotoErr = "app: " + e.javaClass.simpleName + " " + (e.message ?: "").take(120) }
                 finally { withContext(kotlinx.coroutines.NonCancellable + kotlinx.coroutines.Dispatchers.Main) { photoState.busy = false } }

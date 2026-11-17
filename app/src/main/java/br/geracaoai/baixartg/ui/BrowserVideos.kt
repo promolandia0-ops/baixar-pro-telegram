@@ -11,6 +11,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.draw.clip
 import br.geracaoai.baixartg.Prefs
 import br.geracaoai.baixartg.core.*
 import kotlinx.coroutines.*
@@ -26,12 +28,12 @@ import okhttp3.Request
 object BrowserDiag {
     private fun m() = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
     val photoRejects = m(); val counters = m()
-    @Volatile var photoCalls = 0; @Volatile var photoReplies = 0; @Volatile var photoErrs = 0; @Volatile var lastPhotoErr = ""
+    @Volatile var lastRaw = 0; @Volatile var lastCands = 0; @Volatile var lastKept = 0; @Volatile var photoCalls = 0; @Volatile var photoReplies = 0; @Volatile var photoErrs = 0; @Volatile var lastPhotoErr = ""
     @Volatile var lastImgs = -1; @Volatile var collectMs = 0L; @Volatile var collectMaxMs = 0L; @Volatile var collects = 0
     fun inc(k: String, n: Int = 1) { counters.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     /** Página nova: contagens recomeçam (antes somavam todas as páginas e confundiam). */
-    fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
+    fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; lastRaw = 0; lastCands = 0; lastKept = 0; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
     fun timed(ms: Long) { collects++; collectMs = ms; if (ms > collectMaxMs) collectMaxMs = ms }
     fun report(): String = buildString {
         appendLine("— navegador (página atual) — app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME}")
@@ -39,6 +41,7 @@ object BrowserDiag {
         appendLine("lista: ${BrowserDetect.list.size} vídeos${if (BrowserDetect.mode.intValue == 1) " (escondidos: Só fotos)" else ""}, ${BrowserDetect.photos.size} fotos, carregando=${BrowserDetect.pending.intValue}, já na fila/enviados nesta página=${BrowserDetect.alreadyHere.intValue}")
         appendLine("páginas ocultas vivas: ${br.geracaoai.baixartg.core.JsRender.alive.get()} (fila: ${br.geracaoai.baixartg.core.JsRender.aliveQueue.get()})")
         appendLine("coleta: ${collects}× última=${collectMs}ms pior=${collectMaxMs}ms  <img> na página=$lastImgs")
+        appendLine("fotos (coletor ${PhotoGrab.VERSION}): imagens brutas=$lastRaw candidatas=$lastCands na lista=$lastKept")
         appendLine("script de fotos: ${if (BrowserDetect.photosOn.value) "ligado" else "desligado"}  rodou=$photoCalls respondeu=$photoReplies erros=$photoErrs" + (if (lastPhotoErr.isNotBlank()) "  último erro: $lastPhotoErr" else ""))
         if (counters.isNotEmpty()) appendLine("contadores: " + counters.entries.sortedBy { it.key }.joinToString("; ") { "${it.key}×${it.value.get()}" })
         if (photoRejects.isNotEmpty()) appendLine("fotos descartadas: " + photoRejects.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
@@ -164,6 +167,25 @@ object BrowserDetect {
                 BrowserDiag.inc("fotos no HTML da página", ps.size)
                 if (ps.isNotEmpty()) withContext(Dispatchers.Main) { onPhotos(page, ps) }
             } catch (e: Exception) { if (e is CancellationException) throw e } finally { busy(-1) }
+        }
+    }
+
+    /** Miniatura (endereço mostrado na página) e tamanho de cada foto da lista. */
+    val photoThumb = HashMap<String, String>(); val photoDim = HashMap<String, String>()
+    /** v1.9.5: fotos do coletor simples. Só thread principal. Some só o que já está na fila/enviado (mesma foto exata). */
+    fun onGrab(page: String, cands: List<PhotoGrab.Cand>) {
+        if (!photosOn.value) return
+        for (c in PhotoGrab.select(cands) { BrowserDiag.rej(it) }) {
+            val k = PhotoGrab.key(c.url)
+            if (k in photoKeys) continue
+            photoKeys += k
+            if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k))) { BrowserDiag.rej("já enviada/na fila"); continue }
+            val text = c.text.ifBlank { lastRefText }
+            val title = TitleFix.clean(text.take(120)).ifBlank { Extract.fileName(c.url) }
+            val f = Found(c.url, page, title, Kind.PHOTO, ref = page, extra = text)
+            photoThumb["ph:$k"] = c.thumb; if (c.w > 0 && c.h > 0) photoDim["ph:$k"] = "${c.w}×${c.h}"
+            photos += Det("ph:$k", f, sel = term.value.isNotBlank() && photoMatches(f), keys = listOf(k))
+            BrowserDiag.lastKept++
         }
     }
 
@@ -713,7 +735,7 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                 val phChecked = ph.filter { it.sel }
                 Text("${phChecked.size} de ${ph.size} fotos marcadas", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(top = 6.dp))
                 val busyPh by BrowserDetect.photoBusy
-                if (ph.isEmpty()) Text(if (busyPh > 0) "Conferindo as fotos desta página…" else "Nenhuma foto grande (500 px ou mais) nesta página ainda. Role a página ou toque numa foto para abrir a original.", style = MaterialTheme.typography.bodySmall)
+                if (ph.isEmpty()) Text(if (busyPh > 0) "Conferindo as fotos desta página…" else "Nenhuma foto nesta página ainda. Role a página para carregar as fotos.", style = MaterialTheme.typography.bodySmall)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton({ BrowserDetect.setAllPhotos(true) }, Modifier.weight(1f), enabled = phChecked.size < ph.size) { Text("Marcar todos", maxLines = 1) }
                     OutlinedButton({ BrowserDetect.setAllPhotos(false) }, Modifier.weight(1f), enabled = phChecked.isNotEmpty()) { Text("Desmarcar todos", maxLines = 1) }
@@ -724,8 +746,8 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     items(ph.toList(), key = { it.key }) { d ->
                         ListItem(
                             headlineContent = { Text(d.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text("Foto • " + Extract.fileName(d.f.url), maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                            leadingContent = { Checkbox(d.sel, { v -> BrowserDetect.togglePhoto(d.key, v) }) },
+                            supportingContent = { Text("Foto" + (BrowserDetect.photoDim[d.key]?.let { " • $it" } ?: "") + " • " + Extract.host(d.f.url), maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                            leadingContent = { Row(verticalAlignment = Alignment.CenterVertically) { Checkbox(d.sel, { v -> BrowserDetect.togglePhoto(d.key, v) }); PhotoThumb(BrowserDetect.photoThumb[d.key] ?: d.f.url, d.f.page) } },
                             trailingContent = { TextButton({ BrowserDetect.sendPhotos(listOf(d), onSent) }) { Text("Baixar") } })
                     }
                 }
@@ -769,4 +791,29 @@ fun MediaModeSelector(mode: Int, onChange: (Int) -> Unit) {
     SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
         opts.forEachIndexed { i, l -> SegmentedButton(selected = mode == i, onClick = { onChange(i) }, shape = SegmentedButtonDefaults.itemShape(i, opts.size)) { Text(l, maxLines = 1) } }
     }
+}
+
+
+private val thumbCache = android.util.LruCache<String, android.graphics.Bitmap>(80)
+private val thumbGate = Semaphore(4)
+/** Miniatura da foto na lista (baixa pequena, com o Referer da página). */
+@Composable
+fun PhotoThumb(url: String, page: String) {
+    var bmp by remember(url) { mutableStateOf(thumbCache.get(url)) }
+    LaunchedEffect(url) {
+        if (bmp != null || !url.startsWith("http")) return@LaunchedEffect
+        bmp = withContext(Dispatchers.IO) { try { thumbGate.withPermit {
+            val rq = Request.Builder().url(url).header("Referer", page).header("Accept", "image/webp,image/jpeg,image/png,image/*;q=0.8,*/*;q=0.5").build()
+            Net.browser.newCall(rq).execute().use { r -> val b = r.body?.bytes(); if (!r.isSuccessful || b == null) null else {
+                val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size, o)
+                var ss = 1; while (maxOf(o.outWidth, o.outHeight) / (ss * 2) >= 160) ss *= 2
+                android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = ss })
+            } }
+        } } catch (_: Throwable) { null } }?.also { thumbCache.put(url, it) }
+    }
+    val m = Modifier.size(64.dp).padding(start = 4.dp)
+    val b = bmp
+    if (b != null) androidx.compose.foundation.Image(b.asImageBitmap(), null, m.clip(MaterialTheme.shapes.small), contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+    else Box(m, contentAlignment = Alignment.Center) { Icon(Icons.Rounded.Image, null) }
 }

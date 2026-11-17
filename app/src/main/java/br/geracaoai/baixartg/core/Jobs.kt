@@ -196,18 +196,18 @@ object Jobs {
                     }
                     for ((post, p) in fromPosts) {
                         val k = Photos.key(p.url)
-                        if (!pk.add(k) || Photos.sharesId(p.url, vt)) continue
+                        if (!pk.add(k)) continue
                         if (words.isNotEmpty() && !NameFilter.matchesText(p.text, words)) continue
                         val f = Found(p.url, post, Photos.title(p), Kind.PHOTO, ref = post, extra = p.text)
-                        if (Sent.anySent(listOf(k)) || Sent.isQueued(listOf(k)) || Sent.isSent(f)) continue
+                        if (Sent.anySent(listOf(k, PhotoGrab.key(p.url))) || Sent.isQueued(listOf(k, PhotoGrab.key(p.url)))) continue
                         items.update { it + Item(it.size, f, sel = false, sent = false, xkeys = listOf(k)) }
                     }
                     for (p in Photos.fromHtml(pg, html)) {
                         val k = Photos.key(p.url)
-                        if (!pk.add(k) || Photos.sharesId(p.url, vt)) continue
+                        if (!pk.add(k)) continue
                         if (words.isNotEmpty() && !NameFilter.matchesText(p.text, words)) continue
                         val f = Found(p.url, pg, Photos.title(p), Kind.PHOTO, ref = pg, extra = p.text)
-                        if (Sent.anySent(listOf(k)) || Sent.isQueued(listOf(k)) || Sent.isSent(f)) continue
+                        if (Sent.anySent(listOf(k, PhotoGrab.key(p.url))) || Sent.isQueued(listOf(k, PhotoGrab.key(p.url)))) continue
                         items.update { it + Item(it.size, f, sel = false, sent = false, xkeys = listOf(k)) }
                     }
                 }
@@ -439,7 +439,7 @@ object Jobs {
             if (t.f.kind == Kind.PHOTO) {
                 val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
                 android.graphics.BitmapFactory.decodeFile(file.absolutePath, o)
-                if (o.outWidth <= 0 || minOf(o.outWidth, o.outHeight) < Photos.MIN_SIDE) throw DlException("Imagem pequena (miniatura/ícone), ignorada.")
+                if (o.outWidth > 0 && maxOf(o.outWidth, o.outHeight) < 200) throw DlException("Imagem pequena (miniatura/ícone), ignorada.")
             }
             if (t.f.kind != Kind.PHOTO) {
                 val k = Downloader.sniffFile(file)
@@ -469,7 +469,7 @@ object Jobs {
             val fk = fileKey(file)
             if (t.id !in forceIds) {
                 val dupFile = fk != null && (Sent.has(fk) || synchronized(claimed) { !claimed.add(fk) })
-                if (dupFile || alreadySent(t.f, t.xkeys)) {
+                if (dupFile || (if (t.f.kind == Kind.PHOTO) Sent.anySent(t.xkeys + PhotoGrab.key(t.f.url)) else alreadySent(t.f, t.xkeys))) {
                     file.delete()
                     set(t.id) { it.copy(st = St.DONE, prog = 1f, sel = false, sent = true, msg = "Repetido (mesmo arquivo já enviado, pulado)") }
                     return false
@@ -477,7 +477,7 @@ object Jobs {
             }
             // Envio único: sem nova tentativa depois que o TDLib aceitou a mensagem
             Uploader.upload(file, cap, asVideo = t.f.kind != Kind.PHOTO) { p -> set(t.id) { it.copy(prog = p) } }
-            Sent.markSent(t.f, t.xkeys + listOfNotNull(fk)); History.add(t.f, file.length())
+            if (t.f.kind == Kind.PHOTO) Sent.markPhotoSent(t.xkeys + PhotoGrab.key(t.f.url) + listOfNotNull(fk)) else Sent.markSent(t.f, t.xkeys + listOfNotNull(fk)); History.add(t.f, file.length())
             set(t.id) { it.copy(st = St.DONE, prog = 1f, msg = "", sent = true) }; return true
         } catch (e: CancellationException) { set(t.id) { it.copy(st = St.STOPPED, msg = "Parado") }; throw e
         } catch (e: Exception) { set(t.id) { it.copy(st = St.ERR, msg = e.message?.take(160) ?: "Erro") }; return false

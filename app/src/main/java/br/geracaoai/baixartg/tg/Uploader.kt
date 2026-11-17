@@ -30,10 +30,18 @@ object Uploader {
 
     /** Envia para Mensagens Salvas. Cancelar a corrotina (Parar) aborta o envio no TDLib. */
     suspend fun upload(file: File, caption: String, asVideo: Boolean = true, onProgress: (Float) -> Unit): TdApi.Message {
+        if (asVideo) return upload0(file, caption, true, false, onProgress)
+        // foto: tenta como foto; se o Telegram recusar (IMAGE_PROCESS_FAILED, tamanho, formato), manda como arquivo
+        return try { upload0(file, caption, false, false, onProgress) } catch (e: CancellationException) { throw e } catch (e: Exception) {
+            upload0(file, caption, false, true, onProgress)
+        }
+    }
+    private suspend fun upload0(file: File, caption: String, asVideo: Boolean, asDocument: Boolean, onProgress: (Float) -> Unit): TdApi.Message {
         val chat = savedChat()
         val ext = file.extension.lowercase()
         val isVideo = ext in setOf("mp4", "mov", "m4v")
-        val isPhoto = !asVideo && ext in setOf("jpg", "jpeg", "png", "webp") && file.length() in 1..(10L * 1024 * 1024)
+        val pwh = if (!asVideo) photoSize(file) else (0 to 0)
+        val isPhoto = !asVideo && !asDocument && br.geracaoai.baixartg.core.PhotoGrab.sendAsPhoto(ext, file.length(), pwh.first, pwh.second)
         if (asVideo && ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) {
             throw IllegalStateException("O arquivo não é um vídeo (veio uma imagem (capa)).")
         }
@@ -45,7 +53,7 @@ object Uploader {
             video = TdApi.InputVideo().apply { video = TdApi.InputFileLocal(file.absolutePath); thumbnail = thumb; duration = info.dur; width = info.w; height = info.h
             supportsStreaming = true }; this.caption = cap
         } else if (isPhoto) {
-            val (w, h) = withContext(Dispatchers.IO) { photoSize(file) }
+            val (w, h) = pwh
             TdApi.InputMessagePhoto().apply {
                 photo = TdApi.InputPhoto().apply {
                     photo = TdApi.InputFileLocal(file.absolutePath)

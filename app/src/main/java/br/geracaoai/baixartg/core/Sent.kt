@@ -108,6 +108,8 @@ object Sent {
 
     /** Grava depois do envio com sucesso (chaves do item + chaves extras: página do card, hash do arquivo). */
     fun markSent(f: Found, extra: Collection<String> = emptyList()) = addAll(keysOf(f) + extra)
+    /** Foto enviada: grava só as chaves exatas da foto (não mexe nos índices de vídeo). */
+    fun markPhotoSent(keys: Collection<String>) = addAll(keys.filter { it.isNotBlank() })
     @Synchronized fun has(k: String) = k in set
     fun anySent(keys: Collection<String>) = keys.any { has(it) }
 
