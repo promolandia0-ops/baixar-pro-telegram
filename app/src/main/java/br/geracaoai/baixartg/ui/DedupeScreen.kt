@@ -33,23 +33,29 @@ fun DedupeScreen(onClose: () -> Unit) {
     val dDone by Dedupe.delDone.collectAsState(); val dTotal by Dedupe.delTotal.collectAsState()
     var photos by remember { mutableStateOf(false) }
     var byImage by remember { mutableStateOf(false) }
+    var fotos by remember { mutableStateOf(Dedupe.photoMode) }
     var confirm by remember { mutableStateOf(false) }
     var confirmAll by remember { mutableStateOf(false) }
     Scaffold(topBar = { TopAppBar(title = { Text("Limpar repetidos", fontWeight = FontWeight.SemiBold) },
         navigationIcon = { IconButton(onClose) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
         colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)) }) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            Text(if (byImage || (phase == Dedupe.Phase.RESULT && Dedupe.visual)) "Por imagem: compara a duração e a miniatura que o Telegram já tem de cada vídeo (baixa só as miniaturas, nunca os vídeos). Bem rigoroso. Nada vem marcado: você confere as miniaturas lado a lado e marca o que é igual. De cada grupo fica sempre a cópia de maior qualidade."
+            Text(if ((phase == Dedupe.Phase.RESULT && Dedupe.photoMode) || (phase != Dedupe.Phase.RESULT && fotos)) "Fotos repetidas nas suas Mensagens Salvas: compara o arquivo e a imagem (baixa só miniaturas pequenas). As idênticas já vêm marcadas; as só parecidas você confere lado a lado. De cada grupo fica a de MAIOR resolução/tamanho. Nada é apagado sem você confirmar."
+                else if (byImage || (phase == Dedupe.Phase.RESULT && Dedupe.visual)) "Por imagem: compara a duração e a miniatura que o Telegram já tem de cada vídeo (baixa só as miniaturas, nunca os vídeos). Bem rigoroso. Nada vem marcado: você confere as miniaturas lado a lado e marca o que é igual. De cada grupo fica sempre a cópia de maior qualidade."
                 else "Procura vídeos repetidos nas suas Mensagens Salvas do Telegram. Só lê as informações (arquivo, tamanho, duração) — não baixa nada. De cada vídeo repetido fica a cópia de MAIOR QUALIDADE (empate: a mais recente). Nada é apagado sem você confirmar",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             when (phase) {
                 Dedupe.Phase.IDLE, Dedupe.Phase.ERROR -> {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        FilterChip(!fotos, { fotos = false }, label = { Text("Vídeos") }, leadingIcon = { Icon(Icons.Rounded.Movie, null) })
+                        FilterChip(fotos, { fotos = true }, label = { Text("Fotos") }, leadingIcon = { Icon(Icons.Rounded.Image, null) })
+                    }
+                    if (!fotos) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         FilterChip(!byImage, { byImage = false }, label = { Text("Exato (rápido)") })
                         FilterChip(byImage, { byImage = true }, label = { Text("Por imagem (mais lento)") })
                     }
-                    if (!byImage) Row(verticalAlignment = Alignment.CenterVertically) { Text("Incluir fotos", Modifier.weight(1f)); Switch(photos, { photos = it }) }
-                    Button({ Dedupe.analyze(photos, byImage) }, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Search, null); Spacer(Modifier.width(8.dp)); Text("Só analisar (não apaga nada)") }
+                    if (!fotos && !byImage) Row(verticalAlignment = Alignment.CenterVertically) { Text("Incluir fotos", Modifier.weight(1f)); Switch(photos, { photos = it }) }
+                    Button({ if (fotos) Dedupe.analyzePhotos() else Dedupe.analyze(photos, byImage) }, Modifier.fillMaxWidth()) { Icon(Icons.Rounded.Search, null); Spacer(Modifier.width(8.dp)); Text("Só analisar (não apaga nada)") }
                     if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodyMedium)
                     if (Dedupe.hasPendingDelete()) OutlinedButton({ Dedupe.resumeDelete() }, Modifier.fillMaxWidth()) { Text("Continuar apagando (interrompido)") }
                 }
@@ -73,7 +79,7 @@ fun DedupeScreen(onClose: () -> Unit) {
                     val n = remember(excluded, gs) { Dedupe.toDeleteCount() }
                     val bytes = remember(excluded, gs) { Dedupe.toDeleteBytes() }
                     ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp)) {
-                        Text("${Dedupe.fmtN(gs.size)} vídeos com cópias • ${Dedupe.fmtN(n)} mensagens a apagar • libera ${mb(bytes)}", style = MaterialTheme.typography.titleMedium)
+                        Text("${Dedupe.fmtN(gs.size)} ${if (Dedupe.photoMode) "fotos" else "vídeos"} com cópias • ${Dedupe.fmtN(n)} mensagens a apagar • libera ${mb(bytes)}", style = MaterialTheme.typography.titleMedium)
                         Text(status, style = MaterialTheme.typography.bodySmall)
                     } }
                     if (gs.isNotEmpty()) {
@@ -171,7 +177,7 @@ private fun VisualGroupRow(g: Dedupe.G, excluded: Set<Long>) {
                     val e = Dedupe.info[id]; val keep = id == g.keep
                     Column(Modifier.width(150.dp)) {
                         Thumb(Dedupe.thumbs[id], Modifier.fillMaxWidth().height(90.dp))
-                        Text("${durTxt(e?.dur ?: 0)} • ${e?.w ?: 0}×${e?.h ?: 0}", style = MaterialTheme.typography.labelSmall)
+                        Text(if (Dedupe.photoMode) "${e?.w ?: 0}×${e?.h ?: 0}" else "${durTxt(e?.dur ?: 0)} • ${e?.w ?: 0}×${e?.h ?: 0}", style = MaterialTheme.typography.labelSmall)
                         Text("${mb(e?.size ?: 0)} • ${dt(e?.date ?: 0)}", style = MaterialTheme.typography.labelSmall)
                         Text(e?.cap?.ifBlank { null } ?: "sem legenda", maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelSmall)
                         if (keep) Text("FICA (maior qualidade)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 12.dp))

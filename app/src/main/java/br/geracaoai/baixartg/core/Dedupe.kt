@@ -28,6 +28,8 @@ object Dedupe {
 
     /** Modo do último resultado: false = exato (mesmo arquivo), true = por imagem (miniatura + duração). */
     @Volatile var visual = false; private set
+    /** Último resultado é de FOTOS (modo fotos repetidas). */
+    @Volatile var photoMode = false; private set
     /** Caminho local da miniatura de cada mensagem (modo por imagem). */
     @Volatile var thumbs: Map<Long, String> = emptyMap(); private set
 
@@ -74,6 +76,7 @@ object Dedupe {
     // ---------------- análise ----------------
     fun analyze(includePhotos: Boolean, byImage: Boolean = false) {
         if (job?.isActive == true) return
+        photoMode = false
         if (byImage) { analyzeVisual(); return }
         visual = false; thumbs = emptyMap()
         job = scope.launch {
@@ -220,6 +223,131 @@ object Dedupe {
                 excluded.value = groups.flatMap { it.dels.toList() }.toSet()   // NADA marcado: você escolhe
                 phase.value = Phase.RESULT
                 status.value = if (gs.isEmpty()) "Nenhum repetido por imagem em ${fmtN(all.size)} vídeos." else "${fmtN(all.size)} vídeos analisados. Nada vem marcado: confira as miniaturas e marque o que for igual."
+            } catch (e: CancellationException) { phase.value = Phase.IDLE; status.value = "Análise cancelada."; throw e
+            } catch (e: Exception) { phase.value = Phase.ERROR; status.value = "Erro: ${e.message}" }
+        }
+    }
+
+    // ---------------- fotos repetidas ----------------
+    /**
+     * Fotos das Mensagens Salvas: iguais = mesmo arquivo (unique_id) ou mesmo tamanho + mesma resolução (certeza, já vêm marcadas);
+     * parecidas = miniatura (~320 px) com dHash E pHash próximos e mesma proporção (vêm desmarcadas, você confere).
+     * Baixa só miniaturas pequenas de quem tem candidata parecida. Fica sempre a de maior resolução/tamanho.
+     */
+    fun analyzePhotos() {
+        if (job?.isActive == true) return
+        photoMode = true; visual = true; thumbs = emptyMap()
+        job = scope.launch {
+            phase.value = Phase.SCANNING; scanned.value = 0; status.value = "Conectando ao Telegram…"
+            try {
+                if (!Td.awaitReady(60_000)) throw IllegalStateException("Telegram não conectado")
+                val chat = Uploader.savedChat()
+                estimate.value = try { Td.send(TdApi.GetChatMessageCount(chat, null, TdApi.SearchMessagesFilterPhoto(), false)).count } catch (e: Exception) { if (e is CancellationException) throw e; 0 }
+                val all = ArrayList<E>(maxOf(1000, estimate.value))
+                var from = 0L; var empty = 0
+                while (isActive) {
+                    val r = flood { Td.send(TdApi.GetChatHistory(chat, from, 0, 100, false)) }
+                    if (r.messages.isEmpty()) { if (++empty >= 3) break; delay(600); continue }
+                    empty = 0
+                    for (m in r.messages) {
+                        val c = m.content as? TdApi.MessagePhoto ?: continue
+                        val big = c.photo.sizes.maxByOrNull { it.width * it.height } ?: continue
+                        val small = c.photo.sizes.filter { minOf(it.width, it.height) >= 90 }.minByOrNull { it.width * it.height } ?: big
+                        val mh = hashBytes(c.photo.minithumbnail?.data)
+                        all += E(m.id, m.date, fsize(big.photo), 0, big.width, big.height, big.photo?.remote?.uniqueId ?: "", 2,
+                            (c.caption?.text ?: "").replace('\n', ' ').take(70), small.photo?.id ?: 0, mh?.d ?: 0, mh?.p ?: 0, mh != null)
+                    }
+                    from = r.messages.last().id
+                    scanned.value = all.size
+                    status.value = "Lendo fotos: ${fmtN(all.size)}" + (if (estimate.value > 0) " de ~${fmtN(estimate.value)}" else "")
+                }
+                // 1) idênticas (certeza)
+                val n = all.size
+                val parent = IntArray(n) { it }
+                fun find(x: Int): Int { var a = x; while (parent[a] != a) { parent[a] = parent[parent[a]]; a = parent[a] }; return a }
+                fun union(a: Int, b: Int) { val ra = find(a); val rb = find(b); if (ra != rb) parent[ra] = rb }
+                val byKey = HashMap<String, Int>()
+                for (i in 0 until n) {
+                    val e = all[i]
+                    if (e.uid.isNotBlank()) byKey.putIfAbsent("u:" + e.uid, i)?.let { union(i, it) }
+                    if (e.size > 0) byKey.putIfAbsent("s:${e.size}:${e.w}x${e.h}", i)?.let { union(i, it) }
+                }
+                val exact = HashMap<Int, MutableList<E>>(); for (i in 0 until n) exact.getOrPut(find(i)) { ArrayList(1) } += all[i]
+                // unidade = grupo idêntico (representado pela de maior qualidade)
+                val units = exact.values.map { l -> l.maxWith(QUALITY) to l }
+                fun ratio(e: E) = if (e.h > 0) e.w.toDouble() / e.h else 1.0
+                val us = units.sortedBy { ratio(it.first) }
+                // 2) candidatas parecidas pela minimiatura (prévia borrada que já vem na mensagem, sem baixar)
+                val cand = HashSet<Long>()
+                for ((k, l) in units) if (l.size > 1) l.forEach { cand += it.id }
+                for (i in us.indices) {
+                    val a = us[i].first; var j = i + 1
+                    while (j < us.size && ratio(us[j].first) <= ratio(a) * 1.04) {
+                        val b = us[j].first
+                        if (!a.miniOk || !b.miniOk || (VisualHash.ham(a.miniD, b.miniD) <= 14 && VisualHash.ham(a.miniP, b.miniP) <= 16)) { cand += a.id; cand += b.id }
+                        j++
+                    }
+                }
+                val list = all.filter { it.id in cand && it.thumbId != 0 }
+                val full = java.util.concurrent.ConcurrentHashMap<Long, H>()
+                val paths = java.util.concurrent.ConcurrentHashMap<Long, String>()
+                val done = java.util.concurrent.atomic.AtomicInteger(0)
+                val gate = kotlinx.coroutines.sync.Semaphore(3)
+                estimate.value = list.size; scanned.value = 0
+                coroutineScope {
+                    for (e in list) {
+                        gate.acquire()
+                        launch {
+                            try {
+                                val f = try { flood { Td.send(TdApi.DownloadFile(e.thumbId, 1, 0, 0, true)) } } catch (x: Exception) { if (x is CancellationException) throw x; null }
+                                val p = f?.local?.path?.takeIf { f.local.isDownloadingCompleted && it.isNotBlank() }
+                                if (p != null) { paths[e.id] = p; hashFile(p)?.let { full[e.id] = it } }
+                            } finally {
+                                gate.release()
+                                val k = done.incrementAndGet(); scanned.value = k
+                                status.value = "Comparando fotos: ${fmtN(k)} de ${fmtN(list.size)}"
+                            }
+                        }
+                        delay(30)
+                    }
+                }
+                status.value = "Agrupando…"
+                // 3) junta grupos idênticos que também são parecidos (cada um bate com TODOS os outros)
+                val used = HashSet<Long>()
+                val gs = ArrayList<G>(); val exactKeeps = HashSet<Long>()
+                for (i in us.indices) {
+                    val (a, al) = us[i]; if (a.id in used) continue
+                    val members = ArrayList<E>(al); var isExact = true
+                    val ha = full[a.id]
+                    if (ha != null) {
+                        val reps = arrayListOf(a)
+                        var j = i + 1
+                        while (j < us.size && ratio(us[j].first) <= ratio(a) * 1.04) {
+                            val (b, bl) = us[j]; val hb = full[b.id]
+                            if (b.id !in used && hb != null && VisualHash.aspectOk(a.w, a.h, b.w, b.h) && reps.all { m -> full[m.id]?.let { near(it, hb, VD) } == true }) {
+                                reps += b; members += bl; isExact = false
+                            }
+                            j++
+                        }
+                        if (!isExact) reps.forEach { used += it.id }
+                    }
+                    members.forEach { used += it.id }
+                    if (members.size < 2) continue
+                    val keep = members.maxWith(QUALITY)
+                    val sure = isExact || members.all { m -> m === keep || (full[m.id] != null && full[keep.id] != null && near(full[m.id]!!, full[keep.id]!!, VSURE)) }
+                    gs += G(keep.id, members.filter { it !== keep }.map { it.id }.toLongArray(), sure)
+                    if (isExact) exactKeeps += keep.id
+                }
+                val byId = all.associateBy { it.id }
+                val ids = HashSet<Long>(); gs.forEach { g -> ids += g.keep; g.dels.forEach { ids += it } }
+                info = ids.mapNotNull { byId[it] }.associateBy { it.id }
+                thumbs = paths.filterKeys { it in ids }
+                groups = gs.sortedWith(compareByDescending<G> { it.keep in exactKeeps }.thenByDescending { it.sure }.thenByDescending { it.dels.size })
+                // idênticas já vêm marcadas; parecidas vêm desmarcadas
+                excluded.value = gs.filter { it.keep !in exactKeeps }.flatMap { it.dels.toList() }.toSet()
+                phase.value = Phase.RESULT
+                status.value = if (gs.isEmpty()) "Nenhuma foto repetida em ${fmtN(all.size)} fotos."
+                    else "${fmtN(all.size)} fotos analisadas. As idênticas já vêm marcadas; as só parecidas, confira e marque."
             } catch (e: CancellationException) { phase.value = Phase.IDLE; status.value = "Análise cancelada."; throw e
             } catch (e: Exception) { phase.value = Phase.ERROR; status.value = "Erro: ${e.message}" }
         }
