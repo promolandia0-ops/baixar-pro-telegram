@@ -322,6 +322,7 @@ object JsRender {
         try { s.userAgentString = Net.userAgent } catch (_: Exception) {}
         wv.isFocusable = false
         wv.isClickable = false
+        Quiet.hidden(wv)
         if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
             try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(wv, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
         }

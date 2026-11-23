@@ -248,6 +248,7 @@ object BrowserMseDownloader {
             withContext(Dispatchers.Main) {
                 val act = JsRender.hostActivity()
                 val wv = WebView(act ?: ctx)
+                Quiet.hidden(wv)
                 webView = wv
                 val s = wv.settings
                 s.javaScriptEnabled = true

@@ -390,6 +390,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             // rolagem mais lisa: pré-rasteriza fora da tela e reaproveita o cache
             try { settings.offscreenPreRaster = true } catch (_: Exception) {}
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
+            try { settings.setNeedInitialFocus(false) } catch (_: Exception) {}
             CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
