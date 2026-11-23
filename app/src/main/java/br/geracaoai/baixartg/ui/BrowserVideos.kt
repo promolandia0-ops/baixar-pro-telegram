@@ -250,7 +250,7 @@ object BrowserDetect {
     private fun busy(d: Int) { scope.launch(Dispatchers.Main) { photoBusy.intValue = (photoBusy.intValue + d).coerceAtLeast(0) } }
     /** Quando a página atual começou a abrir (para o "Procurando…" ter fim). */
     val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
-    fun newPage() { BrowserLoadMore.stop(); alreadyHere.intValue = 0; suppressed.clear(); pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
+    fun newPage() { if (!BrowserLoadMore.navigating) BrowserLoadMore.stop(); alreadyHere.intValue = 0; suppressed.clear(); pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(10)
     /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
@@ -774,6 +774,8 @@ object BrowserLoadMore {
     val pageNum = mutableIntStateOf(1)
     val round = mutableIntStateOf(0)
     val status = mutableStateOf("")
+    /** Verdadeiro enquanto o próprio navegador troca de página (não é para parar a rotina). */
+    @Volatile var navigating = false
 
     fun stop() {
         running.value = false
@@ -838,45 +840,63 @@ object BrowserLoadMore {
                     if (noNew >= LoadMore.MAX_NO_NEW_ROUNDS) break
                 }
 
-                if (running.value && System.currentTimeMillis() - startAt < LoadMore.MAX_DURATION_MS) {
-                    val seeds = readPaginationSeeds(web, startUrl)
-                    if (seeds.isNotEmpty()) {
-                        LoadMore.runPagination(
-                            startUrl = startUrl,
-                            seedUrls = seeds,
-                            maxPages = Prefs.loadAllMaxPages,
-                            isStopped = { !running.value || System.currentTimeMillis() - startAt >= LoadMore.MAX_DURATION_MS },
-                            itemCount = { BrowserDetect.totalDetectedCount() },
-                            fetchHtml = { u, ref -> PageResolver.fetch(u, ref) },
-                            renderHtml = { u ->
-                                if (JsRender.available()) {
-                                    val js = JsRender.listing(u, 20_000)
-                                    js?.html to js?.collected
-                                } else null to null
-                            },
-                            collectPage = { u, html, preCol ->
-                                val before = BrowserDetect.seenItemsCount()
-                                val col = preCol ?: BrowserDetect.staticCollectPage(u, html)
-                                if (col != null && (col.anchors.isNotEmpty() || col.videos.isNotEmpty())) {
-                                    withContext(Dispatchers.Main) {
-                                        BrowserDetect.onCollected(u, col, background = true, autoFollow = false)
-                                    }
-                                    delay(150)
-                                }
-                                (BrowserDetect.seenItemsCount() - before).coerceAtLeast(0)
-                            },
-                            onProgress = { pg, tot ->
-                                pageNum.intValue = pg
-                                status.value = "página $pg • $tot vídeos"
-                            },
-                        )
-                    }
-                }
+                if (running.value) walkPages(web)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
             } finally {
                 running.value = false
             }
+        }
+    }
+
+    /** Anda pelas páginas na própria aba: coleta a página, vai para a próxima e repete até acabar (ou parar). */
+    private suspend fun walkPages(web: android.webkit.WebView) {
+        val seen = HashSet<String>()
+        var empty = 0
+        var pg = 1
+        val limit = Prefs.loadAllMaxPages.coerceIn(1, 100)
+        try {
+            while (running.value) {
+                val cur = withContext(Dispatchers.Main) { web.url.orEmpty() }.substringBefore('#')
+                seen += cur
+                val before = BrowserDetect.seenItemsCount()
+                collectFullNow(web)
+                delay(1_200L)
+                val gained = BrowserDetect.seenItemsCount() - before
+                empty = if (gained > 0) 0 else empty + 1
+                status.value = "página $pg • ${BrowserDetect.totalDetectedCount()} vídeos"
+                val next = readPaginationSeeds(web, cur).map { it.substringBefore('#') }.firstOrNull { it !in seen }
+                if (next == null || empty >= 2 || pg >= limit || !running.value) break
+                pg++
+                pageNum.intValue = pg
+                navigating = true
+                withContext(Dispatchers.Main) { web.loadUrl(next) }
+                waitPageLoaded(web)
+                navigating = false
+                delay(1_000L)
+            }
+        } finally { navigating = false }
+    }
+
+    private suspend fun waitPageLoaded(web: android.webkit.WebView) {
+        delay(800L)
+        val end = System.currentTimeMillis() + 20_000L
+        while (running.value && System.currentTimeMillis() < end) {
+            val p = withContext(Dispatchers.Main) { web.progress }
+            if (p >= 100) break
+            delay(250L)
+        }
+        delay(1_200L)
+    }
+
+    /** Coleta completa da página aberta (todos os cards visíveis, não só o que mudou). */
+    private suspend fun collectFullNow(web: android.webkit.WebView) {
+        val page = withContext(Dispatchers.Main) { web.url.orEmpty() }
+        if (!page.startsWith("http", true)) return
+        val raw = evalMain(web, JsScripts.COLLECT) ?: return
+        val col = JsScripts.parseCollected(raw) ?: return
+        withContext(Dispatchers.Main) {
+            try { BrowserDetect.onCollected(page, col, background = false, autoFollow = false) } catch (_: Exception) {}
         }
     }
 

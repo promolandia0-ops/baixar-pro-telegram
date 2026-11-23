@@ -290,10 +290,9 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         }
     }, bottomBar = {
         Surface(tonalElevation = 2.dp) {
-            Row(
-                Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 6.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 val countLabel = when {
                     loadAllOn -> if (loadAllPg > 1) "pág $loadAllPg • $detected" else "$detected vídeos…"
@@ -304,80 +303,88 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     searching -> "Procurando…"
                     else -> "0 vídeos"
                 }
-                OutlinedButton(
-                    onClick = { scheduleCollect(0) },
-                    modifier = Modifier.height(34.dp),
-                    enabled = current.startsWith("http"),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                ) {
-                    Icon(Icons.Rounded.Search, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Procurar", style = MaterialTheme.typography.labelMedium)
-                }
-                FilledTonalButton(
-                    onClick = { sheet = true },
-                    modifier = Modifier.weight(1f).height(34.dp),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                ) {
-                    if (searching || loadAllOn || pendingN > 0) {
-                        CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
-                    } else {
-                        Icon(Icons.Rounded.VideoLibrary, null, Modifier.size(16.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    FilledTonalButton(
+                        onClick = { sheet = true },
+                        modifier = Modifier.weight(1f).height(38.dp),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                    ) {
+                        if (searching || loadAllOn || pendingN > 0) {
+                            CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
+                        } else {
+                            Icon(Icons.Rounded.VideoLibrary, null, Modifier.size(16.dp))
+                        }
+                        Spacer(Modifier.width(5.dp))
+                        Text(countLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
                     }
-                    Spacer(Modifier.width(5.dp))
-                    Text(countLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
-                }
-                OutlinedButton(
-                    onClick = { if (loadAllOn) BrowserLoadMore.stop() else BrowserLoadMore.start(web) },
-                    modifier = Modifier.height(34.dp),
-                    enabled = current.startsWith("http"),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                ) {
-                    Icon(if (loadAllOn) Icons.Rounded.Stop else Icons.Rounded.UnfoldMore, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text(if (loadAllOn) "Parar" else "Carregar tudo", maxLines = 1, style = MaterialTheme.typography.labelMedium)
-                }
-                FilledTonalButton(
-                    onClick = { ask = true },
-                    modifier = Modifier.height(34.dp),
-                    enabled = current.startsWith("http"),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
-                ) {
-                    Icon(Icons.Rounded.Download, null, Modifier.size(16.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Usar", maxLines = 1, style = MaterialTheme.typography.labelMedium)
-                }
-                Box {
-                    IconButton({ moreMenu = true }, Modifier.size(36.dp)) {
-                        Icon(Icons.Rounded.MoreVert, "Mais opções", Modifier.size(20.dp))
+                    Box {
+                        IconButton({ moreMenu = true }, Modifier.size(38.dp)) {
+                            Icon(Icons.Rounded.MoreVert, "Mais opções", Modifier.size(20.dp))
+                        }
+                        DropdownMenu(moreMenu, { moreMenu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Analisar este site") },
+                                leadingIcon = { Icon(Icons.Rounded.BugReport, null) },
+                                enabled = current.startsWith("http"),
+                                onClick = { moreMenu = false; analyze = true },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Usar esta página no app") },
+                                leadingIcon = { Icon(Icons.Rounded.Download, null) },
+                                enabled = current.startsWith("http"),
+                                onClick = { moreMenu = false; ask = true },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(if (loadAllOn) "Parar carregamento" else "Carregar tudo (ver mais / páginas)") },
+                                leadingIcon = { Icon(if (loadAllOn) Icons.Rounded.Stop else Icons.Rounded.UnfoldMore, null) },
+                                enabled = current.startsWith("http") || loadAllOn,
+                                onClick = { moreMenu = false; if (loadAllOn) BrowserLoadMore.stop() else BrowserLoadMore.start(web) },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Sobre cookies (sessão)") },
+                                leadingIcon = { Icon(Icons.Rounded.Lock, null) },
+                                onClick = {
+                                    moreMenu = false
+                                    android.widget.Toast.makeText(ctx, "O app usa só os cookies desta sessão; sua senha nunca é lida nem guardada.", android.widget.Toast.LENGTH_LONG).show()
+                                },
+                            )
+                        }
                     }
-                    DropdownMenu(moreMenu, { moreMenu = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Analisar este site") },
-                            leadingIcon = { Icon(Icons.Rounded.BugReport, null) },
-                            enabled = current.startsWith("http"),
-                            onClick = { moreMenu = false; analyze = true },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Usar esta página no app") },
-                            leadingIcon = { Icon(Icons.Rounded.Download, null) },
-                            enabled = current.startsWith("http"),
-                            onClick = { moreMenu = false; ask = true },
-                        )
-                        DropdownMenuItem(
-                            text = { Text(if (loadAllOn) "Parar carregamento" else "Carregar tudo (ver mais / páginas)") },
-                            leadingIcon = { Icon(if (loadAllOn) Icons.Rounded.Stop else Icons.Rounded.UnfoldMore, null) },
-                            enabled = current.startsWith("http"),
-                            onClick = { moreMenu = false; if (loadAllOn) BrowserLoadMore.stop() else BrowserLoadMore.start(web) },
-                        )
-                        DropdownMenuItem(
-                            text = { Text("Sobre cookies (sessão)") },
-                            leadingIcon = { Icon(Icons.Rounded.Lock, null) },
-                            onClick = {
-                                moreMenu = false
-                                android.widget.Toast.makeText(ctx, "O app usa só os cookies desta sessão; sua senha nunca é lida nem guardada.", android.widget.Toast.LENGTH_LONG).show()
-                            },
-                        )
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    OutlinedButton(
+                        onClick = {
+                            // procura de novo na página inteira (e não só no que mudou desde a última vez)
+                            BrowserDetect.fullCollect = true
+                            scheduleCollect(0)
+                        },
+                        modifier = Modifier.weight(1f).height(38.dp),
+                        enabled = current.startsWith("http"),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    ) {
+                        Icon(Icons.Rounded.Search, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Procurar", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                    }
+                    OutlinedButton(
+                        onClick = { if (loadAllOn) BrowserLoadMore.stop() else BrowserLoadMore.start(web) },
+                        modifier = Modifier.weight(1f).height(38.dp),
+                        enabled = current.startsWith("http") || loadAllOn,
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    ) {
+                        Icon(if (loadAllOn) Icons.Rounded.Stop else Icons.Rounded.UnfoldMore, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text(if (loadAllOn) "Parar" else "Carregar tudo", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                    }
+                    FilledTonalButton(
+                        onClick = { ask = true },
+                        modifier = Modifier.weight(1f).height(38.dp),
+                        enabled = current.startsWith("http"),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    ) {
+                        Icon(Icons.Rounded.Download, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Usar", maxLines = 1, style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
