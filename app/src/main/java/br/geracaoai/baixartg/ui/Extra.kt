@@ -387,6 +387,9 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.databaseEnabled = true
             settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(true)
             settings.userAgentString = Net.userAgent
+            // rolagem mais lisa: pré-rasteriza fora da tela e reaproveita o cache
+            try { settings.offscreenPreRaster = true } catch (_: Exception) {}
+            settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
             if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
