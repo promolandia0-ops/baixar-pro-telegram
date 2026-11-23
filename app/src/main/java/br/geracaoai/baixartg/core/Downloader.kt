@@ -51,10 +51,10 @@ object Downloader {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
             }
-            Kind.PHOTO -> try { retry { photo(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
+            Kind.PHOTO -> try { retry { photo(f.url, ref, dir, f.title, progress, pageUrl = f.page) } } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
                 val fb = PhotoGrab.fallback(f.url) ?: throw e
-                photo(fb, ref, dir, f.title, progress)
+                photo(fb, ref, dir, f.title, progress, pageUrl = f.page)
             }
             // stream falhou: tenta a página pelo servidor yt-dlp (antes o item falhava direto)
             Kind.HLS -> try { hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight) } catch (e: Exception) {
@@ -147,11 +147,24 @@ object Downloader {
     }
 
     /** Foto: bytes originais, com cookies/UA do navegador e Referer da página; confere pelo conteúdo que é imagem e acerta a extensão. */
-    suspend fun photo(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
+    suspend fun photo(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, pageUrl: String = ""): File {
+        val resolved = PhotoResolve.resolveAndFetch(
+            url = url,
+            pageUrl = pageUrl,
+            referer = referer,
+            fetchHtml = { u, ref -> PageResolver.fetch(u, ref) },
+            fetchBytes = { u, ref -> fetchPhotoBytes(u, ref) }
+        )
+        if (resolved != null) {
+            val out = File(dir, safe(title) + "_" + System.nanoTime() + "." + resolved.ext)
+            kotlinx.coroutines.withContext(Dispatchers.IO) { out.writeBytes(resolved.bytes) }
+            progress(resolved.bytes.size.toLong(), resolved.bytes.size.toLong())
+            return out
+        }
         val first = photoOnce(url, referer, dir, title, progress)
         val long = photoLongSide(first)
         if (long in 1 until 400) {
-            val alts = listOfNotNull(PhotoGrab.upgradeStrong(url), PhotoGrab.fallback(url)).distinct().filter { it != url }
+            val alts = (PhotoGrab.upgradeVariants(url) + listOfNotNull(PhotoGrab.fallback(url))).distinct().filter { it != url }
             for (alt in alts) {
                 try {
                     val second = photoOnce(alt, referer, dir, title, progress)
@@ -161,6 +174,21 @@ object Downloader {
             }
         }
         return first
+    }
+    private suspend fun fetchPhotoBytes(url: String, referer: String?): ByteArray? = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val rq = req(url, referer).newBuilder().header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8").build()
+        try {
+            Net.http.newCall(rq).await().use { r ->
+                if (!r.isSuccessful) return@withContext null
+                val ct = r.header("Content-Type").orEmpty()
+                if (ct.contains("text/html", true)) return@withContext null
+                val bytes = r.body?.bytes() ?: return@withContext null
+                if (PhotoGrab.imageExt(bytes) == null) null else bytes
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            null
+        }
     }
     fun photoLongSide(file: File): Int = try {
         val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }

@@ -334,13 +334,12 @@ object Pipeline {
         if (!::app.isInitialized && !testMode) return
         if (engine?.isActive == true) return
         if (items.value.none { it.st in WORK }) return
-        // nenhum motor rodando: o que ficou "abrindo página"/baixando/enviando volta para a etapa anterior
+        // nenhum motor rodando: qualquer item ativo volta para a fila única (sem camada separada em segundo plano)
         synchronized(lock) {
             items.value = items.value.map {
                 when (it.st) {
-                    PS.RESOLVING -> it.copy(st = PS.WAIT, msg = "", prog = 0f, speed = 0)
-                    PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, speed = 0)
-                    PS.ANALYZING -> it.copy(st = PS.ANALYZE, msg = it.msg, prog = 0f, speed = 0)
+                    PS.RESOLVING, PS.DOWN, PS.UP, PS.ANALYZE, PS.ANALYZING ->
+                        it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, speed = 0)
                     else -> it
                 }
             }
@@ -354,22 +353,26 @@ object Pipeline {
             beat.clear(); itemJobs.clear()
             try {
                 coroutineScope {
-                    // baixados esperando envio: no máximo nDown (protege o armazenamento); downloads correm na frente do envio
                     val nDown = if (testMode) testParDown.coerceIn(1, 10) else try { Prefs.parDown.coerceIn(1, 10) } catch (_: Exception) { 10 }
                     val nUp = if (testMode) testParUp.coerceIn(1, 5) else try { Prefs.parUp.coerceIn(1, 5) } catch (_: Exception) { 5 }
                     val ready = Channel<Pair<PItem, File>>(nDown)
-                    val resolvers = List(nDown) { n -> launch { if (!testMode) delay(n * OPEN_GAP); resolverLoop() } }
-                    val downs = List(nDown) { launch { downloaderLoop(dir, ready) } }
-                    // Em análise: pool próprio (2), nunca ocupa vaga de download/envio da fila principal
-                    val analyzers = List(2) { launch { analyzeLoop(dir, ready) } }
-                    launch { downs.joinAll(); analyzers.joinAll(); ready.close() }
-                    repeat(nUp) { launch { for ((t, f) in ready) uploadOne(t, f) } }
-                    launch { watchdog() }.also { w -> launch { resolvers.joinAll(); downs.joinAll(); analyzers.joinAll(); w.cancel() } }
+                    // fluxo unificado: cada vaga (até 10 em paralelo) resolve e baixa o mesmo item junto + 5 envios em paralelo
+                    val workers = List(nDown) { n -> launch { if (!testMode && n > 0) delay(n * 120L); workerLoop(dir, ready) } }
+                    val uploaders = List(nUp) { launch { for ((t, f) in ready) uploadOne(t, f) } }
+                    val watch = launch { watchdog() }
+                    workers.joinAll()
+                    ready.close()
+                    uploaders.joinAll()
+                    watch.cancel()
                 }
-            } catch (e: Throwable) {   // qualquer erro (não só cancelar): nada fica preso em "abrindo página"
+            } catch (e: Throwable) {
                 synchronized(lock) {
                     items.value = items.value.map {
-                        when (it.st) { PS.RESOLVING -> it.copy(st = PS.WAIT, prog = 0f, msg = "", speed = 0); PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, prog = 0f, msg = "", speed = 0); PS.ANALYZING -> it.copy(st = PS.ANALYZE, prog = 0f, speed = 0); else -> it }
+                        when (it.st) {
+                            PS.RESOLVING, PS.DOWN, PS.UP, PS.ANALYZE, PS.ANALYZING ->
+                                it.copy(st = if (it.f != null) PS.READY else PS.WAIT, prog = 0f, msg = "", speed = 0)
+                            else -> it
+                        }
                     }
                 }
             } finally {
@@ -396,51 +399,6 @@ object Pipeline {
     }
     private class StallException : CancellationException("travou")
 
-    private suspend fun resolverLoop() {
-        while (true) {
-            val t = claim({ it.st == PS.WAIT && it.f == null }, PS.RESOLVING)
-            if (t == null) {
-                // fica de prontidão enquanto a fila tiver qualquer coisa ativa: itens novos (Baixar de novo) entram sem reiniciar nada
-                if (items.value.none { it.st in WORK }) return
-                delay(1_000); continue
-            }
-            // foto (ou link que já é a imagem): baixa direto do endereço, nunca abre página
-            if (t.photo) {
-                upd(t.id) { it.copy(f = Found(t.page, t.page, it.title, Kind.PHOTO, ref = t.page, extra = it.extra), photo = true, st = PS.READY, msg = "") }
-                beat.remove(t.id); continue
-            }
-            var f: Found? = null
-            var stalledOut = false
-            for (attempt in 0..1) {
-                if (attempt > 0) { upd(t.id) { it.copy(msg = "Tentando de novo…") }; delay(2_000) }
-                alive(t.id)
-                // prazo duro: roda à parte e o resolvedor não espera além do prazo (mesmo se algo lá dentro não parar)
-                val job = scope.async { testResolve?.invoke(t) ?: PageResolver.resolveFull(t.page, t.title, t.extra) }
-                itemJobs[t.id] = job
-                f = try { withTimeoutOrNull(RESOLVE_TIMEOUT) { job.await() } }
-                    catch (e: CancellationException) { currentCoroutineContext().ensureActive(); stalledOut = true; null }
-                    catch (e: Exception) { null }
-                    finally { itemJobs.remove(t.id); if (job.isActive) job.cancel() }
-                if (f != null || stalledOut) break
-            }
-            beat.remove(t.id)
-            if (f == null && stalledOut) {
-                var toRelease: PItem? = null
-                upd(t.id) { cur ->
-                    val n = cur.stalls + 1
-                    if (n >= 3) cur.copy(st = PS.ANALYZE, msg = "Não abriu a página (tempo esgotado). Tentando de outro jeito…", stalls = n, tried = markTried(cur.tried, "resolve")).also { toRelease = it }
-                    else cur.copy(st = PS.WAIT, msg = "Travou ao abrir a página, tentando de novo…", stalls = n)
-                }
-                toRelease?.let { releaseQueue(it) }
-            } else if (f == null) {
-                var toRelease: PItem? = null
-                upd(t.id) { it.copy(st = PS.ANALYZE, msg = "Não consegui carregar o vídeo desta página. Tentando de outro jeito…", tried = markTried(it.tried, "resolve")).also { n -> toRelease = n } }
-                toRelease?.let { releaseQueue(it) }
-            } else upd(t.id) { it.copy(f = f, title = TitleFix.pick(f.title, it.title).ifBlank { it.title }, st = PS.READY, msg = "") }
-            delay(OPEN_GAP)   // devagar com o site
-        }
-    }
-
     private val claimed = HashSet<String>()
     private fun isPhoto(t: PItem) = t.photo || t.f?.kind == Kind.PHOTO
     /** Fotos: só a chave exata da foto (antes as chaves de vídeo — pasta/nome do arquivo — marcavam fotos diferentes como "repetido"). */
@@ -448,42 +406,102 @@ object Pipeline {
         else (Jobs.sendKeys(t.f!!, t.keys) + MediaIdentity.keys(t.f)).toHashSet()
     private fun sentBefore(t: PItem): Boolean = if (isPhoto(t)) Sent.anySent(sentKeys(t)) else Jobs.alreadySent(t.f!!, sentKeys(t).toList())
 
-    private suspend fun downloaderLoop(dir: File, ready: Channel<Pair<PItem, File>>) {
+    /**
+     * Slot único (até 10 em paralelo): resolve (se ainda não tiver mídia) e baixa no mesmo item/slot,
+     * sem camada separada em segundo plano e sem prender vaga em loop.
+     */
+    private suspend fun workerLoop(dir: File, ready: Channel<Pair<PItem, File>>) {
         while (true) {
-            val t = claim({ it.st == PS.READY && it.f != null }, PS.DOWN)
-            if (t == null) {
-                if (items.value.none { it.st in WORK }) return
-                delay(500); continue
+            val t0 = claim({ it.st == PS.WAIT || it.st == PS.READY || it.st == PS.ANALYZE }, PS.DOWN)
+            if (t0 == null) {
+                if (items.value.none { it.st in ACTIVE || it.st == PS.ANALYZE || it.st == PS.ANALYZING }) return
+                delay(400); continue
             }
-            if (t.id in userCancel || t.st == PS.CANCEL) { markCancelled(t); continue }
-            val f = t.f!!
-            if (!t.force && sentBefore(t)) { upd(t.id) { it.copy(st = PS.SKIP, msg = "já enviado antes (pulado)", prog = 0f) }; continue }
-            val ks = claimKeys(t)
-            val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
-            if (dup) { upd(t.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }; continue }
-            val job = scope.async { downloadOne(t, dir) }
-            itemJobs[t.id] = job
-            val file = try { job.await() } catch (e: CancellationException) {
-                if (job.isActive) job.cancel()
-                withTimeoutOrNull(JOB_GIVE_UP) { try { job.join() } catch (_: Exception) {} }
-                when {
-                    t.id in userCancel || e is UserCancelException -> { markCancelled(t, ks); null }
-                    e is StallException || e.cause is StallException -> { toAnalyze(t, ks, "download travado (sem progresso). Foi pra análise."); null }
-                    else -> { currentCoroutineContext().ensureActive(); markCancelled(t, ks); throw e }
+            if (t0.id in userCancel || t0.st == PS.CANCEL) { markCancelled(t0); continue }
+
+            val cur = if (t0.f != null) t0 else {
+                if (t0.photo) {
+                    val pf = Found(t0.page, t0.page, t0.title, Kind.PHOTO, ref = t0.page, extra = t0.extra)
+                    upd(t0.id) { it.copy(f = pf, photo = true, st = PS.DOWN, msg = "preparando foto…") }
+                    t0.copy(f = pf, photo = true, st = PS.DOWN)
+                } else {
+                    upd(t0.id, persist = false) { it.copy(st = PS.RESOLVING, msg = "abrindo página…") }
+                    alive(t0.id)
+                    val rJob = scope.async { val tr = testResolve; if (tr != null) tr(t0) else PageResolver.resolveFull(t0.page, t0.title, t0.extra) }
+                    itemJobs[t0.id] = rJob
+                    var stalled = false
+                    val resolved = try {
+                        withTimeoutOrNull(RESOLVE_TIMEOUT) { rJob.await() } ?: run { stalled = true; null }
+                    } catch (e: CancellationException) {
+                        if (rJob.isActive) rJob.cancel()
+                        if (t0.id in userCancel || e is UserCancelException) { markCancelled(t0); null }
+                        else if (e is StallException || e.cause is StallException) { stalled = true; null }
+                        else throw e
+                    } catch (_: Exception) {
+                        null
+                    } finally {
+                        itemJobs.remove(t0.id)
+                        if (rJob.isActive) rJob.cancel()
+                        beat.remove(t0.id)
+                    }
+                    if (t0.id in userCancel) { markCancelled(t0); continue }
+                    if (resolved == null) {
+                        val msg = if (stalled) "Tempo esgotado ao abrir a página. Toque em Reenviar."
+                        else "Não consegui carregar o vídeo desta página. Toque em Reenviar."
+                        markFailed(t0, emptySet(), msg)
+                        continue
+                    }
+                    val nt = TitleFix.pick(resolved.title, t0.title).ifBlank { t0.title }
+                    upd(t0.id) { it.copy(f = resolved, title = nt, st = PS.DOWN, msg = "") }
+                    t0.copy(f = resolved, title = nt, st = PS.DOWN)
                 }
-            } finally { itemJobs.remove(t.id); beat.remove(t.id) }
-            if (file == null) { synchronized(claimed) { claimed.removeAll(ks) }; continue }
-            ready.send(t to file)
+            }
+
+            if (cur.id in userCancel) { markCancelled(cur); continue }
+            val f = cur.f!!
+            if (!cur.force && sentBefore(cur)) {
+                upd(cur.id) { it.copy(st = PS.SKIP, msg = "já enviado antes (pulado)", prog = 0f) }
+                continue
+            }
+            val ks = claimKeys(cur)
+            val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
+            if (dup) {
+                upd(cur.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }
+                continue
+            }
+
+            // 2) Baixa no mesmo slot; o vigia de travamento só conta após chegar progresso real (prog())
+            beat.remove(cur.id)
+            val dJob = scope.async { downloadOne(cur, dir) }
+            itemJobs[cur.id] = dJob
+            val file = try {
+                dJob.await()
+            } catch (e: CancellationException) {
+                if (dJob.isActive) dJob.cancel()
+                withTimeoutOrNull(JOB_GIVE_UP) { try { dJob.join() } catch (_: Exception) {} }
+                when {
+                    cur.id in userCancel || e is UserCancelException -> { markCancelled(cur, ks); null }
+                    e is StallException || e.cause is StallException -> { markFailed(cur, ks, "Download travou (sem progresso). Toque em Reenviar."); null }
+                    else -> { currentCoroutineContext().ensureActive(); markCancelled(cur, ks); throw e }
+                }
+            } finally {
+                itemJobs.remove(cur.id)
+                beat.remove(cur.id)
+            }
+            if (file == null) {
+                synchronized(claimed) { claimed.removeAll(ks) }
+                continue
+            }
+            ready.send((items.value.firstOrNull { it.id == cur.id } ?: cur) to file)
         }
     }
 
-    /** Item travado ou que falhou: sai da vaga principal e vai pra Em análise (os outros seguem). */
-    private fun toAnalyze(t: PItem, ks: Set<String>, msg: String) {
-        synchronized(claimed) { claimed.removeAll(ks) }
+    private fun markFailed(t: PItem, ks: Set<String>, msg: String) {
+        if (ks.isNotEmpty()) synchronized(claimed) { claimed.removeAll(ks) }
         var toRelease: PItem? = null
         upd(t.id) { cur ->
             if (cur.st == PS.CANCEL || cur.id in userCancel) cur
-            else cur.copy(st = PS.ANALYZE, msg = msg.take(180), prog = 0f, speed = 0, stalls = cur.stalls + 1).also { toRelease = it }
+            else cur.copy(st = PS.FAIL, msg = msg.take(180), prog = 0f, speed = 0, stalls = cur.stalls + 1).also { toRelease = it }
         }
         toRelease?.let { releaseQueue(it) }
     }
@@ -496,7 +514,7 @@ object Pipeline {
     }
     private fun stalled(t: PItem, ks: Set<String>, stage: String) {
         if (t.id in userCancel) { markCancelled(t, ks); return }
-        toAnalyze(t, ks, "Travou no $stage (sem progresso). Foi pra análise, a fila segue.")
+        markFailed(t, ks, "Travou no $stage (sem progresso). Toque em Reenviar.")
     }
 
     private fun markTried(prev: String, step: String): String =
@@ -504,7 +522,7 @@ object Pipeline {
 
     private fun hasTried(tried: String, step: String) = tried.split(',').any { it == step }
 
-    private suspend fun downloadOne(t: PItem, dir: File, fromAnalyze: Boolean = false): File? {
+    private suspend fun downloadOne(t: PItem, dir: File): File? {
         testDownload?.let { fn -> return fn(t, dir) }
         var f = t.f!!
         var file: File? = null
@@ -539,14 +557,14 @@ object Pipeline {
         }
         try {
             val steps = ArrayList<Pair<String, suspend () -> File>>()
-            val playHit = PlayCapture.bestFor(f)
-            if (playHit != null && (!fromAnalyze || !hasTried(tried, "play"))) steps += "play" to {
+            val playHit = if (f.kind != Kind.PHOTO) PlayCapture.bestFor(f) else null
+            if (playHit != null) steps += "play" to {
                 Downloader.download(PlayCapture.toFound(f, playHit), dir, Prefs.server, 0, fast = true, prog())
             }
-            if (!fromAnalyze || !hasTried(tried, "direct")) steps += "direct" to { Downloader.download(f, dir, Prefs.server, 0, fast = true, prog()) }
-            if ((!fromAnalyze || !hasTried(tried, "server")) && f.page.isNotBlank() && !Extract.isVideoUrl(f.page))
+            steps += "direct" to { Downloader.download(f, dir, Prefs.server, 0, fast = true, prog()) }
+            if (f.kind != Kind.PHOTO && f.page.isNotBlank() && !Extract.isVideoUrl(f.page))
                 steps += "server" to { Downloader.viaServer(f.page, dir, Prefs.server, prog()) }
-            if ((!fromAnalyze || !hasTried(tried, "hls")) && (f.kind == Kind.DIRECT || f.url.contains(".m3u8", true) || f.url.contains(".mpd", true) || f.url.contains("video.twimg.com", true)))
+            if (f.kind != Kind.PHOTO && (f.kind == Kind.DIRECT || f.url.contains(".m3u8", true) || f.url.contains(".mpd", true) || f.url.contains("video.twimg.com", true)))
                 steps += "hls" to {
                     if (f.url.contains(".m3u8", true) || f.kind == Kind.HLS) Downloader.hls(f.url, f.ref ?: f.page, dir, t.title, prog(), maxHeight = 0)
                     else Downloader.download(f.copy(kind = Kind.HLS), dir, Prefs.server, 0, fast = true, prog())
@@ -554,33 +572,23 @@ object Pipeline {
             for ((name, fn) in steps) {
                 currentCoroutineContext().ensureActive()
                 tried = markTried(tried, name)
-                upd(t.id, persist = false) { it.copy(tried = tried, msg = "tentando $name…") }
+                upd(t.id, persist = false) { it.copy(tried = tried, msg = if (f.kind == Kind.PHOTO) "baixando foto…" else "baixando ($name)…") }
                 try { file = finish(fn()); lastErr = null; break } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { lastErr = e; file?.delete(); file = null }
             }
-            if (file == null && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && !hasTried(tried, "resolve")) {
+            if (file == null && f.kind != Kind.PHOTO && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && !hasTried(tried, "resolve")) {
                 tried = markTried(tried, "resolve")
-                upd(t.id, persist = false) { it.copy(tried = tried, msg = "tentando abrir a página de outro jeito…") }
-                val nf = withTimeoutOrNull(90_000) { PageResolver.resolveFull(f.page, t.title, t.extra) }
+                upd(t.id, persist = false) { it.copy(tried = tried, msg = "reabrindo página…") }
+                val nf = withTimeoutOrNull(60_000) { PageResolver.resolveFull(f.page, t.title, t.extra) }
                 if (nf != null) {
                     f = nf
                     upd(t.id) { it.copy(f = nf, title = TitleFix.pick(nf.title, it.title).ifBlank { it.title }, tried = tried) }
                     try { file = finish(Downloader.download(nf, dir, Prefs.server, 0, fast = true, prog())) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
                 }
             }
-            if (file == null && fromAnalyze && (hasTried(tried, "direct") && hasTried(tried, "server") || hasTried(tried, "resolve")) && hasTried(tried, "direct")) {
-                tried = markTried(tried, "done")
-                val msg = (lastErr?.message?.take(160) ?: "Erro ao baixar") + " — em análise: nenhum jeito funcionou ainda. Toque em Reenviar."
-                var toRelease: PItem? = null
-                upd(t.id) { it.copy(st = PS.ANALYZE, msg = msg, speed = 0, tried = tried).also { n -> toRelease = n } }
-                toRelease?.let { releaseQueue(it) }
-                return null
-            }
             if (file == null) {
-                val msg = (lastErr?.message?.take(160) ?: "Erro ao baixar") + " — em análise, tentando outro jeito"
-                var toRelease: PItem? = null
-                upd(t.id) { it.copy(st = PS.ANALYZE, msg = msg, speed = 0, tried = tried).also { n -> toRelease = n } }
-                toRelease?.let { releaseQueue(it) }
+                val msg = (lastErr?.message?.take(160) ?: "Erro ao baixar") + ". Toque em Reenviar."
+                markFailed(t, emptySet(), msg)
                 return null
             }
             if (f.kind == Kind.PHOTO && Downloader.photoLongSide(file!!) in 200 until 400)
@@ -591,40 +599,8 @@ object Pipeline {
         } catch (e: CancellationException) { file?.delete(); throw e
         } catch (e: Exception) {
             file?.delete()
-            var toRelease: PItem? = null
-            upd(t.id) { it.copy(st = PS.ANALYZE, msg = (e.message?.take(160) ?: "Erro ao baixar") + " — em análise", speed = 0, tried = tried).also { n -> toRelease = n } }
-            toRelease?.let { releaseQueue(it) }
+            markFailed(t, emptySet(), (e.message?.take(160) ?: "Erro ao baixar") + ". Toque em Reenviar.")
             return null
-        }
-    }
-
-    /** Pool próprio (2): não usa vaga de download. Estado ANALYZING, não DOWN. */
-    private suspend fun analyzeLoop(dir: File, ready: Channel<Pair<PItem, File>>) {
-        while (true) {
-            val t = claim({ it.st == PS.ANALYZE && it.id !in userCancel && !hasTried(it.tried, "done") }, PS.ANALYZING)
-            if (t == null) {
-                if (items.value.none { it.st in WORK }) return
-                delay(2_000); continue
-            }
-            if (t.id in userCancel) { markCancelled(t); continue }
-            delay(1_000)
-            alive(t.id)
-            val job = scope.async {
-                if (t.f == null) {
-                    val f = withTimeoutOrNull(RESOLVE_TIMEOUT) { PageResolver.resolveFull(t.page, t.title, t.extra) }
-                    if (f != null) {
-                        upd(t.id) { it.copy(f = f, title = TitleFix.pick(f.title, it.title).ifBlank { it.title }) }
-                        downloadOne(t.copy(f = f, st = PS.ANALYZING), dir, fromAnalyze = true)
-                    } else null
-                } else downloadOne(t, dir, fromAnalyze = true)
-            }
-            itemJobs[t.id] = job
-            val file = try { job.await() } catch (e: CancellationException) {
-                if (job.isActive) job.cancel()
-                withTimeoutOrNull(JOB_GIVE_UP) { try { job.join() } catch (_: Exception) {} }
-                if (t.id in userCancel || e is UserCancelException) { markCancelled(t); null } else null
-            } finally { itemJobs.remove(t.id); beat.remove(t.id) }
-            if (file != null) ready.send(t.copy(f = items.value.firstOrNull { it.id == t.id }?.f ?: t.f) to file)
         }
     }
 
@@ -698,10 +674,7 @@ object Pipeline {
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
         } catch (e: CancellationException) { throw e
         } catch (e: Exception) {
-            synchronized(claimed) { claimed.removeAll(ks) }
-            var toRelease: PItem? = null
-            upd(t.id) { it.copy(st = PS.ANALYZE, msg = (e.message?.take(160) ?: "Erro ao enviar") + " — em análise", speed = 0).also { n -> toRelease = n } }
-            toRelease?.let { releaseQueue(it) }
+            markFailed(t, ks, (e.message?.take(160) ?: "Erro ao enviar") + ". Toque em Reenviar.")
         } finally { VisualHash.release(t.id); withContext(NonCancellable) { file.delete(); Downloader.audioOf(file).delete() } }   // apaga o temporário sempre
     }
 

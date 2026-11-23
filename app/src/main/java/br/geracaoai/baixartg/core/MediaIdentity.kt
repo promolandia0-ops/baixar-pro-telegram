@@ -94,7 +94,11 @@ object MediaIdentity {
 
     fun canonicalMedia(url: String): String {
         val base = stripQuery(url)
-        return stripQuality(base)
+        val stripped = stripQuality(base)
+        // se o nome do arquivo for genérico (ex.: playlist.m3u8, video.mp4?id=123), preserva query identificadora
+        val stem = fileStem(url)
+        val iq = if (!usefulStem(stem)) PageKey.idQuery(url) else ""
+        return if (iq.isNotEmpty() && '?' !in stripped) stripped + iq else stripped
     }
 
     fun fileStem(url: String): String {
@@ -111,17 +115,28 @@ object MediaIdentity {
 
     fun mediaDir(url: String): String = stripQuery(url).substringBeforeLast('/')
 
+    fun mediaIdQuery(url: String): String {
+        val stem = fileStem(url)
+        if (usefulStem(stem)) return ""
+        val q = url.substringBefore('#').substringAfter('?', "")
+        if (q.isBlank()) return ""
+        val ps = q.split('&').filter { part ->
+            val k = part.substringBefore('=').lowercase()
+            part.isNotBlank() && '=' in part && part.substringAfter('=').isNotBlank() && k !in SKIP_QUERY && k !in setOf("ex", "t", "ts", "_", "cb", "nocache", "amp")
+        }.map { it.lowercase() }.sorted()
+        return if (ps.isEmpty()) "" else "?" + ps.joinToString("&")
+    }
+
     fun keys(f: Found): List<String> {
         val out = LinkedHashSet<String>()
-        // foto identificada só pela query: a query entra na chave (só fotos; vídeos iguais a antes)
-        val pq = if (f.kind == Kind.PHOTO) PageKey.idQuery(f.url) else ""
+        val pq = if (f.kind == Kind.PHOTO) PageKey.idQuery(f.url) else mediaIdQuery(f.url)
         val media = canonicalMedia(f.url)
-        if (media.isNotBlank()) out += "m:$media$pq"
+        if (media.isNotBlank()) out += if ('?' in media) "m:$media" else "m:$media$pq"
         val page = canonicalPage(f.page)
         val stem = fileStem(f.url) + pq
         if (page.isNotBlank() && usefulStem(stem)) out += "ps:$page|$stem"
         if (usefulStem(stem) && stem.length >= 8) out += "s:$stem"
-        if (Extract.isHls(f.url) || Extract.isDash(f.url)) {
+        if (pq.isEmpty() && (Extract.isHls(f.url) || Extract.isDash(f.url))) {
             val dir = mediaDir(f.url)
             if (dir.length >= 8) out += "d:$dir"
         }

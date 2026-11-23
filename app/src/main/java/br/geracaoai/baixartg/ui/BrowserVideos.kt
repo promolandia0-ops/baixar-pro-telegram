@@ -182,7 +182,7 @@ object BrowserDetect {
             if (Sent.isQueued(listOf(k)) || Sent.anySent(listOf(k))) { BrowserDiag.rej("já enviada/na fila"); continue }
             val text = c.text.ifBlank { lastRefText }
             val title = TitleFix.clean(text.take(120)).ifBlank { Extract.fileName(c.url) }
-            val f = Found(c.url, page, title, Kind.PHOTO, ref = page, extra = text)
+            val f = Found(c.url, c.link.ifBlank { page }, title, Kind.PHOTO, ref = page, extra = text)
             photoThumb["ph:$k"] = c.thumb; if (c.w > 0 && c.h > 0) photoDim["ph:$k"] = "${c.w}×${c.h}"
             photos += Det("ph:$k", f, sel = term.value.isNotBlank() && photoMatches(f), keys = listOf(k))
             BrowserDiag.lastKept++
@@ -237,7 +237,7 @@ object BrowserDetect {
         if (todo.isEmpty()) { onMsg("Nada novo para enviar."); return }
         photos.removeAll { it.key in ks }
         todo.forEach { d -> Sent.markQueued(d.keys + ("pg:" + pgNorm(d.f.url))) }
-        Pipeline.add(todo.map { d -> Pipeline.In(d.f.page, d.f.title, d.f.extra, d.keys, d.f, photo = true) })
+        Pipeline.add(todo.map { d -> Pipeline.In(d.f.page, d.f.title, d.f.extra, d.keys, d.f, photo = true, uniq = d.key) })
         onMsg("Enviando ${todo.size} foto(s). Acompanhe na Fila.")
     }
     fun toggle(key: String, v: Boolean) { val i = list.indexOfFirst { it.key == key }; if (i >= 0 && !list[i].sent) list[i] = list[i].copy(sel = v) }
@@ -251,7 +251,7 @@ object BrowserDetect {
     val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
     fun newPage() { alreadyHere.intValue = 0; pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val gate = Semaphore(3)
+    private val gate = Semaphore(10)
     /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
     private val photoRender = Semaphore(1)
     private val seenCards = HashSet<String>()

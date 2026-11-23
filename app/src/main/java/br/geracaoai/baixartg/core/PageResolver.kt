@@ -92,13 +92,19 @@ object PageResolver {
         val t = TitleFix.pick(pr?.title, title).ifBlank { t0 }
         best(pr?.videos.orEmpty())?.let { return it.copy(page = card, ref = it.ref ?: card, title = t, extra = listOf(t, ctx, it.extra).joinToString(" ").trim()) }
         best(pr?.videos.orEmpty(), allowPreview = true)?.let { pv -> synchronized(previews) { previews[card] = pv.copy(title = t) } }
-        // 2) WebView oculto (pool da fila, independente de estar no navegador)
+        // 2) fluxo confiável da 1.9.7: com navegador aberto tenta servidor antes de abrir WebView oculto; senão WebView oculto (pool 10) e depois servidor
+        val browserOpen = JsRender.browserVisible
+        if (browserOpen) {
+            withTimeoutOrNull(45_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) }?.let { pt ->
+                return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
+            }
+        }
         if (JsRender.available()) {
-            val (realTitle, wv) = withTimeoutOrNull(45_000) { viaWebView(card) { u -> JsRender.renderQueue(u, 22_000) } } ?: ("" to null)
+            val (realTitle, wv) = withTimeoutOrNull(30_000) { viaWebView(card) { u -> JsRender.renderQueue(u, 18_000) } } ?: ("" to null)
             val tt = TitleFix.pick(realTitle, t).ifBlank { t }
             if (wv != null) return wv.copy(page = card, ref = wv.ref ?: card, title = tt, extra = listOf(tt, ctx, wv.extra).joinToString(" ").trim())
         }
-        // 3) servidor só se o player e a página oculta não acharam
+        if (browserOpen) return null
         val pt = withTimeoutOrNull(60_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) } ?: return null
         return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
     }

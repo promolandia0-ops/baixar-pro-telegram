@@ -407,17 +407,27 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
         val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
         val analyzing = l.count { it.st == Pipeline.PS.ANALYZE || it.st == Pipeline.PS.ANALYZING }
+        val skip = l.count { it.st == Pipeline.PS.SKIP }; val cancel = l.count { it.st == Pipeline.PS.CANCEL }
+        val activeNow = resolving + downs + ups
         val active = l.any { !Pipeline.isFinal(it.st) }
         val nPhotos = l.count { isPhotoItem(it) }; val nVideos = l.size - nPhotos
         var confirm by remember { mutableStateOf(false) }
         var clearWhich by remember { mutableStateOf("") }
         ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Fila de envio do Navegador", style = MaterialTheme.typography.titleMedium)
-            Row { Stat("$done", "enviados", Modifier.weight(1f)); Stat("$waiting", "na fila", Modifier.weight(1f)); Stat("$fail", "falharam", Modifier.weight(1f)) }
+            Row { Stat("$done", "enviados", Modifier.weight(1f)); Stat("${waiting + activeNow}", "ativos/fila", Modifier.weight(1f)); Stat("${fail + analyzing}", "falharam", Modifier.weight(1f)) }
             Text("$nVideos vídeo${if (nVideos == 1) "" else "s"} • $nPhotos foto${if (nPhotos == 1) "" else "s"}", style = MaterialTheme.typography.bodyMedium)
-            LinearProgressIndicator(progress = { if (l.isEmpty()) 0f else (done + fail).toFloat() / l.size }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
-            Text("$done de ${l.size} enviados" + (if (resolving > 0) " • abrindo $resolving página(s)" else "") + (if (downs > 0) " • baixando $downs" else "") + (if (ups > 0) " • enviando $ups" else "") + (if (analyzing > 0) " • $analyzing em análise" else "") +
-                (if (paused) " • PAUSADO" else if (running) " • rodando em segundo plano" else ""),
+            LinearProgressIndicator(progress = { if (l.isEmpty()) 0f else (done + fail + skip + cancel).toFloat() / l.size }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
+            Text("$done de ${l.size} enviados" +
+                (if (resolving > 0) " • abrindo $resolving" else "") +
+                (if (downs > 0) " • baixando $downs" else "") +
+                (if (ups > 0) " • enviando $ups" else "") +
+                (if (waiting > 0) " • $waiting na fila" else "") +
+                (if (analyzing > 0) " • $analyzing em análise" else "") +
+                (if (fail > 0) " • $fail falharam" else "") +
+                (if (skip > 0) " • $skip repetidos" else "") +
+                (if (cancel > 0) " • $cancel cancelados" else "") +
+                (if (paused) " • PAUSADO" else if (running) " • ativo" else ""),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (paused) Button({ Pipeline.resume() }, Modifier.weight(1f), enabled = active) { Text("Retomar") }

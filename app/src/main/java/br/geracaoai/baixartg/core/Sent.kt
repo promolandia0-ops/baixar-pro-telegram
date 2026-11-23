@@ -95,9 +95,10 @@ object Sent {
         // foto cujo endereço só se diferencia pela query (ex.: ".../images?q=ID", "/photo.php?id=N"): a query entra na chave.
         // Antes todas essas fotos tinham a MESMA chave e, depois de enviar uma, as outras eram puladas como "já enviada".
         // Só fotos; vídeos continuam exatamente com as mesmas chaves.
-        val pq = photoQuery(f)
+        val pq = if (f.kind == Kind.PHOTO) photoQuery(f) else MediaIdentity.mediaIdQuery(f.url)
         k += "v:" + norm(f.url) + pq
-        k += "c:" + MediaIdentity.canonicalMedia(f.url) + pq
+        val cm = MediaIdentity.canonicalMedia(f.url)
+        k += if ('?' in cm) "c:$cm" else "c:$cm$pq"
         val stem = MediaIdentity.fileStem(f.url)
         if (MediaIdentity.usefulStem(stem) && stem.length >= 8) k += "s:" + stem
         k += bunkrKeys(f.url)

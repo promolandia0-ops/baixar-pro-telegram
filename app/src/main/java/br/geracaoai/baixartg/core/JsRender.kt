@@ -34,7 +34,7 @@ object JsRender {
      * Páginas ocultas ficam na MESMA janela (e no mesmo processo de renderização) do navegador visível, então
      * cada uma tocando vídeo pesa na tela. A fila de envio tem pool próprio (até 10), independente do navegador visível.
      */
-    private val gate = Semaphore(2)
+    private val gate = Semaphore(10)
     /** WebViews próprios da fila de envio. */
     private val queueGate = Semaphore(10)
     /** Quantos WebViews ocultos estão vivos agora (diagnóstico). */
@@ -164,7 +164,7 @@ object JsRender {
     @Volatile var browserVisible = false
     private val queueSoloGate = Semaphore(1)
     /** Com o navegador na tela: no máximo 1 página oculta NO TOTAL (navegador + fila), porque todas dividem o motor de páginas. */
-    private val visibleGate = Semaphore(1)
+    private val visibleGate = Semaphore(10)
 
     private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, queue: Boolean = false): JsPage? {
         val wait = if (play) timeoutMs.coerceIn(8_000L, 25_000L) else timeoutMs
@@ -201,8 +201,7 @@ object JsRender {
                 if (cands.any { !MediaPick.isLikelyAd(it) } && firstHitAt == 0L) firstHitAt = now
                 val waited = now - start
                 val gotMain = firstHitAt > 0 && now - firstHitAt >= 1_500L
-                if (gotMain || now - start >= wait || (!play && wv.progress >= 100 && now - start > 2_500) ||
-                    (play && MediaPick.readyToPick(cands, waited) && cands.any { !MediaPick.isLikelyAd(it) } && gotMain)) finish()
+                if (gotMain || (play && MediaPick.readyToPick(cands, waited)) || now - start >= wait || (!play && wv.progress >= 100 && now - start > 2_500)) finish()
                 else wv.postDelayed({ tick() }, 500)
             }
             wv.postDelayed({ tick() }, 800)
@@ -220,8 +219,7 @@ object JsRender {
         if (!available()) { lastUnavailable = true; return null }
         lastUnavailable = false
         if (!acquire(pool, slotWait)) return null
-        val vis = browserVisible && !skipVisibleGate
-        if (vis && !acquire(visibleGate, slotWait)) { pool.release(); return null }
+        val vis = false
         return try {
             val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return null
             alive.incrementAndGet(); if (pool === queueGate) aliveQueue.incrementAndGet()
@@ -253,9 +251,9 @@ object JsRender {
                             box.alpha = 0f
                             holder = box
                             val dm = act.resources.displayMetrics
-                            box.addView(wv, FrameLayout.LayoutParams(dm.widthPixels.coerceAtLeast(720), dm.heightPixels.coerceAtLeast(1280)))
+                            box.addView(wv, FrameLayout.LayoutParams(dm.widthPixels.coerceAtLeast(1280), dm.heightPixels.coerceAtLeast(720)))
                             val root = act.window?.decorView as? ViewGroup
-                            if (root != null) root.addView(box, 0, ViewGroup.LayoutParams(dm.widthPixels.coerceAtLeast(720), dm.heightPixels.coerceAtLeast(1280)))
+                            if (root != null) root.addView(box, 0, ViewGroup.LayoutParams(dm.widthPixels.coerceAtLeast(1280), dm.heightPixels.coerceAtLeast(720)))
                             else { wv.measure(1080, 2200); wv.layout(0, 0, 1080, 2200) }
                             try { CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true) } catch (_: Exception) {}
                             wv.loadUrl(url, mapOf("Accept-Language" to "pt-BR,pt;q=0.9,en;q=0.8"))
@@ -279,6 +277,8 @@ object JsRender {
         s.mediaPlaybackRequiresUserGesture = false
         s.loadsImagesAutomatically = true
         s.blockNetworkImage = false
+        try { s.offscreenPreRaster = true } catch (_: Exception) {}
+        try { wv.resumeTimers() } catch (_: Exception) {}
         try { s.javaScriptCanOpenWindowsAutomatically = false } catch (_: Exception) {}
         try { s.userAgentString = Net.userAgent } catch (_: Exception) {}
         wv.isFocusable = false
@@ -296,7 +296,6 @@ object JsRender {
                     synchronized(hits) { hits += u }
                     PlayCapture.record(u, pageUrl, request.requestHeaders?.get("Referer") ?: pageUrl)
                 }
-                else if (MediaPick.isAdUrl(u) && !request.isForMainFrame) return br.geracaoai.baixartg.web.AdBlock.empty()
                 else if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, pageUrl, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                 else if (!block && !request.isForMainFrame && u.startsWith("http") && !STATIC.containsMatchIn(u.substringBefore('#')) && API_PATH.containsMatchIn(u) &&
                     !br.geracaoai.baixartg.web.AdBlock.isAdHost(request.url?.host.orEmpty())) {

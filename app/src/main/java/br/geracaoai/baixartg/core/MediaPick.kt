@@ -3,13 +3,13 @@ package br.geracaoai.baixartg.core
 import java.net.URI
 
 /**
- * Escolhe o stream principal e descarta anúncio pré-roll (VAST/IMA e redes conhecidas).
- * Nunca pega o primeiro capturado só porque chegou antes: fica o maior/mais longo.
+ * Escolhe o melhor stream disponível. Só trata como anúncio redes óbvias de ad/VAST/preroll.
+ * Nunca descarta vídeo real por ser de outro domínio ou por não informar duração/tamanho.
  */
 object MediaPick {
-    const val SHORT_MS = 60_000L
-    const val SHORT_BYTES = 3L * 1024 * 1024
-    const val WAIT_FOR_MAIN_MS = 10_000L
+    const val SHORT_MS = 30_000L
+    const val SHORT_BYTES = 2L * 1024 * 1024
+    const val WAIT_FOR_MAIN_MS = 3_500L
 
     data class Cand(
         val url: String,
@@ -29,22 +29,16 @@ object MediaPick {
         "monetag.com", "tsyndicate.com", "trafficstars.com", "zeropark.com", "mgid.com",
         "revcontent.com", "taboola.com", "outbrain.com", "criteo.com", "criteo.net",
         "pubmatic.com", "rubiconproject.com", "openx.net", "ad-delivery.net", "adsafeprotected.com",
-        "serving-system.com", "mtgglobals.com", "ad.gt", "bidswitch.net",
+        "serving-system.com", "mtgglobals.com", "bidswitch.net",
     )
 
     private val AD_URL = Regex(
-        """(?i)(?:[/?&._-](?:vast|vpaid|vmap|preroll|midroll|ima(?:sdk|3)?|adbreak|adsystem|adtag|adunit|companionad)(?:[/?&.=_-]|$)|/pagead/|/adsense/|doubleclick|googlesyndication|imasdk|exoclick|trafficjunky|juicyads|/gampad/|adserver|ad-delivery)"""
+        """(?i)(?:[/?&._-](?:vast|vpaid|vmap|preroll|midroll|imasdk|ima3|adbreak|adsystem|adtag|companionad)(?:[/?&.=_-]|$)|/pagead/|/adsense/|doubleclick|googlesyndication|imasdk|exoclick|trafficjunky|juicyads|/gampad/|adserver|ad-delivery)"""
     )
 
     fun hostOf(url: String): String = try {
         URI(url.trim()).host?.lowercase()?.removePrefix("www.")?.trimEnd('.') ?: ""
     } catch (_: Exception) { "" }
-
-    fun base(host: String): String {
-        val h = host.lowercase().removePrefix("www.")
-        val p = h.split('.')
-        return if (p.size >= 2) p.takeLast(2).joinToString(".") else h
-    }
 
     fun isAdHost(host0: String): Boolean {
         val h = host0.lowercase().removePrefix("www.").trimEnd('.')
@@ -65,10 +59,9 @@ object MediaPick {
         return AD_URL.containsMatchIn(url)
     }
 
-    /** Anúncio curto ou de rede de ads. Vídeo real em CDN de outro domínio NÃO entra só por ser de outro host. */
     fun isLikelyAd(c: Cand): Boolean {
         if (isAdUrl(c.url)) return true
-        if (c.durationMs in 1 until SHORT_MS) return true
+        if (c.durationMs in 1 until SHORT_MS && c.bytes in 1 until SHORT_BYTES) return true
         return false
     }
 
@@ -78,7 +71,6 @@ object MediaPick {
         return dur * 1_000_000L + bytes
     }
 
-    /** Melhor candidato: ignora anúncios se houver um principal; senão o maior que restar. */
     fun pick(cands: List<Cand>): Cand? {
         if (cands.isEmpty()) return null
         val unique = cands.distinctBy { it.url.substringBefore('#') }
@@ -87,10 +79,7 @@ object MediaPick {
         return pool.maxByOrNull { score(it) }
     }
 
-    /**
-     * Só fecha a captura quando já há um stream principal, ou acabou o tempo de espera
-     * (se só chegou anúncio curto, espera o vídeo de verdade).
-     */
+    /** Se já chegou algum candidato não-ad, libera logo; se só chegou ad óbvio, espera até o prazo curto e libera. */
     fun readyToPick(cands: List<Cand>, waitedMs: Long, minWaitIfOnlyAds: Long = WAIT_FOR_MAIN_MS): Boolean {
         if (cands.any { !isLikelyAd(it) }) return true
         return waitedMs >= minWaitIfOnlyAds && cands.isNotEmpty()

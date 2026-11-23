@@ -63,14 +63,7 @@ object AdBlock {
         if (!enabled || mainFrame) return false
         if (!url.startsWith("http", true)) return false
         if (NEVER.containsMatchIn(url)) return false
-        // stream de anúncio (VAST/IMA/redes) é bloqueado mesmo sendo vídeo; o vídeo do site passa
-        if (br.geracaoai.baixartg.core.MediaPick.isAdUrl(url) && !mainFrame) {
-            val host = try { android.net.Uri.parse(url).host ?: "" } catch (_: Exception) { "" }
-            val pageHost = pageUrl?.let { try { android.net.Uri.parse(it).host } catch (_: Exception) { null } }
-            val firstParty = pageHost != null && host.isNotBlank() && base(host) == base(pageHost)
-            if (!firstParty) return true
-        }
-        if (Extract.mediaKindOf(url) != null || Extract.isVideoUrl(url)) return false   // streams do próprio vídeo
+        if (Extract.mediaKindOf(url) != null || Extract.isVideoUrl(url)) return false   // nunca bloqueia stream de vídeo
         val host = try { android.net.Uri.parse(url).host ?: return false } catch (_: Exception) { return false }
         val pageHost = pageUrl?.let { try { android.net.Uri.parse(it).host } catch (_: Exception) { null } }
         val firstParty = pageHost != null && base(host) == base(pageHost)

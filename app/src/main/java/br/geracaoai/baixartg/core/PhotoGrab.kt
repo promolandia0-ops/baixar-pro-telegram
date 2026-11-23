@@ -35,7 +35,7 @@ var VIDHREF=/(\/watch([\/?#]|$)|\/videos?\/|\/embed\/|\/shorts\/|\/reels?\/|yout
 var DUR=/(^|\s)(\d{1,2}:)?\d{1,2}:\d{2}(\s|$)/;
 var posters={};try{D.querySelectorAll('video[poster]').forEach(function(v){var p=abs(v.getAttribute('poster'));if(p)posters[p.split('?')[0]]=1})}catch(e){}
 var isImgDoc=/^image\//i.test(D.contentType||'');
-function add(u,w,h,th,t,s,o){u=upgrade(u);if(!u||seen[u])return;seen[u]=1;out.push({u:u,w:w||0,h:h||0,th:th||'',t:(t||'').replace(/\s+/g,' ').trim().slice(0,300),s:s,o:o?1:0})}
+function add(u,w,h,th,t,s,o,l){u=upgrade(u);if(!u||seen[u])return;seen[u]=1;out.push({u:u,w:w||0,h:h||0,th:th||'',t:(t||'').replace(/\s+/g,' ').trim().slice(0,300),s:s,o:o?1:0,l:l||''})}
 if(isImgDoc){var im0=D.images[0];add(L,im0?im0.naturalWidth:0,im0?im0.naturalHeight:0,L,D.title||'','page',1);return JSON.stringify({v:VER,n:D.images.length,raw:1,p:out,r:rej,doc:1})}
 // assinatura: se nada mudou desde a última passada (< 6 s), não refaz
 var sig=D.images.length+'|'+D.links.length+'|'+(D.documentElement.scrollHeight||0);
@@ -85,7 +85,8 @@ for(var i=0;i<imgs.length&&out.length<600;i++){var img=imgs[i];raw++;
       if(!known){ if((aw&&ah&&Math.max(aw,ah)<150)||(shown>0&&shown<60)){R('pequena');continue} }
       var mn=Math.min(w||nw,h||nh),mx=Math.max(w||nw,h||nh);if(mn>0&&mx/mn>5){R('faixa/banner');continue}
     }
-    add(u,w,h,cur||u,txt(img,a),s,!!(lo||big));
+    var cl=(a&&a.href&&/^https?:/i.test(a.href)&&a.href.split('#')[0]!==L.split('#')[0]&&!videoCard(a))?a.href:'';
+    add(u,w,h,cur||u,txt(img,a),s,!!(lo||big),cl);
   }catch(e){R('erro')}
 }
 // links diretos para arquivos de imagem (anexos de fórum, galerias) sem <img> dentro
@@ -117,7 +118,7 @@ return JSON.stringify({v:VER,n:imgs.length,raw:raw,p:out,r:rej,ms:Date.now()-T0}
 }catch(e){try{return JSON.stringify({v:VER,p:[],r:{},n:document.images.length,err:String((e&&e.message)||e).slice(0,200)})}catch(x){return '{"v":"g2","p":[],"err":"?"}'}}
 })()"""
 
-    data class Cand(val url: String, val w: Int, val h: Int, val thumb: String, val text: String, val src: String, val orig: Boolean)
+    data class Cand(val url: String, val w: Int, val h: Int, val thumb: String, val text: String, val src: String, val orig: Boolean, val link: String = "")
     data class Res(val ok: Boolean, val same: Boolean = false, val ver: String = "", val imgs: Int = -1, val raw: Int = 0,
                    val cands: List<Cand> = emptyList(), val rejects: Map<String, Int> = emptyMap(), val err: String = "")
 
@@ -132,7 +133,7 @@ return JSON.stringify({v:VER,n:imgs.length,raw:raw,p:out,r:rej,ms:Date.now()-T0}
             if (o.optInt("same") == 1) return Res(true, same = true, ver = o.optString("v"), imgs = o.optInt("n", -1))
             val a = o.optJSONArray("p") ?: JSONArray()
             val cs = (0 until a.length()).mapNotNull { i -> a.optJSONObject(i)?.let { p ->
-                Cand(p.optString("u"), p.optInt("w"), p.optInt("h"), p.optString("th"), p.optString("t"), p.optString("s"), p.optInt("o") == 1) } }
+                Cand(p.optString("u"), p.optInt("w"), p.optInt("h"), p.optString("th"), p.optString("t"), p.optString("s"), p.optInt("o") == 1, p.optString("l")) } }
             Res(true, false, o.optString("v"), o.optInt("n", -1), o.optInt("raw"), cs, rj, o.optString("err"))
         } catch (e: Exception) { Res(false, err = "resposta ilegível (" + raw.length + " letras)") }
     }
@@ -187,6 +188,41 @@ return JSON.stringify({v:VER,n:imgs.length,raw:raw,p:out,r:rej,ms:Date.now()-T0}
 
     /** Depois do download, se a foto veio pequena: tira qualquer limitador de tamanho no endereço. */
     fun upgradeStrong(u: String): String = upgrade(u, strong = true)
+
+    private val CROP_SUF = Regex("""[_-](?:s|t|m|xs|sq|square|crop|cropped|mini|thumb(?:nail)?)(?=\.(?:jpe?g|png|webp|gif|bmp|avif)(?:[?#]|$))""", RegexOption.IGNORE_CASE)
+    private val CROP_DIR = Regex("""/(?:crop|cropped|square|squares|thumbs?|small)/""", RegexOption.IGNORE_CASE)
+    private val CROP_Q = setOf("crop", "fit", "aspect", "sq", "s", "resize", "quality", "q")
+
+    /** Gera variações prováveis da URL original sem recorte/miniatura (para comparar por bytes). */
+    fun upgradeVariants(u: String): List<String> {
+        val out = LinkedHashSet<String>()
+        val up = upgradeStrong(u)
+        if (up != u) out += up
+        for (baseUrl in listOf(up, u)) {
+            val v1 = CROP_SUF.replace(baseUrl, "")
+            if (v1 != baseUrl) out += v1
+            val v2 = CROP_DIR.replace(v1, "/")
+            if (v2 != v1) out += v2
+            val v3 = stripCropQuery(v2)
+            if (v3 != v2) out += v3
+            val v4 = stripCropQuery(baseUrl)
+            if (v4 != baseUrl) out += v4
+        }
+        out.remove(u)
+        return out.toList()
+    }
+
+    private fun stripCropQuery(u: String): String = try {
+        val qIdx = u.indexOf('?')
+        if (qIdx < 0) u else {
+            val base = u.substring(0, qIdx)
+            val frag = u.substringAfter('#', "").let { if (it.isEmpty() && '#' !in u) "" else "#$it" }
+            val kept = u.substring(qIdx + 1).substringBefore('#').split('&').filter { part ->
+                part.isNotEmpty() && part.substringBefore('=').lowercase() !in (CROP_Q + SIZE_Q)
+            }
+            base + (if (kept.isEmpty()) "" else kept.joinToString("&", prefix = "?")) + frag
+        }
+    } catch (_: Exception) { u }
 
     private fun stripSmallSizeQuery(u: String, all: Boolean): String = try {
         val qIdx = u.indexOf('?')
