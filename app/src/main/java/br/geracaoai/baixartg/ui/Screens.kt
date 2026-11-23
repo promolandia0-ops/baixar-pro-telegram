@@ -393,7 +393,8 @@ private fun pipeGroup(st: Pipeline.PS) = when (st) {
     Pipeline.PS.DONE -> 3
     Pipeline.PS.FAIL -> 4
     Pipeline.PS.SKIP -> 7
-    Pipeline.PS.ANALYZE -> 8
+    Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING -> 8
+    Pipeline.PS.CANCEL -> 9
 }
 
 private fun isPhotoItem(t: Pipeline.PItem) = t.photo || t.f?.kind == Kind.PHOTO
@@ -405,7 +406,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         val waiting = l.count { it.st == Pipeline.PS.WAIT || it.st == Pipeline.PS.READY }
         val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
         val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
-        val analyzing = l.count { it.st == Pipeline.PS.ANALYZE }
+        val analyzing = l.count { it.st == Pipeline.PS.ANALYZE || it.st == Pipeline.PS.ANALYZING }
         val active = l.any { !Pipeline.isFinal(it.st) }
         val nPhotos = l.count { isPhotoItem(it) }; val nVideos = l.size - nPhotos
         var confirm by remember { mutableStateOf(false) }
@@ -435,7 +436,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         if (clearWhich.isNotEmpty()) ClearQueueDialog(clearWhich, l, { clearWhich = it }, { clearWhich = "" })
     }
     // contagem por grupo numa passada só (rápido com milhares de itens)
-    val cnt = IntArray(9); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
+    val cnt = IntArray(10); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
     cnt[0] = l.size
     item(key = "pipe-chips") { PipeChips(filter, cnt) }
     val f = filter.value
@@ -450,7 +451,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PipeChips(filter: MutableState<Int>, cnt: IntArray) {
-    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos", "Repetidos", "Em análise")
+    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos", "Repetidos", "Em análise", "Cancelados")
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         names.forEachIndexed { i, n ->
             FilterChip(selected = filter.value == i, onClick = { filter.value = i }, label = { Text("$n (${cnt[i]})", maxLines = 1) })
@@ -477,17 +478,21 @@ fun PipeRow(t: Pipeline.PItem) {
                     Pipeline.PS.DONE -> "enviado" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
                     Pipeline.PS.FAIL -> "falhou: " + t.msg.ifBlank { "erro" }
                     Pipeline.PS.SKIP -> "repetido (não enviado) • " + t.msg
-                    Pipeline.PS.ANALYZE -> "em análise: " + t.msg.ifBlank { "tentando de outro jeito" }
+                    Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING -> "em análise: " + t.msg.ifBlank { "tentando de outro jeito" }
+                    Pipeline.PS.CANCEL -> "cancelado" + (if (t.msg.isNotBlank() && t.msg != "cancelado") " • " + t.msg else "")
                 }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
-                    color = when (t.st) { Pipeline.PS.FAIL, Pipeline.PS.ANALYZE -> cs.error; Pipeline.PS.DONE -> cs.primary; else -> cs.onSurfaceVariant })
+                    color = when (t.st) { Pipeline.PS.FAIL, Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING -> cs.error; Pipeline.PS.DONE -> cs.primary; Pipeline.PS.CANCEL -> cs.onSurfaceVariant; else -> cs.onSurfaceVariant })
                 if ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog > 0f) {
                     Spacer(Modifier.height(4.dp)); LinearProgressIndicator(progress = { t.prog }, Modifier.fillMaxWidth())
-                } else if (t.st == Pipeline.PS.RESOLVING || ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog <= 0f)) {
+                } else if (t.st == Pipeline.PS.RESOLVING || t.st == Pipeline.PS.ANALYZING || ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog <= 0f)) {
                     Spacer(Modifier.height(4.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
             if (t.st == Pipeline.PS.FAIL || t.st == Pipeline.PS.ANALYZE) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
             if (t.st == Pipeline.PS.SKIP) TextButton({ Pipeline.forceSend(t.id) }) { Text("Enviar mesmo assim") }
+            if (t.st == Pipeline.PS.CANCEL) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+            if (t.st in setOf(Pipeline.PS.WAIT, Pipeline.PS.READY, Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP, Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING))
+                TextButton({ Pipeline.cancel(t.id) }) { Text("Cancelar") }
         }
     }
 }

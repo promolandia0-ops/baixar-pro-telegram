@@ -17,9 +17,9 @@ import java.io.File
  * Sobrevive a fechar o app, à morte do processo, a reiniciar o celular e a atualizar o app.
  */
 object Pipeline {
-    enum class PS { WAIT, RESOLVING, READY, DOWN, UP, DONE, FAIL, SKIP, ANALYZE }
-    /** Terminou (enviado, falhou ou pulado como repetido). Em análise continua em segundo plano. */
-    fun isFinal(s: PS) = s == PS.DONE || s == PS.FAIL || s == PS.SKIP
+    enum class PS { WAIT, RESOLVING, READY, DOWN, UP, DONE, FAIL, SKIP, ANALYZE, ANALYZING, CANCEL }
+    /** Terminou (enviado, falhou, pulado ou cancelado pelo usuário). Em análise continua à parte. */
+    fun isFinal(s: PS) = s == PS.DONE || s == PS.FAIL || s == PS.SKIP || s == PS.CANCEL
     data class PItem(
         val id: Long, val page: String, val title: String, val extra: String, val keys: List<String>,
         val f: Found?, val st: PS, val msg: String = "", val prog: Float = 0f, val photo: Boolean = false,
@@ -48,7 +48,8 @@ object Pipeline {
     private const val RESOLVE_TIMEOUT = 90_000L   // tudo junto, inclusive esperar vaga: estático + página + servidor
     private const val RESOLVE_STALL = 100_000L
     private const val OPEN_GAP = 350L
-    private const val STALL_MS = 60_000L
+    private const val STALL_MS = 45_000L
+    private const val JOB_GIVE_UP = 2_000L
 
     fun init(c: Context) {
         app = c.applicationContext
@@ -70,7 +71,7 @@ object Pipeline {
     }
 
     /** Há trabalho pendente (para retomar depois de reiniciar/atualizar). */
-    private val WORK get() = ACTIVE + PS.ANALYZE
+    private val WORK get() = ACTIVE + PS.ANALYZE + PS.ANALYZING
     fun hasWork() = !paused.value && items.value.any { it.st in WORK }
 
     // ---------------- persistência ----------------
@@ -172,17 +173,17 @@ object Pipeline {
         engine?.cancel()
         val gone: List<PItem>
         synchronized(lock) {
-            val keep = setOf(PS.DONE, PS.FAIL, PS.SKIP)
+            val keep = setOf(PS.DONE, PS.FAIL, PS.SKIP, PS.CANCEL)
             gone = items.value.filter { it.st !in keep }
             items.value = items.value.filter { it.st in keep }
         }
         gone.forEach { releaseQueue(it) }
         paused.value = false; saveAsync()
     }
-    fun retry(id: Long) { upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f) }; start() }
-    fun retryFailed() { synchronized(lock) { items.value = items.value.map { if (it.st == PS.FAIL || it.st == PS.ANALYZE) it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", tried = "") else it } }; save(); start() }
+    fun retry(id: Long) { userCancel.remove(id); upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, tried = "") }; start() }
+    fun retryFailed() { synchronized(lock) { items.value = items.value.map { if (it.st == PS.FAIL || it.st == PS.ANALYZE || it.st == PS.ANALYZING) { userCancel.remove(it.id); it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", tried = "") } else it } }; save(); start() }
     /** Item pulado como repetido pela imagem: manda mesmo assim (sem a checagem visual). */
-    fun forceSend(id: Long) { upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, force = true, stalls = 0) }; start() }
+    fun forceSend(id: Long) { userCancel.remove(id); upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, force = true, stalls = 0) }; start() }
     fun clearDone() { synchronized(lock) { items.value = items.value.filter { it.st != PS.DONE } }; saveAsync() }
     fun clearFailed() {
         val gone: List<PItem>
@@ -226,6 +227,44 @@ object Pipeline {
     }
     private fun releaseQueue(t: PItem) { try { Sent.unqueue(keysToUnqueue(t)) } catch (_: Exception) {} }
 
+    private class UserCancelException : CancellationException("cancelado")
+    private val userCancel = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+
+    /** Cancela este item na hora, libera a vaga e não tenta de novo sozinho. Volta a aparecer no navegador. */
+    fun cancel(id: Long) {
+        userCancel.add(id)
+        itemJobs[id]?.cancel(UserCancelException())
+        var gone: PItem? = null
+        upd(id) { cur ->
+            if (isFinal(cur.st) && cur.st != PS.ANALYZE && cur.st != PS.ANALYZING) cur
+            else cur.copy(st = PS.CANCEL, msg = "cancelado", prog = 0f, speed = 0).also { gone = it }
+        }
+        gone?.let {
+            try { synchronized(claimed) { claimed.removeAll(claimKeys(it)) } } catch (_: Exception) {}
+            releaseQueue(it)
+        }
+    }
+
+    /**
+     * Chaves só do arquivo/vídeo, SEM a página. Na 1.9.9 a chave "pg:página" ia para o índice de
+     * "já na fila/já enviado": o primeiro vídeo da página segurava todos os outros (só 1 andava).
+     */
+    fun mediaKeysOf(t: PItem): Set<String> = mediaKeys(t.keys, t.f, isPhoto(t))
+    fun mediaKeys(keys: List<String>, f: Found?, photo: Boolean): Set<String> {
+        val out = LinkedHashSet<String>()
+        for (k in keys) if (k.isNotBlank() && !isPageKey(k)) out += k
+        if (f != null) {
+            if (photo) out += PhotoGrab.key(f.url)
+            out += Sent.keysOf(f)
+            out += MediaIdentity.keys(f)
+        }
+        return out.filter { !isPageKey(it) }.toHashSet()
+    }
+    private fun isPageKey(k: String) = k.startsWith("pg:") || k.startsWith("ip:") || k.startsWith("p:")
+    private fun claimKeys(t: PItem) = mediaKeysOf(t)
+    private fun sentKeys(t: PItem) = mediaKeysOf(t)
+
+
     /**
      * persist=false = progresso: não regrava o arquivo e é juntado num lote aplicado no máximo ~4x/s
      * (evita uma tempestade de recomposições/notificações com 1000+ itens).
@@ -266,13 +305,14 @@ object Pipeline {
     @Synchronized fun start() {
         if (!::app.isInitialized || paused.value) return
         if (engine?.isActive == true) return
-        if (items.value.none { it.st in ACTIVE }) return
+        if (items.value.none { it.st in WORK }) return
         // nenhum motor rodando: o que ficou "abrindo página"/baixando/enviando volta para a etapa anterior
         synchronized(lock) {
             items.value = items.value.map {
                 when (it.st) {
                     PS.RESOLVING -> it.copy(st = PS.WAIT, msg = "", prog = 0f, speed = 0)
                     PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, speed = 0)
+                    PS.ANALYZING -> it.copy(st = PS.ANALYZE, msg = it.msg, prog = 0f, speed = 0)
                     else -> it
                 }
             }
@@ -291,15 +331,16 @@ object Pipeline {
                     val ready = Channel<Pair<PItem, File>>(nDown)
                     val resolvers = List(RESOLVERS) { n -> launch { delay(n * OPEN_GAP); resolverLoop() } }
                     val downs = List(nDown) { launch { downloaderLoop(dir, ready) } }
-                    val analyze = launch { analyzeLoop(dir, ready) }
-                    launch { downs.joinAll(); analyze.join(); ready.close() }
+                    // Em análise: pool próprio (2), nunca ocupa vaga de download/envio da fila principal
+                    val analyzers = List(2) { launch { analyzeLoop(dir, ready) } }
+                    launch { downs.joinAll(); analyzers.joinAll(); ready.close() }
                     repeat(nUp) { launch { for ((t, f) in ready) uploadOne(t, f) } }
-                    launch { watchdog() }.also { w -> launch { resolvers.joinAll(); downs.joinAll(); analyze.join(); w.cancel() } }
+                    launch { watchdog() }.also { w -> launch { resolvers.joinAll(); downs.joinAll(); analyzers.joinAll(); w.cancel() } }
                 }
             } catch (e: Throwable) {   // qualquer erro (não só cancelar): nada fica preso em "abrindo página"
                 synchronized(lock) {
                     items.value = items.value.map {
-                        when (it.st) { PS.RESOLVING -> it.copy(st = PS.WAIT, prog = 0f, msg = "", speed = 0); PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, prog = 0f, msg = "", speed = 0); else -> it }
+                        when (it.st) { PS.RESOLVING -> it.copy(st = PS.WAIT, prog = 0f, msg = "", speed = 0); PS.DOWN, PS.UP -> it.copy(st = if (it.f != null) PS.READY else PS.WAIT, prog = 0f, msg = "", speed = 0); PS.ANALYZING -> it.copy(st = PS.ANALYZE, prog = 0f, speed = 0); else -> it }
                     }
                 }
             } finally {
@@ -316,7 +357,7 @@ object Pipeline {
             delay(10_000)
             val now = System.currentTimeMillis()
             for (t in items.value) {
-                if (t.st != PS.DOWN && t.st != PS.UP && t.st != PS.RESOLVING) continue
+                if (t.st != PS.DOWN && t.st != PS.UP && t.st != PS.RESOLVING && t.st != PS.ANALYZING) continue
                 val last = beat[t.id] ?: continue
                 val limit = if (t.st == PS.RESOLVING) RESOLVE_STALL else if (t.st == PS.UP && t.prog >= 0.99f) 5 * 60_000L else STALL_MS   // envio já subiu: espera a confirmação do Telegram
                 if (now - last > limit) { beat[t.id] = now; itemJobs[t.id]?.cancel(StallException()) }
@@ -375,7 +416,7 @@ object Pipeline {
     /** Fotos: só a chave exata da foto (antes as chaves de vídeo — pasta/nome do arquivo — marcavam fotos diferentes como "repetido"). */
     private fun keysOf(t: PItem): Set<String> = if (isPhoto(t)) (t.keys + PhotoGrab.key(t.f!!.url)).toHashSet()
         else (Jobs.sendKeys(t.f!!, t.keys) + MediaIdentity.keys(t.f)).toHashSet()
-    private fun sentBefore(t: PItem): Boolean = if (isPhoto(t)) Sent.anySent(keysOf(t)) else Jobs.alreadySent(t.f!!, t.keys)
+    private fun sentBefore(t: PItem): Boolean = if (isPhoto(t)) Sent.anySent(sentKeys(t)) else Jobs.alreadySent(t.f!!, sentKeys(t).toList())
 
     private suspend fun downloaderLoop(dir: File, ready: Channel<Pair<PItem, File>>) {
         while (true) {
@@ -384,33 +425,49 @@ object Pipeline {
                 if (items.value.none { it.st in WORK }) return
                 delay(500); continue
             }
+            if (t.id in userCancel || t.st == PS.CANCEL) { markCancelled(t); continue }
             val f = t.f!!
             if (!t.force && sentBefore(t)) { upd(t.id) { it.copy(st = PS.SKIP, msg = "já enviado antes (pulado)", prog = 0f) }; continue }
-            val ks = keysOf(t)
+            val ks = claimKeys(t)
             val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
             if (dup) { upd(t.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }; continue }
             alive(t.id)
             val job = scope.async { downloadOne(t, dir) }
             itemJobs[t.id] = job
             val file = try { job.await() } catch (e: CancellationException) {
-                currentCoroutineContext().ensureActive()   // pausa/cancelar de verdade: propaga
-                null.also { stalled(t, ks, "download") }
+                if (job.isActive) job.cancel()
+                withTimeoutOrNull(JOB_GIVE_UP) { try { job.join() } catch (_: Exception) {} }
+                when {
+                    t.id in userCancel || e is UserCancelException -> { markCancelled(t, ks); null }
+                    e is StallException || e.cause is StallException -> { toAnalyze(t, ks, "download travado (sem progresso). Foi pra análise."); null }
+                    else -> { currentCoroutineContext().ensureActive(); markCancelled(t, ks); throw e }
+                }
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
             if (file == null) { synchronized(claimed) { claimed.removeAll(ks) }; continue }
             ready.send(t to file)
         }
     }
 
-    /** Item travado: volta para a fila (até 3 vezes), depois falha — os outros seguem. */
-    private fun stalled(t: PItem, ks: Set<String>, stage: String) {
+    /** Item travado ou que falhou: sai da vaga principal e vai pra Em análise (os outros seguem). */
+    private fun toAnalyze(t: PItem, ks: Set<String>, msg: String) {
         synchronized(claimed) { claimed.removeAll(ks) }
         var toRelease: PItem? = null
         upd(t.id) { cur ->
-            val n = cur.stalls + 1
-            if (n >= 3) cur.copy(st = PS.ANALYZE, msg = "Travou no $stage 3 vezes. Tentando de outro jeito…", prog = 0f, speed = 0, stalls = n, tried = markTried(cur.tried, stage)).also { toRelease = it }
-            else cur.copy(st = PS.READY, msg = "Travou no $stage, tentando de novo…", prog = 0f, speed = 0, stalls = n)
+            if (cur.st == PS.CANCEL || cur.id in userCancel) cur
+            else cur.copy(st = PS.ANALYZE, msg = msg.take(180), prog = 0f, speed = 0, stalls = cur.stalls + 1).also { toRelease = it }
         }
         toRelease?.let { releaseQueue(it) }
+    }
+    private fun markCancelled(t: PItem, ks: Set<String> = emptySet()) {
+        userCancel.add(t.id)
+        if (ks.isNotEmpty()) synchronized(claimed) { claimed.removeAll(ks) }
+        var gone: PItem? = null
+        upd(t.id) { it.copy(st = PS.CANCEL, msg = "cancelado", prog = 0f, speed = 0).also { n -> gone = n } }
+        gone?.let { releaseQueue(it) }
+    }
+    private fun stalled(t: PItem, ks: Set<String>, stage: String) {
+        if (t.id in userCancel) { markCancelled(t, ks); return }
+        toAnalyze(t, ks, "Travou no $stage (sem progresso). Foi pra análise, a fila segue.")
     }
 
     private fun markTried(prev: String, step: String): String =
@@ -507,35 +564,41 @@ object Pipeline {
         }
     }
 
-    /** Itens que falharam saem da fila principal e tentam os jeitos que ainda não foram usados. */
+    /** Pool próprio (2): não usa vaga de download. Estado ANALYZING, não DOWN. */
     private suspend fun analyzeLoop(dir: File, ready: Channel<Pair<PItem, File>>) {
         while (true) {
-            val t = claim({ it.st == PS.ANALYZE && it.f != null && !hasTried(it.tried, "done") }, PS.DOWN)
+            val t = claim({ it.st == PS.ANALYZE && it.id !in userCancel && !hasTried(it.tried, "done") }, PS.ANALYZING)
             if (t == null) {
-                // sem arquivo ainda: tenta resolver de novo (se ainda não esgotou)
-                val r = claim({ it.st == PS.ANALYZE && it.f == null && !hasTried(it.tried, "done") }, PS.WAIT)
-                if (r == null) {
-                    if (items.value.none { it.st in WORK }) return
-                    delay(3_000); continue
-                }
-                continue
+                if (items.value.none { it.st in WORK }) return
+                delay(2_000); continue
             }
-            delay(2_000)
+            if (t.id in userCancel) { markCancelled(t); continue }
+            delay(1_000)
             alive(t.id)
-            val job = scope.async { downloadOne(t, dir, fromAnalyze = true) }
+            val job = scope.async {
+                if (t.f == null) {
+                    val f = withTimeoutOrNull(RESOLVE_TIMEOUT) { PageResolver.resolveFull(t.page, t.title, t.extra) }
+                    if (f != null) {
+                        upd(t.id) { it.copy(f = f, title = TitleFix.pick(f.title, it.title).ifBlank { it.title }) }
+                        downloadOne(t.copy(f = f, st = PS.ANALYZING), dir, fromAnalyze = true)
+                    } else null
+                } else downloadOne(t, dir, fromAnalyze = true)
+            }
             itemJobs[t.id] = job
             val file = try { job.await() } catch (e: CancellationException) {
-                currentCoroutineContext().ensureActive(); null
+                if (job.isActive) job.cancel()
+                withTimeoutOrNull(JOB_GIVE_UP) { try { job.join() } catch (_: Exception) {} }
+                if (t.id in userCancel || e is UserCancelException) { markCancelled(t); null } else null
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
-            if (file != null) ready.send(t to file)
-            else if (items.value.none { it.st in WORK || it.st == PS.ANALYZE }) return
+            if (file != null) ready.send(t.copy(f = items.value.firstOrNull { it.id == t.id }?.f ?: t.f) to file)
         }
     }
 
     private suspend fun uploadOne(t0: PItem, file: File) {
         val t = items.value.firstOrNull { it.id == t0.id } ?: t0
         val f = t.f!!
-        val ks = keysOf(t)
+        val ks = claimKeys(t)
+        if (t.id in userCancel) { markCancelled(t, ks); return }
         try {
             upd(t.id) { it.copy(st = PS.UP, prog = 0f, speed = 0, msg = "Enviando…") }
             while (!Td.ready) { upd(t.id, persist = false) { it.copy(msg = "Esperando o Telegram conectar…") }; delay(3_000) }
@@ -584,10 +647,13 @@ object Pipeline {
             }
             itemJobs[t.id] = job
             try { job.await() } catch (e: CancellationException) {
-                currentCoroutineContext().ensureActive()
+                if (job.isActive) job.cancel()
+                withTimeoutOrNull(JOB_GIVE_UP) { try { job.join() } catch (_: Exception) {} }
+                if (t.id in userCancel || e is UserCancelException) { markCancelled(t, ks); return }
                 stalled(t, ks, "envio"); return
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
-            if (isPhoto(t)) Sent.markPhotoSent(keysOf(t) + listOfNotNull(fk)) else Sent.markSent(f, t.keys + listOfNotNull(fk)); History.add(f, size)
+            if (isPhoto(t)) Sent.markPhotoSent(sentKeys(t) + listOfNotNull(fk)) else Sent.markSent(f, sentKeys(t) + listOfNotNull(fk)); History.add(f, size)
+            synchronized(claimed) { claimed.removeAll(claimKeys(t)) }
             if (vfp != null) VisualHash.markSent(t.id, vfp)
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
         } catch (e: CancellationException) { throw e
