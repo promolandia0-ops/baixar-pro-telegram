@@ -228,7 +228,7 @@ fun HomeTab(text: MutableState<String>, goQueue: () -> Unit) {
     val phase by Jobs.phase.collectAsState(); val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     val links = remember(text.value) { Jobs.parseLinks(text.value) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Baixar vídeos", "Cole um ou vários links (um por linha). Qualidade original, sem compressão. Se o link for uma listagem de aulas, o app abre cada card e pega o vídeo (nunca a capa). Só vídeos — fotos não entram.", Icons.Rounded.Download) }
+        item { Section("Baixar vídeos", "Cole um ou vários links (um por linha). Qualidade original, sem compressão. Se o link for uma listagem de vídeos, o app abre cada card e pega o vídeo (nunca a capa). Só vídeos — fotos não entram.", Icons.Rounded.Download) }
         item { LinkField(text.value, { text.value = it }, !busy, multi = true, label = "Links dos vídeos ou páginas") }
         item {
             BigButton(if (links.size > 1) "Baixar ${links.size} links" else "Baixar", Icons.Rounded.Download, !busy && links.isNotEmpty()) {
@@ -247,8 +247,8 @@ fun HowTo() {
     OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Como funciona", style = MaterialTheme.typography.titleSmall)
         Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados; se for listagem, abre cada card e pega o vídeo real.")
-        Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "com um nome tenta a busca do site, senão varre o domínio; mostra só as aulas que batem no título para você confirmar.")
-        Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega os vídeos desta página; se for uma listagem, abre cada aula e baixa o vídeo (não a miniatura).")
+        Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "com um nome tenta a busca do site, senão varre o domínio; mostra só os vídeos que batem no título para você confirmar.")
+        Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega os vídeos desta página; se for uma listagem, abre cada vídeo e baixa o vídeo (não a miniatura).")
         Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta do site; os downloads usam essa sessão.")
         Tip(Icons.Rounded.Cloud, "MEGA", "entre na sua conta MEGA ou cole um link público e envie os vídeos.")
         Tip(Icons.Rounded.Lock, "Segundo plano", "pode bloquear a tela; “Parar” interrompe na hora.")
@@ -268,15 +268,15 @@ fun SiteTab(goQueue: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Handoff.site.value) { Handoff.site.value?.let { url = it; Handoff.site.value = null } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Varrer o site inteiro", "Cole o link do site e, embaixo, o nome ou título da aula (ex.: Gibson, dedilhado pentatônico). Com um nome, o app tenta primeiro a busca do próprio site e só faz a varredura completa se a busca não achar nada. A lista aparece para você confirmar antes de enviar.", Icons.Rounded.TravelExplore) }
+        item { Section("Varrer o site inteiro", "Cole o link do site e, embaixo, o nome ou título do vídeo (ex.: parte do título). Com um nome, o app tenta primeiro a busca do próprio site e só faz a varredura completa se a busca não achar nada. A lista aparece para você confirmar antes de enviar.", Icons.Rounded.TravelExplore) }
         item { LinkField(url, { url = it }, !busy, label = "Link do site") }
         item {
-            OutlinedTextField(name, { name = it }, label = { Text("Nome ou título") }, placeholder = { Text("ex.: Gibson, dedilhado pentatônico, guitarra") }, singleLine = true,
+            OutlinedTextField(name, { name = it }, label = { Text("Nome ou título") }, placeholder = { Text("ex.: parte do título ou do nome") }, singleLine = true,
                 enabled = !busy, leadingIcon = { Icon(Icons.Rounded.Search, null) }, shape = MaterialTheme.shapes.medium,
                 trailingIcon = { if (name.isNotEmpty()) IconButton({ name = "" }, enabled = !busy) { Icon(Icons.Rounded.Close, "Limpar") } },
                 modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(4.dp))
-            Text("Com um nome, o app usa a busca do site e inclui todos os resultados (não só os que repetem o nome no texto ao lado). Na varredura completa, a palavra inteira é obrigatória (guitarra não traz guitarrada). Nada é enviado até você conferir a lista.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Com um nome, o app usa a busca do site e inclui todos os resultados (não só os que repetem o nome no texto ao lado). Na varredura completa, a palavra inteira é obrigatória (“vídeo” não traz “vídeos”). Nada é enviado até você conferir a lista.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
             Text("Só vídeos. Capas e miniaturas dos players nunca entram.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Spacer(Modifier.height(8.dp))
@@ -332,7 +332,7 @@ fun PageTab() {
     LaunchedEffect(Handoff.page.value) { Handoff.page.value?.let { url = it; Handoff.page.value = null } }
     val query = rememberSaveable { mutableStateOf("") }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Section("Só os vídeos desta página", "Cole o link de uma página ou de uma listagem. Se for uma grade de aulas, o app abre cada card e pega o vídeo real — nunca a capa. Se for a página de um único vídeo, tenta o HTML, o servidor yt-dlp e o player na WebView. Só vídeos.", Icons.Rounded.FilterAlt) }
+        item { Section("Só os vídeos desta página", "Cole o link de uma página ou de uma listagem. Se for uma grade de vídeos, o app abre cada card e pega o vídeo real — nunca a capa. Se for a página de um único vídeo, tenta o HTML, o servidor yt-dlp e o player na WebView. Só vídeos.", Icons.Rounded.FilterAlt) }
         item { LinkField(url, { url = it }, !busy, label = "Link da página") }
         item { PhotosToggle(!busy) }
         item { BigButton("Buscar vídeos desta página", Icons.Rounded.Search, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.PAGE, false) } }

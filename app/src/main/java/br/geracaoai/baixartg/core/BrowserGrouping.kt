@@ -11,7 +11,7 @@ import org.jsoup.nodes.Element
 object BrowserGrouping {
     private const val CARD_SEL = "article,li,figure,[class*=card],[class*=item],[class*=video],[class*=post],[class*=thumb]"
     private val NON_VIDEO_LINK = Regex(
-        """(?i)/(?:user|users|profile|profiles|author|authors|channel|channels|model|models|actor|actors|pornstar|pornstars|tag|tags|category|categories|cat|genre|genres|set|sets|album|albums|gallery|galleries|collection|collections|playlist|playlists|search|login|register|signup|auth|account|settings|help|about|contact|privacy|terms|dmca|comment|comments)(?:/|$|\?)"""
+        """(?i)/(?:user|users|profile|profiles|author|authors|channel|channels|model|models|actor|actors|tag|tags|category|categories|cat|genre|genres|set|sets|album|albums|gallery|galleries|collection|collections|playlist|playlists|search|login|register|signup|auth|account|settings|help|about|contact|privacy|terms|dmca|comment|comments)(?:/|$|\?)"""
     )
     private val URL_IN_CARD = Regex(
         """https?://[^\s"'<>()\\]+?\.(?:mp4|webm|m3u8|mpd|mov|m4v|mkv|ts|m4s)(?:\?[^\s"'<>\\]*)?(?=$|[\s"'<>\\),;])""",

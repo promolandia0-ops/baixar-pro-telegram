@@ -48,7 +48,7 @@ object JsScripts {
         function mc(q){var m=document.querySelector(q);return m?(m.getAttribute('content')||m.textContent||'').trim():''}
         var h1=document.querySelector('h1');
         out.pt=[mc('meta[property="og:title"]'),mc('meta[name="twitter:title"]'),h1?(h1.innerText||'').trim():'',document.title||''].filter(function(x){return x&&x.length>1}).slice(0,4).join('\n');
-        var ch=[];document.querySelectorAll('[class*=channel],[class*=author],[class*=uploader],[itemprop=author],a[rel=author],[class*=teacher],[class*=professor],[class*=instructor]').forEach(function(e,i){if(i<3)ch.push((e.innerText||'').trim().slice(0,120))});
+        var ch=[];document.querySelectorAll('[class*=channel],[class*=author],[class*=uploader],[itemprop=author],a[rel=author]').forEach(function(e,i){if(i<3)ch.push((e.innerText||'').trim().slice(0,120))});
         out.pd=[mc('meta[property="og:description"]'),mc('meta[name="description"]'),mc('meta[name="author"]')].concat(ch).join(' ').replace(/\s+/g,' ').slice(0,600);
       }catch(e){}
       try{

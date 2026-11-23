@@ -15,7 +15,7 @@ private val RX_NAMEFILTER_3 = Regex("[-_.]+")
  * Filtro por nome (busca nomeada e “Filtrar por nome”).
  * Sem acento/maiúsculas; palavras inteiras; várias palavras = E (todas).
  * Sem typo, prefixo ou aproximação. O slug/arquivo da mídia conta só como palavras inteiras.
- * A URL da página não entra (evita que /aulas/guitarra/ marque todas as aulas).
+ * A URL da página não entra (evita que o endereço da página marque todos os vídeos).
  */
 object NameFilter {
     private val MARKS = Regex("\\p{M}+")

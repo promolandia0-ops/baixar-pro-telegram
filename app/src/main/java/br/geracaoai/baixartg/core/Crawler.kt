@@ -93,7 +93,7 @@ object Extract {
         RegexOption.IGNORE_CASE,
     )
     private val VIDEO_PAGE_PATH = Regex(
-        """/(?:watch|video|videos|v|embed|player|aula|aulas|lesson|lessons|clip|filme|episodio|episodios|watchvideo)(?:/|$|\.)""",
+        """/(?:watch|video|videos|v|embed|player|clip|filme|episodio|episodios|watchvideo)(?:/|$|\.)""",
         RegexOption.IGNORE_CASE,
     )
     private val LD_VIDEO = Regex(""""(?:contentUrl|embedUrl)"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
@@ -108,7 +108,7 @@ object Extract {
         RegexOption.IGNORE_CASE)
 
     private val TIGHT_TAGS = setOf("figure", "article", "li", "dd", "td", "figcaption")
-    private val TIGHT_CLASS = Regex("""(card|item|lesson|aula|post|entry|media|thumb|clip|video-item|gallery-item|grid-item|tile|box)""", RegexOption.IGNORE_CASE)
+    private val TIGHT_CLASS = Regex("""(card|item|post|entry|media|thumb|clip|video-item|gallery-item|grid-item|tile|box)""", RegexOption.IGNORE_CASE)
     private val LOOSE_TAGS = setOf("body", "html", "main", "header", "footer", "nav", "aside")
     private val MEDIA_TAGS = setOf("video", "audio", "img", "picture", "source", "figure", "iframe", "embed")
     private val HEADING_SEL = "h1,h2,h3,h4,h5,h6"
@@ -382,7 +382,7 @@ object Extract {
         val pageText = listOfNotNull(
             doc.selectFirst("meta[property=og:description]")?.attr("content"), doc.selectFirst("meta[name=description]")?.attr("content"),
             doc.selectFirst("meta[name=author]")?.attr("content"), doc.selectFirst("[itemprop=author]")?.text(), doc.selectFirst("a[rel=author]")?.text(),
-            doc.select("[class*=channel],[class*=author],[class*=uploader],[class*=teacher],[class*=professor],[class*=instrutor],[class*=instructor]").take(3).joinToString(" ") { it.text().take(120) },
+            doc.select("[class*=channel],[class*=author],[class*=uploader],").take(3).joinToString(" ") { it.text().take(120) },
         ).joinToString(" ").replace(RX_CRAWLER_12, " ").trim().take(600)
         fun addVideo(u: String?, text: String? = null, kind: Kind? = null) {
             val a = abs(pageUrl, u) ?: return

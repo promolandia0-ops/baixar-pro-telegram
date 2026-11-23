@@ -9,7 +9,7 @@ private val RX_MEDIAIDENTITY_2 = Regex("[-_.]{2,}")
 
 
 /**
- * Agrupa URLs do mesmo vídeo (qualidades, tokens de CDN, a mesma aula em duas páginas)
+ * Agrupa URLs do mesmo vídeo (qualidades, tokens de CDN, o mesmo vídeo em duas páginas)
  * e escolhe a maior qualidade.
  */
 object MediaIdentity {

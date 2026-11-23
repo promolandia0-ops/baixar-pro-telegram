@@ -52,7 +52,7 @@ object JsRender {
             q('button,[role=button],a[class*=close],[class*=consent] a,[class*=cookie] a').forEach(function(el){var t=lbl(el);if(t.length<25&&re.test(t)){try{el.click()}catch(e){}}});
           }
           function playText(){
-            var re=/^(assistir|assista|assistir agora|assistir aula|assistir v[ií]deo|watch|watch now|watch video|play|play video|reproduzir|ver v[ií]deo|ver aula|iniciar|iniciar aula|come[cç]ar|start)$/i;
+            var re=/^(assistir|assista|assistir agora|assistir v[ií]deo|watch|watch now|watch video|play|play video|reproduzir|ver v[ií]deo|ver iniciar|iniciar come[cç]ar|start)$/i;
             var all=q('button,a,[role=button],[class*=play],[class*=watch],[class*=assistir]'),k=0;
             Array.prototype.slice.call(all,0,400).forEach(function(el){
               var t=lbl(el);if(!t||t.length>30||!re.test(t))return;
@@ -304,7 +304,7 @@ object JsRender {
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private val API_PATH = Regex("""(?i)/(api|ajax|player|playback|video|videos|stream|source|sources|manifest|config|embed|media|play|lesson|aula)s?(/|\.json|\?|$)|\.json(\?|$)|[?&](action|ajax)=""")
+    private val API_PATH = Regex("""(?i)/(api|ajax|player|playback|video|videos|stream|source|sources|manifest|config|embed|media|play)s?(/|\.json|\?|$)|\.json(\?|$)|[?&](action|ajax)=""")
     private val STATIC = Regex("""(?i)\.(css|js|mjs|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|otf|eot|map|avif)(\?|$)""")
 
     private fun buildView(act: Activity, hits: MutableSet<String>, pageUrl: String, block: Boolean): WebView {

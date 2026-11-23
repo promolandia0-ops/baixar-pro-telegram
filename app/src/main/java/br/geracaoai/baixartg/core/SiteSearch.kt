@@ -9,7 +9,7 @@ import java.net.URLEncoder
 
 /**
  * Detecta a busca nativa do site (form, OpenSearch, padrões de URL, WP REST, APIs JSON)
- * para achar aulas de uma vez só, sem varrer o site inteiro.
+ * para achar vários vídeos de uma vez só, sem varrer o site inteiro.
  */
 object SiteSearch {
     const val METHOD_SITE_SEARCH = "Busca do site"
@@ -383,13 +383,13 @@ object SiteSearch {
         return out.values.toList()
     }
 
-    val TAXONOMY_PATH = Regex("""/(tag|tags|category|categoria|categorias|author|autor|channel|channels|canal|c|a|user|users|usuario|profile|perfil|artist|artista|teacher|professor|professora|playlist|series|serie|show|actor|ator|atriz|people|pessoa|elenco|cast)/[^/?#]+""", RegexOption.IGNORE_CASE)
+    val TAXONOMY_PATH = Regex("""/(tag|tags|category|categoria|categorias|author|autor|channel|channels|canal|c|a|user|users|usuario|profile|perfil|artist|artista|playlist|series|serie|show|actor|ator|atriz|people|pessoa|elenco|cast)/[^/?#]+""", RegexOption.IGNORE_CASE)
     private val LISTING_PATH = Regex(
-        """/(videos|aulas|lessons|cursos|category|categories|categorias?|tag|tags|user|users|usuario|teacher|professors?|professores|professora|channel|channels|canal|search|busca|profile|perfis?|model|models?|pornstar|updates|recent|latest|top|popular|page|pagina|archive|author|elenco|galeria|gallery|playlist|playlists|collection|series|episodes|episodios|filmes|movies|clips|shorts|index|members?)(/|$|\?)""",
+        """/(videos|category|categories|categorias?|tag|tags|user|users|usuario|channel|channels|canal|search|busca|profile|perfis?|updates|recent|latest|top|popular|page|pagina|archive|author|elenco|galeria|gallery|playlist|playlists|collection|series|episodes|episodios|filmes|movies|clips|shorts|index|members?)(/|$|\?)""",
         RegexOption.IGNORE_CASE,
     )
     private val LISTING_QUERY = Regex("""[?&](s|q|query|search|busca|k|keyword|author|tag|cat|categoria|user|p)=""", RegexOption.IGNORE_CASE)
-    private val LISTING_HTML = Regex("""(?i)(?:list[_-]videos|video-list|videos-list|thumbs-list|grid-videos|video-grid|aulas-list|catalogo|catálogo|listagem)""")
+    private val LISTING_HTML = Regex("""(?i)(?:list[_-]videos|video-list|videos-list|thumbs-list|grid-videos|video-grid|catalogo|catálogo|listagem)""")
     private val DURATION_BADGE = Regex("""(?:\d{1,2}:)?\d{1,2}:\d{2}""")
     private val PLAY_ICON = Regex("""(?:class|aria-label)\s*=\s*["'][^"']*(?:play-button|play-icon|btn-play|video-play|icon-play|fa-play|playback)""", RegexOption.IGNORE_CASE)
 
@@ -413,7 +413,7 @@ object SiteSearch {
         if (videoCount >= 2) return false
         val listingUrl = looksLikeListingUrl(pageUrl)
         val listingHtml = looksLikeListingHtml(html)
-        // Um vídeo no player + alguns relacionados = página da aula, não listagem.
+        // Um vídeo no player + alguns relacionados = página de vídeo, não listagem.
         if (videoCount == 1 && cards.size <= 12 && !listingUrl && !listingHtml) return false
         if (cards.size >= 3) return true
         if (cards.size >= 2 && videoCount <= 0) return true

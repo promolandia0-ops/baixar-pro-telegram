@@ -60,7 +60,7 @@ object Jobs {
 
     fun startCrawl(url: String) = startScan(listOf(url), Mode.SITE, false)
 
-    /** Só roda quando o usuário toca no botão (nunca ao digitar). name = filtro por título/nome da aula. */
+    /** Só roda quando o usuário toca no botão (nunca ao digitar). name = filtro por título/nome do vídeo. */
     fun startScan(urls0: List<String>, m: Mode, auto: Boolean, name: String = "") {
         if (job?.isActive == true) return
         val urls = urls0.map { u -> u.trim().let { if (it.startsWith("http", true) || it.startsWith("mega:", true)) it else "https://$it" } }.filter { it.length > 8 }.distinct()
@@ -221,7 +221,7 @@ object Jobs {
                 val via = if (methodUsed.isNotBlank()) "$methodUsed. " else ""
                 val diag = crawl.value.detail.let { if (it.isNotBlank()) " ($it)" else "" }
                 status.value = when {
-                total == 0 && words.isNotEmpty() -> via + "Nenhuma aula encontrada com esse nome (“${name.trim()}”)." + diag + (if (skipped > 0) " $skipped mídias no site não batiam com o título." else "") + (if (errors.isNotEmpty()) " " + errors.joinToString(" ") else "")
+                total == 0 && words.isNotEmpty() -> via + "Nenhum vídeo encontrado com esse nome (“${name.trim()}”)." + diag + (if (skipped > 0) " $skipped mídias no site não batiam com o título." else "") + (if (errors.isNotEmpty()) " " + errors.joinToString(" ") else "")
                 total == 0 && errors.isNotEmpty() -> via + errors.joinToString("\n")
                 total == 0 -> via + (if (m == Mode.SITE) "Nenhum vídeo ou foto encontrado. Tente ativar “Usar servidor (yt-dlp) em todas as páginas” em Ajustes." else "Nenhum vídeo ou foto encontrado nesta página.")
                 words.isNotEmpty() -> via + "$total $midia com esse nome. Confira os títulos e toque em “Baixar e enviar”." + diag + (if (errors.isNotEmpty()) " " + errors.joinToString(" ") else "")
