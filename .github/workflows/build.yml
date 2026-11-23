@@ -24,13 +24,6 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Instalar componentes do SDK (API 35)
-        run: |
-          yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null || true
-
       - name: Permitir executar o gradlew
         run: chmod +x gradlew
 
