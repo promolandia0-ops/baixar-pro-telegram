@@ -1,0 +1,58 @@
+name: Build APK
+
+# Gera um APK instalável toda vez que o código muda neste branch,
+# e publica no Release "app-latest" com um link fixo para baixar no celular.
+
+on:
+  push:
+    branches: [ build ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Baixar o código
+        uses: actions/checkout@v4
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Instalar componentes do SDK (API 35)
+        run: |
+          yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0" >/dev/null || true
+
+      - name: Permitir executar o gradlew
+        run: chmod +x gradlew
+
+      - name: Compilar o APK (debug, instalável)
+        run: ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Preparar o arquivo
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/app-debug.apk out/baixar-pro-telegram.apk
+
+      - name: Guardar como artefato (backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: baixar-pro-telegram-apk
+          path: out/baixar-pro-telegram.apk
+
+      - name: Publicar no Release (link fixo para instalar)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: app-latest
+          name: "Baixar pro Telegram — último build"
+          body: "APK mais recente, gerado automaticamente. Toque no arquivo .apk abaixo para baixar e instalar."
+          prerelease: true
+          files: out/baixar-pro-telegram.apk
