@@ -46,9 +46,23 @@ object Sent {
         val new = keys.filter { it.isNotBlank() && queued.add(it) }
         if (new.isNotEmpty()) try { qfile?.appendText(new.joinToString("\n", postfix = "\n")) } catch (_: Exception) {}
     }
+    /** Tira da memória “já pedido”: o item pode voltar a aparecer no navegador (falhou, cancelou ou saiu da fila). */
+    @Synchronized fun unqueue(keys: Collection<String>) {
+        val rm = keys.filter { it.isNotBlank() && queued.remove(it) }
+        if (rm.isNotEmpty()) writeQueued()
+    }
+    @Synchronized private fun writeQueued() {
+        try {
+            val f = qfile ?: return
+            if (queued.isEmpty()) f.delete()
+            else f.writeText(queued.joinToString("\n", postfix = "\n"))
+        } catch (_: Exception) {}
+    }
     fun isQueued(keys: Collection<String>) = keys.any { it in queued }
     val size get() = set.size
-    @Synchronized fun clear() { set.clear(); canonIdx.clear(); stemIdx.clear(); file?.delete(); queued.clear(); qfile?.delete() }
+    /** Só a memória de “já enviado” (não apaga o histórico visível nem o “já pedido”). */
+    @Synchronized fun clearSentOnly() { set.clear(); canonIdx.clear(); stemIdx.clear(); file?.delete() }
+    @Synchronized fun clear() { clearSentOnly(); queued.clear(); qfile?.delete() }
     @Synchronized private fun addAll(keys: Collection<String>): Int {
         val new = keys.filter { set.add(it) }
         new.forEach { index(it) }

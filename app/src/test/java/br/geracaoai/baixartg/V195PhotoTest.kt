@@ -9,7 +9,7 @@ import org.junit.Test
 import java.io.File
 
 class V195PhotoTest {
-    @Test fun dumpsExactScript() { File("/tmp/grab_app.js").writeText(PhotoGrab.JS); assertTrue(PhotoGrab.JS.contains("VER='g1'")) }
+    @Test fun dumpsExactScript() { File("/tmp/grab_app.js").writeText(PhotoGrab.JS); assertTrue(PhotoGrab.JS.contains("VER='g2'")) }
 
     @Test fun parsesWebViewQuotedJson() {
         val inner = """{"v":"g1","n":3,"raw":3,"p":[{"u":"https://a.com/x.jpg","w":1200,"h":800,"th":"https://a.com/x-300.jpg","t":"carro","s":"img","o":0}],"r":{"pequena":2}}"""

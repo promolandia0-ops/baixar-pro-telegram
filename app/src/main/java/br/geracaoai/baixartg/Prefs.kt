@@ -27,8 +27,10 @@ object Prefs {
     /** Última página aberta no Navegador do app. */
     var browserUrl: String get() = p.getString("browser_url", "")!!; set(v) = p.edit().putString("browser_url", v).apply()
     var probe: Boolean get() = p.getBoolean("probe", false); set(v) = p.edit().putBoolean("probe", v).apply()
-    var parDown: Int get() = p.getInt("pdown", 3); set(v) = p.edit().putInt("pdown", v).apply()
-    var parUp: Int get() = p.getInt("pup", 2); set(v) = p.edit().putInt("pup", v).apply()
+    var parDown: Int get() = p.getInt("pdown2", 10); set(v) = p.edit().putInt("pdown2", v).apply()
+    var parUp: Int get() = p.getInt("pup2", 5); set(v) = p.edit().putInt("pup2", v).apply()
+    /** Fotos vão como arquivo (sem a compressão do Telegram). Padrão ligado. */
+    var photosAsFile: Boolean get() = p.getBoolean("photos_as_file", true); set(v) = p.edit().putBoolean("photos_as_file", v).apply()
     var synced: Boolean get() = p.getBoolean("synced", false); set(v) = p.edit().putBoolean("synced", v).apply()
     var botToken: String get() = p.getString("bot", "")!!; set(v) = p.edit().putString("bot", v).apply()
     /** 0 = original (máxima). Senão altura máxima (só afeta streams HLS com várias qualidades). */

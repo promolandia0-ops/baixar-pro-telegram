@@ -31,7 +31,8 @@ object Uploader {
     /** Envia para Mensagens Salvas. Cancelar a corrotina (Parar) aborta o envio no TDLib. */
     suspend fun upload(file: File, caption: String, asVideo: Boolean = true, onProgress: (Float) -> Unit): TdApi.Message {
         if (asVideo) return upload0(file, caption, true, false, onProgress)
-        // foto: tenta como foto; se o Telegram recusar (IMAGE_PROCESS_FAILED, tamanho, formato), manda como arquivo
+        // padrão: manda como arquivo (original, sem a compressão do Telegram). Se desligar o ajuste, tenta como foto e cai para arquivo se recusar.
+        if (br.geracaoai.baixartg.Prefs.photosAsFile) return upload0(file, caption, false, true, onProgress)
         return try { upload0(file, caption, false, false, onProgress) } catch (e: CancellationException) { throw e } catch (e: Exception) {
             upload0(file, caption, false, true, onProgress)
         }

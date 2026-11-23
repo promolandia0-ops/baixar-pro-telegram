@@ -1,5 +1,7 @@
 package br.geracaoai.baixartg.core
 
+import br.geracaoai.baixartg.Prefs
+
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
@@ -140,6 +142,26 @@ object Downloader {
 
     /** Foto: bytes originais, com cookies/UA do navegador e Referer da página; confere pelo conteúdo que é imagem e acerta a extensão. */
     suspend fun photo(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
+        val first = photoOnce(url, referer, dir, title, progress)
+        val long = photoLongSide(first)
+        if (long in 1 until 400) {
+            val alts = listOfNotNull(PhotoGrab.upgradeStrong(url), PhotoGrab.fallback(url)).distinct().filter { it != url }
+            for (alt in alts) {
+                try {
+                    val second = photoOnce(alt, referer, dir, title, progress)
+                    if (photoLongSide(second) > long) { first.delete(); return second }
+                    second.delete()
+                } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) { first.delete(); throw e } }
+            }
+        }
+        return first
+    }
+    fun photoLongSide(file: File): Int = try {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, o)
+        maxOf(o.outWidth, o.outHeight).coerceAtLeast(0)
+    } catch (_: Exception) { 0 }
+    private suspend fun photoOnce(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
         val rq = req(url, referer).newBuilder().header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8").build()
         Net.http.newCall(rq).await().use { r ->
             if (!r.isSuccessful) throw DlException("HTTP ${r.code} ao baixar a foto")
@@ -392,11 +414,17 @@ object Downloader {
         throw last!!
     }
 
-    /** Envia a sessão do navegador ao servidor (campos "cookies"/"user_agent"/"referer").
-     *  Obs.: o backend baixar-video atual ainda ignora esses campos; ficam prontos para quando ele aceitar. */
+    /** Envia a sessão do navegador ao servidor (cookies/UA/Referer). No X junta cookies de x.com e twitter.com. */
     fun session(j: JSONObject, pageUrl: String): JSONObject {
-        val c = try { Net.cookies?.cookieFor(pageUrl) } catch (_: Exception) { null }
-        if (!c.isNullOrBlank()) j.put("cookies", c)
+        val urls = LinkedHashSet<String>()
+        urls += pageUrl
+        val host = try { java.net.URI(pageUrl).host?.lowercase()?.removePrefix("www.") } catch (_: Exception) { null }
+        if (host == "x.com" || host == "twitter.com" || host?.endsWith(".x.com") == true || host?.endsWith(".twitter.com") == true) {
+            urls += listOf("https://x.com/", "https://www.x.com/", "https://twitter.com/", "https://www.twitter.com/", "https://mobile.twitter.com/")
+        }
+        val cookies = urls.mapNotNull { u -> try { Net.cookies?.cookieFor(u)?.trim()?.ifBlank { null } } catch (_: Exception) { null } }.distinct()
+        if (cookies.isNotEmpty()) j.put("cookies", cookies.joinToString("; "))
+        if (Prefs.quality == 0) j.put("quality", "best")
         return j.put("user_agent", Net.userAgent).put("referer", Net.originOf(pageUrl) ?: pageUrl)
     }
 

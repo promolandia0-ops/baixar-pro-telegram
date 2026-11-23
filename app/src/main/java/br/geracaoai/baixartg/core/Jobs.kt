@@ -369,7 +369,7 @@ object Jobs {
                 Uploader.savedChat()
                 st()
                 coroutineScope {
-                    val nDown = Prefs.parDown.coerceIn(1, 8); val nUp = Prefs.parUp.coerceIn(1, 4)
+                    val nDown = Prefs.parDown.coerceIn(1, 10); val nUp = Prefs.parUp.coerceIn(1, 5)
                     val queue = Channel<Item>(Channel.UNLIMITED); todo.forEach { queue.trySend(it) }; queue.close()
                     // fila limitada: no máximo nDown baixando + nDown prontos esperando envio (protege o armazenamento)
                     val ready = Channel<Pair<Item, File>>(nDown)
@@ -525,6 +525,10 @@ object Jobs {
     }
 
     fun clearHistory() { Sent.clear(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Histórico apagado." }
+    /** Apaga só a lista visível do Histórico (os envios feitos). A memória de “já enviado” continua. */
+    fun clearHistoryList() { History.clear(); syncStatus.value = "Lista do histórico apagada." }
+    /** Apaga a memória de “já enviado”: os itens voltam a poder ser baixados no navegador. */
+    fun clearSentMemory() { Sent.clearSentOnly(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Memória de já enviado apagada." }
 
     fun stop() { stopping.value = true; job?.cancel() }
     val busy get() = job?.isActive == true

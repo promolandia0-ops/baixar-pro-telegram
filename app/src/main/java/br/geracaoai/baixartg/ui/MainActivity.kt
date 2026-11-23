@@ -57,7 +57,16 @@ class MainActivity : ComponentActivity() {
             AppTheme(dark) { Surface(color = MaterialTheme.colorScheme.background) { Root(shared) } }
         }
     }
+    override fun onPause() {
+        try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
+        super.onPause()
+    }
+    override fun onStop() {
+        try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
+        super.onStop()
+    }
     override fun onDestroy() {
+        try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
         br.geracaoai.baixartg.core.JsRender.unbind(this)
         super.onDestroy()
     }

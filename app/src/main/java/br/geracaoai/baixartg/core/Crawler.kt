@@ -123,7 +123,7 @@ object Extract {
         } catch (_: Exception) { null }
     }
 
-    fun isVideoUrl(u: String) = VIDEO_EXT.containsMatchIn(u.substringBefore('#'))
+    fun isVideoUrl(u: String) = VIDEO_EXT.containsMatchIn(u.substringBefore('#')) || u.contains("video.twimg.com", true)
     fun isPhotoUrl(u: String) = PHOTO_EXT.containsMatchIn(u.substringBefore('#'))
     fun isHls(u: String) = RX_CRAWLER_1.containsMatchIn(u)
     fun isDash(u: String) = RX_CRAWLER_2.containsMatchIn(u)

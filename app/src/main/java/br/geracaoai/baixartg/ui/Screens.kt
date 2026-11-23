@@ -393,6 +393,7 @@ private fun pipeGroup(st: Pipeline.PS) = when (st) {
     Pipeline.PS.DONE -> 3
     Pipeline.PS.FAIL -> 4
     Pipeline.PS.SKIP -> 7
+    Pipeline.PS.ANALYZE -> 8
 }
 
 private fun isPhotoItem(t: Pipeline.PItem) = t.photo || t.f?.kind == Kind.PHOTO
@@ -404,15 +405,17 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         val waiting = l.count { it.st == Pipeline.PS.WAIT || it.st == Pipeline.PS.READY }
         val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
         val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
+        val analyzing = l.count { it.st == Pipeline.PS.ANALYZE }
         val active = l.any { !Pipeline.isFinal(it.st) }
         val nPhotos = l.count { isPhotoItem(it) }; val nVideos = l.size - nPhotos
         var confirm by remember { mutableStateOf(false) }
+        var clearWhich by remember { mutableStateOf("") }
         ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Fila de envio do Navegador", style = MaterialTheme.typography.titleMedium)
             Row { Stat("$done", "enviados", Modifier.weight(1f)); Stat("$waiting", "na fila", Modifier.weight(1f)); Stat("$fail", "falharam", Modifier.weight(1f)) }
             Text("$nVideos vídeo${if (nVideos == 1) "" else "s"} • $nPhotos foto${if (nPhotos == 1) "" else "s"}", style = MaterialTheme.typography.bodyMedium)
             LinearProgressIndicator(progress = { if (l.isEmpty()) 0f else (done + fail).toFloat() / l.size }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
-            Text("$done de ${l.size} enviados" + (if (resolving > 0) " • abrindo $resolving página(s)" else "") + (if (downs > 0) " • baixando $downs" else "") + (if (ups > 0) " • enviando $ups" else "") +
+            Text("$done de ${l.size} enviados" + (if (resolving > 0) " • abrindo $resolving página(s)" else "") + (if (downs > 0) " • baixando $downs" else "") + (if (ups > 0) " • enviando $ups" else "") + (if (analyzing > 0) " • $analyzing em análise" else "") +
                 (if (paused) " • PAUSADO" else if (running) " • rodando em segundo plano" else ""),
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -421,17 +424,18 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
                 OutlinedButton({ confirm = true }, Modifier.weight(1f), enabled = active) { Text("Cancelar tudo", maxLines = 1) }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (fail > 0) FilledTonalButton({ Pipeline.retryFailed() }, Modifier.weight(1f)) { Text("Reenviar falhas", maxLines = 1) }
-                if (done > 0) OutlinedButton({ Pipeline.clearDone() }, Modifier.weight(1f)) { Text("Limpar enviados", maxLines = 1) }
+                if (fail + analyzing > 0) FilledTonalButton({ Pipeline.retryFailed() }, Modifier.weight(1f)) { Text("Reenviar falhas", maxLines = 1) }
+                OutlinedButton({ clearWhich = "menu" }, Modifier.weight(1f)) { Text("Limpar", maxLines = 1) }
             }
         } }
         if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Cancelar tudo?") },
-            text = { Text("Os vídeos que ainda não foram enviados saem da fila.") },
+            text = { Text("Os vídeos que ainda não foram enviados saem da fila e voltam a aparecer no navegador.") },
             confirmButton = { TextButton({ confirm = false; Pipeline.cancelAll() }) { Text("Cancelar tudo") } },
             dismissButton = { TextButton({ confirm = false }) { Text("Voltar") } })
+        if (clearWhich.isNotEmpty()) ClearQueueDialog(clearWhich, l, { clearWhich = it }, { clearWhich = "" })
     }
     // contagem por grupo numa passada só (rápido com milhares de itens)
-    val cnt = IntArray(8); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
+    val cnt = IntArray(9); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
     cnt[0] = l.size
     item(key = "pipe-chips") { PipeChips(filter, cnt) }
     val f = filter.value
@@ -446,7 +450,7 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun PipeChips(filter: MutableState<Int>, cnt: IntArray) {
-    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos", "Repetidos")
+    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos", "Repetidos", "Em análise")
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         names.forEachIndexed { i, n ->
             FilterChip(selected = filter.value == i, onClick = { filter.value = i }, label = { Text("$n (${cnt[i]})", maxLines = 1) })
@@ -473,22 +477,75 @@ fun PipeRow(t: Pipeline.PItem) {
                     Pipeline.PS.DONE -> "enviado" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
                     Pipeline.PS.FAIL -> "falhou: " + t.msg.ifBlank { "erro" }
                     Pipeline.PS.SKIP -> "repetido (não enviado) • " + t.msg
+                    Pipeline.PS.ANALYZE -> "em análise: " + t.msg.ifBlank { "tentando de outro jeito" }
                 }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
-                    color = when (t.st) { Pipeline.PS.FAIL -> cs.error; Pipeline.PS.DONE -> cs.primary; else -> cs.onSurfaceVariant })
+                    color = when (t.st) { Pipeline.PS.FAIL, Pipeline.PS.ANALYZE -> cs.error; Pipeline.PS.DONE -> cs.primary; else -> cs.onSurfaceVariant })
                 if ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog > 0f) {
                     Spacer(Modifier.height(4.dp)); LinearProgressIndicator(progress = { t.prog }, Modifier.fillMaxWidth())
                 } else if (t.st == Pipeline.PS.RESOLVING || ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog <= 0f)) {
                     Spacer(Modifier.height(4.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
             }
-            if (t.st == Pipeline.PS.FAIL) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+            if (t.st == Pipeline.PS.FAIL || t.st == Pipeline.PS.ANALYZE) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
             if (t.st == Pipeline.PS.SKIP) TextButton({ Pipeline.forceSend(t.id) }) { Text("Enviar mesmo assim") }
         }
     }
 }
 
 @Composable
+private fun ClearQueueDialog(which: String, l: List<Pipeline.PItem>, setWhich: (String) -> Unit, close: () -> Unit) {
+    val failN = l.count { it.st == Pipeline.PS.FAIL || it.st == Pipeline.PS.ANALYZE }
+    val queueN = l.count { it.st in setOf(Pipeline.PS.WAIT, Pipeline.PS.READY, Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP) }
+    val doneN = l.count { it.st == Pipeline.PS.DONE }
+    val histN = History.list.value.size
+    if (which == "menu") {
+        AlertDialog(onDismissRequest = close, title = { Text("Limpar") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Cada botão pede confirmação. O que falhou volta a aparecer no navegador. O histórico e a memória de “já enviado” são coisas diferentes.")
+                    OutlinedButton({ setWhich("falhas") }, Modifier.fillMaxWidth(), enabled = failN > 0) { Text("Apagar falhas ($failN)", maxLines = 1) }
+                    OutlinedButton({ setWhich("fila") }, Modifier.fillMaxWidth(), enabled = queueN > 0) { Text("Apagar fila ($queueN)", maxLines = 1) }
+                    OutlinedButton({ setWhich("enviados") }, Modifier.fillMaxWidth(), enabled = doneN > 0) { Text("Apagar baixados/enviados ($doneN)", maxLines = 1) }
+                    OutlinedButton({ setWhich("historico") }, Modifier.fillMaxWidth(), enabled = histN > 0) { Text("Apagar histórico ($histN)", maxLines = 1) }
+                    Button({ setWhich("tudo") }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Apagar tudo") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(close) { Text("Fechar") } })
+        return
+    }
+    val (title, body, act) = when (which) {
+        "falhas" -> Triple("Apagar falhas?", "Saiem da fila as falhas e o que está em análise. Voltam a aparecer no navegador para baixar de novo.", { Pipeline.clearFailed() })
+        "fila" -> Triple("Apagar fila?", "Sai o que ainda não foi enviado (incluindo o que está baixando). O que já foi enviado e o histórico ficam.", { Pipeline.clearQueue() })
+        "enviados" -> Triple("Apagar baixados/enviados?", "Tira da fila só os que já foram enviados. O histórico e a memória de “já enviado” continuam (eles não voltam a aparecer no navegador).", { Pipeline.clearDone() })
+        "historico" -> Triple("Apagar histórico?", "Apaga a lista do Histórico (os envios feitos). A memória de “já enviado” — que esconde no navegador o que já foi mandado — é outra coisa: você escolhe abaixo.", { })
+        "tudo" -> Triple("Apagar tudo?", "Limpa a fila inteira (falhas, pendentes e enviados) e a lista do Histórico. A memória de “já enviado” você escolhe abaixo.", { })
+        else -> Triple("", "", { })
+    }
+    var alsoMem by remember { mutableStateOf(false) }
+    AlertDialog(onDismissRequest = close, title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(body)
+                if (which == "historico" || which == "tudo") {
+                    SwitchRow("Também apagar a memória de já enviado", "Se ligar, os itens já mandados voltam a aparecer no navegador para baixar de novo.", alsoMem) { alsoMem = it }
+                }
+            }
+        },
+        confirmButton = { TextButton({
+            when (which) {
+                "historico" -> { Jobs.clearHistoryList(); if (alsoMem) Jobs.clearSentMemory() }
+                "tudo" -> Pipeline.clearAll(alsoSentMemory = alsoMem)
+                else -> act()
+            }
+            close()
+        }) { Text("Apagar") } },
+        dismissButton = { TextButton(close) { Text("Cancelar") } })
+}
+
+@Composable
 fun QueueSummary(items: List<Item>, phase: Phase) {
+
     val sel = items.filter { it.sel || it.st != St.WAIT }
     val done = sel.count { it.st == St.DONE }; val err = sel.count { it.st == St.ERR }
     val prog = if (sel.isEmpty()) 0f else sel.sumOf { (when (it.st) { St.DONE, St.ERR -> 1f; St.DOWN -> it.prog * 0.5f; St.READY -> 0.5f; St.UP -> 0.5f + it.prog * 0.5f; else -> 0f }).toDouble() }.toFloat() / sel.size
@@ -621,12 +678,14 @@ fun HistoryTab(goQueue: () -> Unit) {
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     val df = remember { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR")) }
     var confirm by remember { mutableStateOf(false) }
+    var alsoMem by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${hist.size} vídeos enviados", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text("${hist.size} envios no histórico", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 TextButton({ Jobs.syncTelegram() }) { Icon(Icons.Rounded.Sync, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Sincronizar") }
             }
+            Text("Esta lista é o histórico dos envios. A memória de “já enviado” (que esconde no navegador o que já foi mandado) é outra coisa, e você escolhe se apaga junto.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (sync.isNotBlank()) Text(sync, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (hist.isEmpty()) item { EmptyState(Icons.Rounded.History, "Nenhum envio ainda", "Os vídeos enviados ao Telegram aparecem aqui.") }
@@ -643,11 +702,14 @@ fun HistoryTab(goQueue: () -> Unit) {
                 }
             }
         }
-        if (hist.isNotEmpty()) item { TextButton({ confirm = true }, Modifier.fillMaxWidth()) { Text("Limpar histórico", color = MaterialTheme.colorScheme.error) } }
+        if (hist.isNotEmpty()) item { TextButton({ confirm = true }, Modifier.fillMaxWidth()) { Text("Apagar histórico inteiro", color = MaterialTheme.colorScheme.error) } }
     }
-    if (confirm) AlertDialog({ confirm = false }, confirmButton = { TextButton({ History.clear(); Jobs.clearHistory(); confirm = false }) { Text("Limpar") } },
-        dismissButton = { TextButton({ confirm = false }) { Text("Cancelar") } }, title = { Text("Limpar histórico?") },
-        text = { Text("Os vídeos já enviados deixarão de ser desmarcados automaticamente (até sincronizar de novo).") })
+    if (confirm) AlertDialog({ confirm = false; alsoMem = false }, confirmButton = { TextButton({ Jobs.clearHistoryList(); if (alsoMem) Jobs.clearSentMemory(); confirm = false; alsoMem = false }) { Text("Apagar") } },
+        dismissButton = { TextButton({ confirm = false; alsoMem = false }) { Text("Cancelar") } }, title = { Text("Apagar histórico?") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Apaga de vez a lista do Histórico (não fica guardada em outro lugar).")
+            SwitchRow("Também apagar a memória de já enviado", "Se ligar, o que já foi mandado volta a aparecer no navegador. Se não ligar, eles continuam escondidos como já enviados.", alsoMem) { alsoMem = it }
+        } })
 }
 
 // ---------------- Configurações ----------------
@@ -685,6 +747,8 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
                 SwitchRow("Substituir por qualidade maior", "Se o repetido tiver resolução maior que o já enviado, envia mesmo assim (o antigo continua lá).", hiOn) { hiOn = it; Prefs.replaceHigher = it }
                 var capOn by remember { mutableStateOf(Prefs.sendCaption) }
                 SwitchRow("Enviar legenda (título/link)", "Desligado: vai só o vídeo/foto, sem título, link ou texto.", capOn) { capOn = it; Prefs.sendCaption = it }
+                var asFile by remember { mutableStateOf(Prefs.photosAsFile) }
+                SwitchRow("Fotos como arquivo (original)", "Ligado: a foto vai sem a compressão do Telegram, na qualidade original. Desligado: vai como foto (o Telegram comprime um pouco) e, se recusar, vai como arquivo.", asFile) { asFile = it; Prefs.photosAsFile = it }
                 FilledTonalButton({ save(); testing = true; test = ""; scope.launch { test = Jobs.testConnection(); testing = false } }, enabled = !testing, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     if (testing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.NetworkCheck, null); Spacer(Modifier.width(8.dp)); Text("Testar conexão") }
                 if (test.isNotBlank()) InfoCard(test, if (test.contains("✗")) Icons.Rounded.ErrorOutline else Icons.Rounded.CheckCircle, if (test.contains("✗")) 1 else 2)
@@ -704,10 +768,10 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
             }
             SettingsGroup("Desempenho", Icons.Rounded.Speed) {
                 Text("Downloads ao mesmo tempo: ${pd.toInt()}")
-                Slider(pd, { pd = it }, valueRange = 1f..6f, steps = 4)
+                Slider(pd, { pd = it }, valueRange = 1f..10f, steps = 8)
                 Text("Envios ao Telegram ao mesmo tempo: ${pu.toInt()}")
-                Slider(pu, { pu = it }, valueRange = 1f..3f, steps = 1)
-                Text("Conta restrita? Deixe envios em 1.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Slider(pu, { pu = it }, valueRange = 1f..5f, steps = 3)
+                Text("O padrão agora é 10 downloads e 5 envios. Conta restrita? Deixe envios em 1.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(server, { server = it }, label = { Text("Servidor yt-dlp") }, singleLine = true, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth())
             }
             SettingsGroup("Limpar repetidos", Icons.Rounded.DeleteSweep) {
@@ -715,15 +779,27 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
                 Button(onDedupe, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.DeleteSweep, null); Spacer(Modifier.width(8.dp)); Text("Limpar repetidos das Mensagens Salvas") }
             }
             LoggedAccountsGroup()
-            SettingsGroup("Histórico de enviados", Icons.Rounded.History) {
+            SettingsGroup("Histórico", Icons.Rounded.History) {
                 val sync by Jobs.syncStatus.collectAsState()
-                var hist by remember { mutableIntStateOf(Sent.size) }
-                Text("$hist chaves • vídeos já enviados aparecem desmarcados com “Já enviado”.", style = MaterialTheme.typography.bodyMedium)
+                var keysN by remember { mutableIntStateOf(Sent.size) }
+                val histN = History.list.collectAsState().value.size
+                var confirmH by remember { mutableStateOf("") }
+                var alsoMem by remember { mutableStateOf(false) }
+                Text("A lista do Histórico (aba Histórico, $histN itens) mostra o que foi enviado. A memória de já enviado ($keysN chaves) é o que esconde esses itens no navegador. São coisas diferentes.")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton({ Jobs.syncTelegram() }, Modifier.weight(1f)) { Icon(Icons.Rounded.Sync, null); Spacer(Modifier.width(6.dp)); Text("Sincronizar", maxLines = 1) }
-                    OutlinedButton({ Jobs.clearHistory(); hist = 0 }, Modifier.weight(1f)) { Text("Limpar chaves", maxLines = 1) }
                 }
-                if (sync.isNotBlank()) { Text(sync, style = MaterialTheme.typography.bodySmall); LaunchedEffect(sync) { hist = Sent.size } }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton({ confirmH = "list" }, Modifier.weight(1f), enabled = histN > 0) { Text("Apagar histórico", maxLines = 1) }
+                    OutlinedButton({ confirmH = "mem" }, Modifier.weight(1f), enabled = keysN > 0) { Text("Apagar já enviado", maxLines = 1) }
+                }
+                if (sync.isNotBlank()) { Text(sync, style = MaterialTheme.typography.bodySmall); LaunchedEffect(sync) { keysN = Sent.size } }
+                if (confirmH == "list") AlertDialog({ confirmH = ""; alsoMem = false }, confirmButton = { TextButton({ Jobs.clearHistoryList(); if (alsoMem) { Jobs.clearSentMemory(); keysN = Sent.size }; confirmH = "" }) { Text("Apagar") } },
+                    dismissButton = { TextButton({ confirmH = ""; alsoMem = false }) { Text("Cancelar") } }, title = { Text("Apagar histórico?") },
+                    text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("Apaga de vez a lista do Histórico."); SwitchRow("Também apagar a memória de já enviado", "Se ligar, o que já foi mandado volta a aparecer no navegador.", alsoMem) { alsoMem = it } } })
+                if (confirmH == "mem") AlertDialog({ confirmH = "" }, confirmButton = { TextButton({ Jobs.clearSentMemory(); keysN = Sent.size; confirmH = "" }) { Text("Apagar") } },
+                    dismissButton = { TextButton({ confirmH = "" }) { Text("Cancelar") } }, title = { Text("Apagar memória de já enviado?") },
+                    text = { Text("Os itens já mandados voltam a aparecer no navegador. A lista do Histórico continua.") })
             }
             OutlinedButton({ scope.launch { try { Td.send(TdApi.LogOut()) } catch (_: Exception) {} }; onClose() }, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Icon(Icons.AutoMirrored.Rounded.Logout, null); Spacer(Modifier.width(8.dp)); Text("Sair do Telegram") }
