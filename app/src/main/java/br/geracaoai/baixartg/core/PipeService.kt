@@ -40,7 +40,7 @@ class PipeService : Service() {
         if (wl == null) wl = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "baixartg:queue").apply { setReferenceCounted(false); acquire(12 * 60 * 60 * 1000L) }
         if (wifi == null) wifi = try {
             @Suppress("DEPRECATION")
-            (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager).createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "baixartg:queue").apply { setReferenceCounted(false); acquire() }
+            (applicationContext.getSystemService(WIFI_SERVICE) as WifiManager).createWifiLock(WifiManager.WIFI_MODE_FULL, "baixartg:queue").apply { setReferenceCounted(false); acquire() }
         } catch (_: Exception) { null }
         if (intent?.action != PAUSE) Pipeline.start()
         scope.coroutineContext.cancelChildren()

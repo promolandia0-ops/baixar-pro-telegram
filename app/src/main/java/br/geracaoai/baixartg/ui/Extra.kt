@@ -234,7 +234,6 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     } }
     fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs)
         if (BrowserDetect.photosOn.value) { handler.removeCallbacks(photoRun); handler.postDelayed(photoRun, delayMs + 300) } }
-    LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_000); if (web != null) scheduleCollect(0) } }
     val mode by BrowserDetect.mode
     val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
     val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
@@ -244,10 +243,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     val pageAt by BrowserDetect.pageAt
     val loadAllOn by BrowserLoadMore.running
     val loadAllPg by BrowserLoadMore.pageNum
-    var nowTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); nowTick = System.currentTimeMillis(); BrowserDetect.watchLoading(nowTick) } }
     val working = (if (mode == 1) 0 else pendingN) + (if (mode != 0) photoBusy else 0)
-    val searching = detected == 0 && phN == 0 && working > 0 && (pageAt == 0L || nowTick - pageAt < 25_000)
+    val searching = detected == 0 && phN == 0 && working > 0 && (pageAt == 0L || System.currentTimeMillis() - pageAt < 25_000)
     var moreMenu by remember { mutableStateOf(false) }
 
     Scaffold(topBar = {
@@ -306,6 +303,16 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     mode == 2 && phN > 0 -> "$phN fotos"
                     searching -> "Procurando…"
                     else -> "0 vídeos"
+                }
+                OutlinedButton(
+                    onClick = { scheduleCollect(0) },
+                    modifier = Modifier.height(34.dp),
+                    enabled = current.startsWith("http"),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                ) {
+                    Icon(Icons.Rounded.Search, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Procurar", style = MaterialTheme.typography.labelMedium)
                 }
                 FilledTonalButton(
                     onClick = { sheet = true },
@@ -411,7 +418,6 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url)
                     if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
                     v.evaluateJavascript(MseHookScript.SCRIPT) { }
-                    scheduleCollect(400)
                 }
                 override fun shouldInterceptRequest(v: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
                     val u = request.url?.toString().orEmpty()
@@ -456,7 +462,6 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     return true
                 }
             }
-            setOnScrollChangeListener { _, _, _, _, _ -> scheduleCollect(1_200) }
             web = this
             BrowserRuntime.adopt(this)
             if (initialAddr.length > 8) loadUrl(initialAddr)

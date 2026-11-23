@@ -34,9 +34,9 @@ object JsRender {
      * Páginas ocultas ficam na MESMA janela (e no mesmo processo de renderização) do navegador visível, então
      * cada uma tocando vídeo pesa na tela. A fila de envio tem pool próprio (até 10), independente do navegador visível.
      */
-    private val gate = Semaphore(10)
+    private val gate = Semaphore(3)
     /** WebViews próprios da fila de envio. */
-    private val queueGate = Semaphore(10)
+    private val queueGate = Semaphore(3)
     /** Quantos WebViews ocultos estão vivos agora (diagnóstico). */
     val alive = java.util.concurrent.atomic.AtomicInteger(0)
     val aliveQueue = java.util.concurrent.atomic.AtomicInteger(0)
@@ -157,7 +157,7 @@ object JsRender {
     @Volatile var browserVisible = false
     private val queueSoloGate = Semaphore(1)
     /** Com o navegador na tela: no máximo 1 página oculta NO TOTAL (navegador + fila), porque todas dividem o motor de páginas. */
-    private val visibleGate = Semaphore(10)
+    private val visibleGate = Semaphore(2)
 
     private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, queue: Boolean = false): JsPage? {
         val wait = if (play) timeoutMs.coerceIn(8_000L, 25_000L) else timeoutMs
