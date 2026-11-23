@@ -86,6 +86,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     var progress by remember { mutableIntStateOf(0) }
     var canBack by remember { mutableStateOf(false) }; var canFwd by remember { mutableStateOf(false) }
     var ask by remember { mutableStateOf(false) }
+    var analyze by remember { mutableStateOf(false) }
     BackHandler { if (web?.canGoBack() == true) web?.goBack() else onClose() }
     fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }
     fun savePanel() { val v = BrowserDetect.list.toList(); val p = BrowserDetect.photos.toList(); val h = BrowserDetect.loadedHostSet()
@@ -186,6 +187,8 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         Surface(tonalElevation = 3.dp) { Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
             Button({ ask = true }, Modifier.fillMaxWidth().height(52.dp), enabled = current.startsWith("http"), shape = MaterialTheme.shapes.medium) {
                 Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Usar esta página no app") }
+            OutlinedButton({ analyze = true }, Modifier.fillMaxWidth().padding(top = 8.dp), enabled = current.startsWith("http"), shape = MaterialTheme.shapes.medium) {
+                Text("Analisar este site") }
             Text("Entre na sua conta normalmente. O app usa só os cookies desta sessão; sua senha nunca é lida nem guardada.",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
         } }
@@ -275,6 +278,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         title = { Text("Usar esta página") }, text = { Text(current, maxLines = 3, overflow = TextOverflow.Ellipsis) },
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
         dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
+    if (analyze) SiteAnalyzeDialog(current, web) { analyze = false }
 }
 
 // ---------------- Contas logadas (Configurações) ----------------
