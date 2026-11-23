@@ -88,7 +88,7 @@ object Pipeline {
                 val j = a.getJSONObject(i)
                 val ks = j.optJSONArray("keys")?.let { ka -> (0 until ka.length()).map { ka.getString(it) } } ?: emptyList()
                 l += PItem(j.getLong("id"), j.getString("page"), j.optString("title"), j.optString("extra"), ks,
-                    j.optJSONObject("f")?.let { jToF(it) }, PS.valueOf(j.optString("st", "WAIT")), j.optString("msg"), 0f, j.optBoolean("photo"), force = j.optBoolean("force"))
+                    j.optJSONObject("f")?.let { jToF(it) }, run { val s = j.optString("st", "WAIT"); try { PS.valueOf(s) } catch (_: Exception) { if (s == "CANCEL") PS.SKIP else PS.FAIL } }, j.optString("msg"), 0f, j.optBoolean("photo"), force = j.optBoolean("force"))
             }
             items.value = l
             nextId = (l.maxOfOrNull { it.id } ?: 0L) + 1
