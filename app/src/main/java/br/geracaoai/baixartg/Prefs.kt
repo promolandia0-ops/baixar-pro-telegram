@@ -29,8 +29,13 @@ object Prefs {
     var probe: Boolean get() = p.getBoolean("probe", false); set(v) = p.edit().putBoolean("probe", v).apply()
     var parDown: Int get() = p.getInt("pdown2", 10); set(v) = p.edit().putInt("pdown2", v).apply()
     var parUp: Int get() = p.getInt("pup2", 5); set(v) = p.edit().putInt("pup2", v).apply()
-    /** Fotos vão como arquivo (sem a compressão do Telegram). Padrão ligado. */
-    var photosAsFile: Boolean get() = p.getBoolean("photos_as_file", true); set(v) = p.edit().putBoolean("photos_as_file", v).apply()
+    /** Legado 1.9.9. Fotos agora vão sempre como imagem; valor antigo "arquivo" é migrado para foto. */
+    var photosAsFile: Boolean
+        get() {
+            if (!p.contains("photos_as_file_v1911")) p.edit().putBoolean("photos_as_file_v1911", false).apply()
+            return p.getBoolean("photos_as_file_v1911", false)
+        }
+        set(v) { p.edit().putBoolean("photos_as_file_v1911", v).apply() }
     var synced: Boolean get() = p.getBoolean("synced", false); set(v) = p.edit().putBoolean("synced", v).apply()
     var botToken: String get() = p.getString("bot", "")!!; set(v) = p.edit().putString("bot", v).apply()
     /** 0 = original (máxima). Senão altura máxima (só afeta streams HLS com várias qualidades). */

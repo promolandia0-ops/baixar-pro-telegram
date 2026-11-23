@@ -32,12 +32,11 @@ object JsRender {
     private val main = Handler(Looper.getMainLooper())
     /**
      * Páginas ocultas ficam na MESMA janela (e no mesmo processo de renderização) do navegador visível, então
-     * cada uma tocando vídeo pesa na tela. Teto: com o navegador aberto, no máximo 3 no total (2 do navegador + 1 da fila);
-     * com ele fechado, a fila usa 3.
+     * cada uma tocando vídeo pesa na tela. A fila de envio tem pool próprio (até 10), independente do navegador visível.
      */
     private val gate = Semaphore(2)
     /** WebViews próprios da fila de envio. */
-    private val queueGate = Semaphore(3)
+    private val queueGate = Semaphore(10)
     /** Quantos WebViews ocultos estão vivos agora (diagnóstico). */
     val alive = java.util.concurrent.atomic.AtomicInteger(0)
     val aliveQueue = java.util.concurrent.atomic.AtomicInteger(0)
@@ -77,9 +76,33 @@ object JsRender {
             sels.forEach(function(s){q(s).forEach(function(el){try{el.click()}catch(e){}})});
             q('.jwplayer,.video-js,.plyr,video').forEach(function(el){try{el.click()}catch(e){}});
             consent(); playText();
+            // pula anúncio pré-roll se o player mostrar o botão
+            var skip=/^(skip(\s*ad)?|pular(\s*an[uú]ncio)?|omitir(\s*an[uú]ncio)?|skip\s*to\s*content)$/i;
+            q('button,a,[role=button],[class*=skip],[class*=Skip]').forEach(function(el){
+              var t=lbl(el); if(t&&t.length<24&&skip.test(t)){try{el.click()}catch(e){}}
+            });
           }
           go();
           if(!window.__bptPlay){window.__bptPlay=setInterval(go, 1200);}
+          return 'ok';
+        })()
+    """
+
+    const val HOOK_JS = """
+        (function(){
+          if(window.__bptHook)return 'ok'; window.__bptHook=1; window.__bptNet=window.__bptNet||[];
+          function add(u){if(!u||typeof u!=='string')return; if(/^blob:|^data:/i.test(u))return;
+            if(/\\.(m3u8|mpd|mp4|m4v|webm|ts)(\\?|$)/i.test(u)||/\\/video\\//i.test(u)||/application\\/(vnd\\.apple\\.)?mpegurl|dash\\+xml/i.test(u)) window.__bptNet.push(u);}
+          try{var of=window.fetch; if(of) window.fetch=function(){try{var a=arguments[0]; add(typeof a==='string'?a:(a&&a.url))}catch(e){} return of.apply(this,arguments)};}catch(e){}
+          try{var X=XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open=function(m,u){try{add(u)}catch(e){} return X.apply(this,arguments)};}catch(e){}
+          try{
+            var MSE=window.MediaSource||window.WebKitMediaSource;
+            if(MSE&&MSE.prototype&&MSE.prototype.addSourceBuffer){
+              var asb=MSE.prototype.addSourceBuffer;
+              MSE.prototype.addSourceBuffer=function(m){try{if(m)window.__bptNet.push('mse:'+m)}catch(e){} return asb.apply(this,arguments)};
+            }
+          }catch(e){}
+          if(!window.__bptHookT){window.__bptHookT=setInterval(function(){try{document.querySelectorAll('video,audio').forEach(function(v){add(v.currentSrc||v.src||'');})}catch(e){}},1000);}
           return 'ok';
         })()
     """
@@ -127,14 +150,8 @@ object JsRender {
 
     /** Página com play para a fila de envio (pool separado). */
     suspend fun renderQueue(url: String, timeoutMs: Long): JsPage? =
-        // com o navegador aberto na tela, a fila usa só 1 WebView oculto por vez (o navegador visível tem prioridade)
-        run {
-            // vaga com prazo: sem vaga em 10 s a fila desiste da página oculta (vai pro servidor) — nunca fica esperando
-            val solo = browserVisible
-            if (solo && !acquire(queueSoloGate, 10_000)) return@run null
-            try { page(url, timeoutMs, true, queueGate, slotWait = 10_000) }
-            finally { if (solo) queueSoloGate.release() }
-        }
+        // pool próprio, até 10 páginas ocultas, mesmo com o navegador aberto ou depois de sair dele
+        page(url, timeoutMs.coerceAtLeast(18_000), true, queueGate, slotWait = 15_000, queue = true)
     /** Pega uma vaga sem risco de vazar: tenta até o prazo; false = sem vaga. */
     private suspend fun acquire(s: Semaphore, waitMs: Long): Boolean {
         val end = System.currentTimeMillis() + waitMs
@@ -149,27 +166,43 @@ object JsRender {
     /** Com o navegador na tela: no máximo 1 página oculta NO TOTAL (navegador + fila), porque todas dividem o motor de páginas. */
     private val visibleGate = Semaphore(1)
 
-    private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000): JsPage? {
-        val wait = if (play) timeoutMs.coerceIn(8_000L, 18_000L) else timeoutMs
-        return drive(url, wait + 3_000, !play, pool, slotWait) { wv, hits, done ->
+    private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, queue: Boolean = false): JsPage? {
+        val wait = if (play) timeoutMs.coerceIn(8_000L, 25_000L) else timeoutMs
+        return drive(url, wait + 3_000, !play, pool, slotWait, skipVisibleGate = queue) { wv, hits, done ->
             val start = System.currentTimeMillis()
             var firstHitAt = 0L
             fun finish() {
                 wv.evaluateJavascript(JsScripts.COLLECT) { raw ->
                     val c = JsScripts.parseCollected(raw)
-                    c?.videos?.forEach { v -> if (Extract.mediaKindOf(v) != null) synchronized(hits) { hits += v } }
+                    c?.videos?.forEach { v -> if (Extract.mediaKindOf(v) != null && !MediaPick.isAdUrl(v)) synchronized(hits) { hits += v } }
                     wv.evaluateJavascript("(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()") { rawHtml ->
-                        done(JsPage(unescapeJs(rawHtml), mediaOf(hits, url), challenge = c?.challenge == true, collected = c,
+                        val media = mediaOf(hits, url)
+                        done(JsPage(unescapeJs(rawHtml), media, challenge = c?.challenge == true, collected = c,
                             apis = synchronized(hits) { hits.filter { it.startsWith("api:") }.map { it.removePrefix("api:") } }.take(12)))
                     }
                 }
             }
             fun tick() {
-                if (play && wv.progress >= 60) wv.evaluateJavascript(PLAY_JS) { }
-                val n = synchronized(hits) { hits.count { !it.startsWith("api:") } }
+                if (play && wv.progress >= 60) { wv.evaluateJavascript(HOOK_JS) { }; wv.evaluateJavascript(PLAY_JS) { } }
+                wv.evaluateJavascript("(function(){try{return JSON.stringify(window.__bptNet||[])}catch(e){return '[]'}})()") { raw ->
+                    val arr = unescapeJs(raw) ?: raw?.trim()?.trim('"') ?: "[]"
+                    try {
+                        val a = org.json.JSONArray(arr)
+                        for (i in 0 until a.length()) {
+                            val u = a.optString(i)
+                            if (u.startsWith("http") && !MediaPick.isAdUrl(u)) synchronized(hits) { hits += u }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                val urls = synchronized(hits) { hits.filter { !it.startsWith("api:") } }
+                val cands = urls.map { MediaPick.Cand(it, pageUrl = url) }
                 val now = System.currentTimeMillis()
-                if (n > 0 && firstHitAt == 0L) firstHitAt = now
-                if ((n > 0 && now - firstHitAt >= 1_500L) || now - start >= wait || (!play && wv.progress >= 100 && now - start > 2_500)) finish()
+                if (cands.any { !MediaPick.isLikelyAd(it) } && firstHitAt == 0L) firstHitAt = now
+                val waited = now - start
+                val gotMain = firstHitAt > 0 && now - firstHitAt >= 1_500L
+                if (gotMain || now - start >= wait || (!play && wv.progress >= 100 && now - start > 2_500) ||
+                    (play && MediaPick.readyToPick(cands, waited) && cands.any { !MediaPick.isLikelyAd(it) } && gotMain)) finish()
                 else wv.postDelayed({ tick() }, 500)
             }
             wv.postDelayed({ tick() }, 800)
@@ -182,12 +215,12 @@ object JsRender {
     }
 
     /** Cria o WebView na janela, roda [drive] e devolve o JsPage (ou null em timeout/sem Activity). */
-    private suspend fun drive(url: String, hardMs: Long, block: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, body: (WebView, MutableSet<String>, (JsPage) -> Unit) -> Unit): JsPage? {
+    private suspend fun drive(url: String, hardMs: Long, block: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, skipVisibleGate: Boolean = false, body: (WebView, MutableSet<String>, (JsPage) -> Unit) -> Unit): JsPage? {
         if (!url.startsWith("http", true)) return null
         if (!available()) { lastUnavailable = true; return null }
         lastUnavailable = false
         if (!acquire(pool, slotWait)) return null
-        val vis = browserVisible
+        val vis = browserVisible && !skipVisibleGate
         if (vis && !acquire(visibleGate, slotWait)) { pool.release(); return null }
         return try {
             val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return null
@@ -252,14 +285,18 @@ object JsRender {
         wv.isClickable = false
         fun isHit(u: String): Boolean {
             if (u.isBlank() || u.startsWith("blob:", true) || u.startsWith("data:", true)) return false
+            if (MediaPick.isAdUrl(u)) return false
             if (Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u)) return false
-            return Extract.mediaKindOf(u) != null
+            return Extract.mediaKindOf(u) != null || Extract.isHls(u) || Extract.isDash(u)
         }
         wv.webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 val u = request.url?.toString().orEmpty()
-                if (isHit(u)) synchronized(hits) { hits += u }
-                // bloqueador também nas páginas de play (antes elas abriam com todos os anúncios, pesando no navegador)
+                if (isHit(u)) {
+                    synchronized(hits) { hits += u }
+                    PlayCapture.record(u, pageUrl, request.requestHeaders?.get("Referer") ?: pageUrl)
+                }
+                else if (MediaPick.isAdUrl(u) && !request.isForMainFrame) return br.geracaoai.baixartg.web.AdBlock.empty()
                 else if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, pageUrl, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                 else if (!block && !request.isForMainFrame && u.startsWith("http") && !STATIC.containsMatchIn(u.substringBefore('#')) && API_PATH.containsMatchIn(u) &&
                     !br.geracaoai.baixartg.web.AdBlock.isAdHost(request.url?.host.orEmpty())) {
@@ -268,9 +305,11 @@ object JsRender {
                 return super.shouldInterceptRequest(v, request)
             }
             override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
-                // nunca abre apps externos (intent://, market://); http(s) segue no próprio WebView
+                val target = request.url?.toString().orEmpty()
                 val sch = request.url?.scheme?.lowercase().orEmpty()
-                return sch != "http" && sch != "https"
+                if (sch != "http" && sch != "https") return true
+                // página oculta: bloqueia redirecionamento/popup de anúncio
+                return br.geracaoai.baixartg.web.AdBlock.blockNavigation(target, pageUrl, request.hasGesture(), request.isRedirect)
             }
         }
         return wv

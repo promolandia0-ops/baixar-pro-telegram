@@ -28,7 +28,13 @@ object Downloader {
 
     private fun req(url: String, referer: String?) = Request.Builder().url(url).header("Accept", "*/*").apply {
         val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
-        if (ref != null) header("Referer", ref)
+        if (ref != null) {
+            header("Referer", ref)
+            try {
+                val o = java.net.URI(ref)
+                if (o.scheme != null && o.authority != null) header("Origin", "${o.scheme}://${o.authority}")
+            } catch (_: Exception) {}
+        }
     }.build()
 
     fun sniffFile(file: File): String = file.inputStream().use { ins ->

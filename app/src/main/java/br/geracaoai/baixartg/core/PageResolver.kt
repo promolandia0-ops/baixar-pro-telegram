@@ -20,8 +20,11 @@ object PageResolver {
      * "preview" fica de fora aqui (é a prévia curta); se não sobrar outra coisa, vira o último recurso depois do servidor.
      */
     fun best(list: List<Found>, allowPreview: Boolean = false): Found? {
-        val vids = list.map { MediaIdentity.withQuality(it) }.filter { isReal(it) && (allowPreview || !isPreview(it)) }
+        val vids = list.map { MediaIdentity.withQuality(it) }.filter { isReal(it) && (allowPreview || !isPreview(it)) && !MediaPick.isAdUrl(it.url) }
         val pool = vids.filter { it.kind != Kind.SERVER }.ifEmpty { vids }
+        val picked = MediaPick.pick(pool.map { MediaPick.Cand(it.url, pageUrl = it.page) })
+        if (picked != null) return pool.filter { it.url == picked.url }.reduceOrNull { a, b -> if (MediaIdentity.isBetter(b, a)) b else a }
+            ?: pool.firstOrNull { it.url == picked.url }
         return pool.reduceOrNull { a, b -> if (MediaIdentity.isBetter(b, a)) b else a }
     }
 
@@ -77,6 +80,11 @@ object PageResolver {
 
     private suspend fun resolveFull0(card: String, title: String, ctx: String): Found? {
         val t0 = title.ifBlank { Extract.fileName(card).replace('-', ' ').replace('_', ' ') }.ifBlank { "vídeo" }
+        // 1) o que o player já pediu nesta página (mesmos cookies/Referer)
+        PlayCapture.bestFor(Found(card, card, t0, Kind.DIRECT, ref = card, extra = t0))?.let { hit ->
+            val kind = Extract.mediaKindOf(hit.url) ?: Kind.DIRECT
+            return Found(hit.url, card, t0, kind, ref = hit.referer ?: card, extra = t0)
+        }
         if (Extract.isVideoUrl(card)) return Found(card, card, t0, Extract.mediaKindOf(card) ?: Kind.DIRECT, ref = card, extra = t0)
         if (Extract.YTDLP_HOSTS.containsMatchIn(card)) return Found(card, card, t0, Kind.SERVER, extra = t0)
         val html = fetch(card, null)
@@ -84,21 +92,13 @@ object PageResolver {
         val t = TitleFix.pick(pr?.title, title).ifBlank { t0 }
         best(pr?.videos.orEmpty())?.let { return it.copy(page = card, ref = it.ref ?: card, title = t, extra = listOf(t, ctx, it.extra).joinToString(" ").trim()) }
         best(pr?.videos.orEmpty(), allowPreview = true)?.let { pv -> synchronized(previews) { previews[card] = pv.copy(title = t) } }
-        // navegador aberto na tela: servidor yt-dlp primeiro (não abre página oculta na janela do navegador);
-        // página oculta só se o servidor não achar
-        val browserOpen = JsRender.browserVisible
-        if (browserOpen) {
-            withTimeoutOrNull(45_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) }?.let { pt ->
-                return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
-            }
-        }
+        // 2) WebView oculto (pool da fila, independente de estar no navegador)
         if (JsRender.available()) {
-            // ~30 s no máximo na página (incluindo espera por vaga); depois cai para o servidor yt-dlp
-            val (realTitle, wv) = withTimeoutOrNull(30_000) { viaWebView(card) { u -> JsRender.renderQueue(u, 18_000) } } ?: ("" to null)
+            val (realTitle, wv) = withTimeoutOrNull(45_000) { viaWebView(card) { u -> JsRender.renderQueue(u, 22_000) } } ?: ("" to null)
             val tt = TitleFix.pick(realTitle, t).ifBlank { t }
             if (wv != null) return wv.copy(page = card, ref = wv.ref ?: card, title = tt, extra = listOf(tt, ctx, wv.extra).joinToString(" ").trim())
         }
-        if (browserOpen) return null   // o servidor já foi tentado acima
+        // 3) servidor só se o player e a página oculta não acharam
         val pt = withTimeoutOrNull(60_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) } ?: return null
         return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
     }

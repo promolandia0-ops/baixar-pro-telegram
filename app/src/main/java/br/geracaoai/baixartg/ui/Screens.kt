@@ -752,8 +752,7 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
                 SwitchRow("Substituir por qualidade maior", "Se o repetido tiver resolução maior que o já enviado, envia mesmo assim (o antigo continua lá).", hiOn) { hiOn = it; Prefs.replaceHigher = it }
                 var capOn by remember { mutableStateOf(Prefs.sendCaption) }
                 SwitchRow("Enviar legenda (título/link)", "Desligado: vai só o vídeo/foto, sem título, link ou texto.", capOn) { capOn = it; Prefs.sendCaption = it }
-                var asFile by remember { mutableStateOf(Prefs.photosAsFile) }
-                SwitchRow("Fotos como arquivo (original)", "Ligado: a foto vai sem a compressão do Telegram, na qualidade original. Desligado: vai como foto (o Telegram comprime um pouco) e, se recusar, vai como arquivo.", asFile) { asFile = it; Prefs.photosAsFile = it }
+                Text("Fotos vão sempre como imagem no Telegram (nunca figurinha nem arquivo). Vídeos vão sempre como vídeo, para assistir direto.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FilledTonalButton({ save(); testing = true; test = ""; scope.launch { test = Jobs.testConnection(); testing = false } }, enabled = !testing, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     if (testing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.NetworkCheck, null); Spacer(Modifier.width(8.dp)); Text("Testar conexão") }
                 if (test.isNotBlank()) InfoCard(test, if (test.contains("✗")) Icons.Rounded.ErrorOutline else Icons.Rounded.CheckCircle, if (test.contains("✗")) 1 else 2)

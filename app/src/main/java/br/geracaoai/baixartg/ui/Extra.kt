@@ -204,12 +204,17 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                 override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { if (url != current) BrowserDetect.newPage(); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
                 override fun onPageFinished(v: WebView, url: String) {
                     if (url.startsWith("http")) { br.geracaoai.baixartg.Prefs.browserUrl = url; BrowserStore.visit(url, v.title ?: ""); BrowserDetect.restore(Extract.host(url)) }
-                    current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; scheduleCollect(400) }
+                    current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; v.evaluateJavascript(br.geracaoai.baixartg.core.JsRender.HOOK_JS) { }; scheduleCollect(400) }
                 override fun shouldInterceptRequest(v: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
                     val u = request.url?.toString().orEmpty()
                     if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, current, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                     if (u.startsWith("http") && Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u))) {
-                        val pg = current; BrowserDetect.intercepted(u, pg, "")
+                        val pg = current
+                        if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
+                            BrowserDetect.intercepted(u, pg, "")
+                            val ref = request.requestHeaders?.get("Referer") ?: pg
+                            br.geracaoai.baixartg.core.PlayCapture.record(u, pg, ref)
+                        }
                     }
                     return super.shouldInterceptRequest(v, request)
                 }

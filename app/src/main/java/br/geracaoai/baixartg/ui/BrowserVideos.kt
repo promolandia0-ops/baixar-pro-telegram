@@ -461,8 +461,9 @@ object BrowserDetect {
         ds.forEach { d -> val ak = allKeys(d); Sent.markQueued(ak); synchronized(seenCards) { ak.forEach { k -> if (!keys.containsKey(k)) keys[k] = "x:" + d.key } } }
         // fila persistente: resolvidos vão direto para baixar/enviar; os "carregando…" a fila abre a página sozinha
         Pipeline.add(ds.map { d ->
-            if (d.state == 0) Pipeline.In(d.f.page.ifBlank { d.f.url }, d.f.title, d.f.extra, d.keys, d.f)
-            else Pipeline.In(d.f.page.ifBlank { d.f.url }, d.f.title, d.f.extra, d.keys, null)
+            val page = d.f.page.ifBlank { d.f.url }
+            if (d.state == 0) Pipeline.In(page, d.f.title, d.f.extra, d.keys, d.f, uniq = d.key)
+            else Pipeline.In(page, d.f.title, d.f.extra, d.keys, null, uniq = d.key)
         })
     }
 
@@ -605,7 +606,7 @@ object BrowserDetect {
             // os que ainda carregavam param aqui: a fila abre cada página sozinha, sem esperar os outros
             cur.filter { it.state != 0 }.forEach { d -> jobs.remove(normPage(d.f.page))?.cancel() }
             dispatch(cur)
-            onMsg("${cur.size} vídeo(s) na fila de envio. Vão chegando no Telegram um por um (veja na Fila).")
+            onMsg("${cur.size} vídeo(s) na fila de envio. Podem ir até 10 ao mesmo tempo (veja na Fila).")
         }
     }
 

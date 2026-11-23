@@ -24,6 +24,8 @@ object AdBlock {
         "popads.net", "popcash.net", "propellerads.com", "adsterra.com", "exoclick.com", "juicyads.com", "trafficjunky.net",
         "hilltopads.net", "clickadu.com", "adcash.com", "mgid.com", "revcontent.com", "onclickads.net", "a-ads.com",
         "admaven.com", "monetag.com", "richpartners.com", "galaksion.com", "trafficstars.com", "tsyndicate.com", "zeropark.com",
+        "imasdk.googleapis.com", "googletagservices.com", "2mdn.net", "serving-sys.com", "moatads.com", "adform.net",
+        "spotxchange.com", "stickyadstv.com", "adsafeprotected.com", "exosrv.com", "realsrv.com", "trafficjunky.com",
     )
     private val URL_PAT = Regex(
         """(?i)(?:/ads?/|/adserver|/adsbygoogle|/advert|/banners?/|/popunder|/popup[s_-]|/pop\.js|prebid|/pagead/|googlesyndication|doubleclick|/ad[sx]?\.js|/ad_?banner|/adframe|/adview|/vast[./?]|/vpaid|/sponsor|/tracking/|/beacon[./?]|/pixel[./?]|/interstitial|clickunder|onclick(?:ads|mega)|/afr\.php|/ajs\.php|/pu\.js|/tag\.min\.js\?|/sw-ads)""")
@@ -61,6 +63,13 @@ object AdBlock {
         if (!enabled || mainFrame) return false
         if (!url.startsWith("http", true)) return false
         if (NEVER.containsMatchIn(url)) return false
+        // stream de anúncio (VAST/IMA/redes) é bloqueado mesmo sendo vídeo; o vídeo do site passa
+        if (br.geracaoai.baixartg.core.MediaPick.isAdUrl(url) && !mainFrame) {
+            val host = try { android.net.Uri.parse(url).host ?: "" } catch (_: Exception) { "" }
+            val pageHost = pageUrl?.let { try { android.net.Uri.parse(it).host } catch (_: Exception) { null } }
+            val firstParty = pageHost != null && host.isNotBlank() && base(host) == base(pageHost)
+            if (!firstParty) return true
+        }
         if (Extract.mediaKindOf(url) != null || Extract.isVideoUrl(url)) return false   // streams do próprio vídeo
         val host = try { android.net.Uri.parse(url).host ?: return false } catch (_: Exception) { return false }
         val pageHost = pageUrl?.let { try { android.net.Uri.parse(it).host } catch (_: Exception) { null } }

@@ -148,16 +148,16 @@ object Pipeline {
     private fun normPage(u: String) = PageKey.norm(u)
 
     // ---------------- API ----------------
-    data class In(val page: String, val title: String, val extra: String, val keys: List<String>, val f: Found?, val photo: Boolean = false)
+    data class In(val page: String, val title: String, val extra: String, val keys: List<String>, val f: Found?, val photo: Boolean = false, val uniq: String = "")
 
     /** Entra na fila na hora (resolvido ou não) e a fila começa a andar. Devolve quantos entraram. */
     fun add(list: List<In>): Int {
         if (list.isEmpty()) return 0
         val n: Int
         synchronized(lock) {
-            val have = items.value.filter { it.st != PS.FAIL && it.st != PS.ANALYZE }.map { normPage(it.page) + "|" + (it.f?.url ?: "") }.toHashSet()
-            val add = list.filter { have.add(normPage(it.page) + "|" + (it.f?.url ?: "")) }.map {
-                PItem(nextId++, it.page, it.title, it.extra, expandKeys(it.page, it.keys, it.f), it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo)
+            val have = items.value.filter { it.st != PS.FAIL && it.st != PS.ANALYZE && it.st != PS.CANCEL }.map { uniqueKey(it.page, it.title, it.keys, it.f) }.toHashSet()
+            val add = list.filter { have.add(uniqueKey(it.page, it.title, it.keys, it.f, it.uniq)) }.map {
+                PItem(nextId++, it.page, it.title, it.extra, expandKeys(it.page, it.keys + listOfNotNull(it.uniq.trim().takeIf { k -> k.isNotBlank() }?.let { k -> "id:$k" }), it.f), it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo)
             }
             items.value = items.value + add
             n = add.size
@@ -205,6 +205,16 @@ object Pipeline {
         if (alsoSentMemory) { Sent.clear(); Prefs.synced = false }
         paused.value = false; saveAsync()
     }
+    /** Identidade única do item na fila: nunca junta dois vídeos só porque estão na mesma página. */
+    fun uniqueKey(page: String, title: String, keys: List<String>, f: Found?, uniq: String = ""): String {
+        uniq.trim().takeIf { it.isNotBlank() }?.let { return "id:$it" }
+        keys.firstOrNull { k -> k.startsWith("id:") }?.let { return it }
+        keys.firstOrNull { k -> k.startsWith("ip:") || k.startsWith("p:") || k.startsWith("card:") }?.let { return "k:$it" }
+        val u = f?.url?.let { normPage(it) }.orEmpty()
+        if (u.isNotBlank()) return "u:$u"
+        return "p:" + normPage(page) + "|" + title
+    }
+
     private fun expandKeys(page: String, keys: List<String>, f: Found?): List<String> {
         val k = ArrayList(keys)
         k += "pg:" + normPage(page)
@@ -261,7 +271,7 @@ object Pipeline {
         return out.filter { !isPageKey(it) }.toHashSet()
     }
     private fun isPageKey(k: String) = k.startsWith("pg:") || k.startsWith("ip:") || k.startsWith("p:")
-    private fun claimKeys(t: PItem) = mediaKeysOf(t)
+    private fun claimKeys(t: PItem) = mediaKeysOf(t).filter { !it.startsWith("d:") && !it.startsWith("ps:") }.toHashSet()
     private fun sentKeys(t: PItem) = mediaKeysOf(t)
 
 
@@ -302,8 +312,26 @@ object Pipeline {
     private val itemJobs = java.util.concurrent.ConcurrentHashMap<Long, Job>()
     private fun alive(id: Long) { beat[id] = System.currentTimeMillis() }
 
+    @Volatile var testMode = false
+    @Volatile var testParDown = 10
+    @Volatile var testParUp = 5
+    @Volatile var testResolve: (suspend (PItem) -> Found?)? = null
+    @Volatile var testDownload: (suspend (PItem, File) -> File?)? = null
+    @Volatile var testUpload: (suspend (PItem, File) -> Unit)? = null
+
+    fun resetForTest() {
+        engine?.cancel()
+        engine = null
+        synchronized(lock) { items.value = emptyList(); nextId = 1L }
+        synchronized(claimed) { claimed.clear() }
+        userCancel.clear(); beat.clear(); itemJobs.clear()
+        paused.value = false; running.value = false
+        testResolve = null; testDownload = null; testUpload = null
+    }
+
     @Synchronized fun start() {
-        if (!::app.isInitialized || paused.value) return
+        if (paused.value) return
+        if (!::app.isInitialized && !testMode) return
         if (engine?.isActive == true) return
         if (items.value.none { it.st in WORK }) return
         // nenhum motor rodando: o que ficou "abrindo página"/baixando/enviando volta para a etapa anterior
@@ -317,19 +345,20 @@ object Pipeline {
                 }
             }
         }
-        PipeService.start(app)
+        if (!testMode) PipeService.start(app)
         running.value = true
         engine = scope.launch {
-            val dir = File(app.cacheDir, "pdl").apply { mkdirs(); listFiles()?.forEach { it.deleteRecursively() } }
+            val dir = if (testMode) File(System.getProperty("java.io.tmpdir"), "pdl-test-" + System.nanoTime()).apply { mkdirs() }
+                else File(app.cacheDir, "pdl").apply { mkdirs(); listFiles()?.forEach { it.deleteRecursively() } }
             synchronized(claimed) { claimed.clear() }
             beat.clear(); itemJobs.clear()
             try {
                 coroutineScope {
                     // baixados esperando envio: no máximo nDown (protege o armazenamento); downloads correm na frente do envio
-                    val nDown = Prefs.parDown.coerceIn(1, 10)
-                    val nUp = Prefs.parUp.coerceIn(1, 5)
+                    val nDown = if (testMode) testParDown.coerceIn(1, 10) else try { Prefs.parDown.coerceIn(1, 10) } catch (_: Exception) { 10 }
+                    val nUp = if (testMode) testParUp.coerceIn(1, 5) else try { Prefs.parUp.coerceIn(1, 5) } catch (_: Exception) { 5 }
                     val ready = Channel<Pair<PItem, File>>(nDown)
-                    val resolvers = List(RESOLVERS) { n -> launch { delay(n * OPEN_GAP); resolverLoop() } }
+                    val resolvers = List(nDown) { n -> launch { if (!testMode) delay(n * OPEN_GAP); resolverLoop() } }
                     val downs = List(nDown) { launch { downloaderLoop(dir, ready) } }
                     // Em análise: pool próprio (2), nunca ocupa vaga de download/envio da fila principal
                     val analyzers = List(2) { launch { analyzeLoop(dir, ready) } }
@@ -358,8 +387,9 @@ object Pipeline {
             val now = System.currentTimeMillis()
             for (t in items.value) {
                 if (t.st != PS.DOWN && t.st != PS.UP && t.st != PS.RESOLVING && t.st != PS.ANALYZING) continue
+                // DOWN/UP: o relógio de "sem progresso" só começa depois do primeiro byte (não cancela quem ainda está abrindo a conexão)
                 val last = beat[t.id] ?: continue
-                val limit = if (t.st == PS.RESOLVING) RESOLVE_STALL else if (t.st == PS.UP && t.prog >= 0.99f) 5 * 60_000L else STALL_MS   // envio já subiu: espera a confirmação do Telegram
+                val limit = if (t.st == PS.RESOLVING || t.st == PS.ANALYZING) RESOLVE_STALL else if (t.st == PS.UP && t.prog >= 0.99f) 5 * 60_000L else STALL_MS
                 if (now - last > limit) { beat[t.id] = now; itemJobs[t.id]?.cancel(StallException()) }
             }
         }
@@ -385,7 +415,7 @@ object Pipeline {
                 if (attempt > 0) { upd(t.id) { it.copy(msg = "Tentando de novo…") }; delay(2_000) }
                 alive(t.id)
                 // prazo duro: roda à parte e o resolvedor não espera além do prazo (mesmo se algo lá dentro não parar)
-                val job = scope.async { PageResolver.resolveFull(t.page, t.title, t.extra) }
+                val job = scope.async { testResolve?.invoke(t) ?: PageResolver.resolveFull(t.page, t.title, t.extra) }
                 itemJobs[t.id] = job
                 f = try { withTimeoutOrNull(RESOLVE_TIMEOUT) { job.await() } }
                     catch (e: CancellationException) { currentCoroutineContext().ensureActive(); stalledOut = true; null }
@@ -431,7 +461,6 @@ object Pipeline {
             val ks = claimKeys(t)
             val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
             if (dup) { upd(t.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }; continue }
-            alive(t.id)
             val job = scope.async { downloadOne(t, dir) }
             itemJobs[t.id] = job
             val file = try { job.await() } catch (e: CancellationException) {
@@ -476,6 +505,7 @@ object Pipeline {
     private fun hasTried(tried: String, step: String) = tried.split(',').any { it == step }
 
     private suspend fun downloadOne(t: PItem, dir: File, fromAnalyze: Boolean = false): File? {
+        testDownload?.let { fn -> return fn(t, dir) }
         var f = t.f!!
         var file: File? = null
         var tried = t.tried
@@ -509,6 +539,10 @@ object Pipeline {
         }
         try {
             val steps = ArrayList<Pair<String, suspend () -> File>>()
+            val playHit = PlayCapture.bestFor(f)
+            if (playHit != null && (!fromAnalyze || !hasTried(tried, "play"))) steps += "play" to {
+                Downloader.download(PlayCapture.toFound(f, playHit), dir, Prefs.server, 0, fast = true, prog())
+            }
             if (!fromAnalyze || !hasTried(tried, "direct")) steps += "direct" to { Downloader.download(f, dir, Prefs.server, 0, fast = true, prog()) }
             if ((!fromAnalyze || !hasTried(tried, "server")) && f.page.isNotBlank() && !Extract.isVideoUrl(f.page))
                 steps += "server" to { Downloader.viaServer(f.page, dir, Prefs.server, prog()) }
@@ -599,6 +633,12 @@ object Pipeline {
         val f = t.f!!
         val ks = claimKeys(t)
         if (t.id in userCancel) { markCancelled(t, ks); return }
+        testUpload?.let { fn ->
+            fn(t, file)
+            synchronized(claimed) { claimed.removeAll(ks) }
+            upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
+            return
+        }
         try {
             upd(t.id) { it.copy(st = PS.UP, prog = 0f, speed = 0, msg = "Enviando…") }
             while (!Td.ready) { upd(t.id, persist = false) { it.copy(msg = "Esperando o Telegram conectar…") }; delay(3_000) }
