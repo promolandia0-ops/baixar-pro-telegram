@@ -28,7 +28,7 @@ jobs:
         run: chmod +x gradlew
 
       - name: Compilar o APK (debug, instalável)
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: ./gradlew assembleDebug -PvcRun=${{ github.run_number }} --stacktrace --no-daemon
 
       - name: Preparar o arquivo
         run: |
