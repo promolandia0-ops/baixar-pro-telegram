@@ -18,6 +18,7 @@ object AnonReport {
         val redirectCount: Int = 0,
         val challenge: Boolean = false,
         val challengeType: String = "none",
+        val ageGateBypassed: Boolean? = null,
         val videoCount: Int = 0,
         val iframeCount: Int = 0,
         val sourceCount: Int = 0,
@@ -90,15 +91,20 @@ object AnonReport {
         if (!f.pageLoaded && f.htmlDirect.code == "SSL") return "Falha de certificado (SSL) ao abrir a página."
         if (!f.pageLoaded && f.htmlDirect.code == "TIMEOUT") return "A página demorou demais para abrir (timeout)."
         if (!f.pageLoaded) return "A página não carregou."
+        if (f.drm) return "O vídeo tem DRM e o app não consegue baixar."
+        val fmtNow = safeFormat(f.format)
+        if (f.pageLoaded && (fmtNow in setOf("MSE", "blob") || (fmtNow == "DASH" && (f.needsSpecialHeader == true || f.challenge)) ||
+            (f.challenge && safeChallenge(f.challengeType) == "js_challenge" && (f.videoCount > 0 || f.mediaCapture.ok || f.hiddenAutoplay.ok || f.needsSpecialHeader == true)))) {
+            return "O site usa player protegido (MSE/JS) — o app vai baixar pelo navegador (MSE)."
+        }
         if (f.challenge) return when (safeChallenge(f.challengeType)) {
             "captcha" -> "O site pede um desafio (captcha) antes de liberar o vídeo."
-            "js_challenge" -> "O site pede um desafio em JavaScript antes de liberar o vídeo."
+            "js_challenge" -> "O site pede um desafio em JavaScript antes de liberar o vídeo — o app vai baixar pelo navegador (MSE)."
             "cookie_required" -> "O site exige cookie de sessão para mostrar o vídeo."
             "geo_block" -> "O site bloqueia o acesso por país."
             "age_gate" -> "O site pede verificação de idade antes de liberar o vídeo."
             else -> "O site pede um desafio antes de liberar o vídeo."
         }
-        if (f.drm) return "O vídeo tem DRM e o app não consegue baixar."
         if (safeFormat(f.format) == "HLS" && f.iframeCrossOrigin && f.needsReferer == true)
             return "vídeo em HLS dentro de iframe e precisa de Referer"
         if (safeFormat(f.format) == "DASH" && f.iframeCrossOrigin && f.needsReferer == true)
@@ -132,8 +138,12 @@ object AnonReport {
         appendLine()
         appendLine("Página: carregou=${yn(f.pageLoaded)}  HTTP=${http(f.httpCode)}  tempo=${f.loadMs.coerceIn(0, 3_600_000)}ms  redirecionamentos=${f.redirectCount.coerceIn(0, 20)}")
         appendLine()
-        if (f.challenge) appendLine("Anti-robô: sim  tipo=${safeChallenge(f.challengeType)}")
-        else appendLine("Anti-robô: não")
+        if (f.challenge) {
+            appendLine("Anti-robô: sim  tipo=${safeChallenge(f.challengeType)}")
+            if (safeChallenge(f.challengeType) == "age_gate" || f.ageGateBypassed != null) {
+                appendLine("  age_gate: passou automaticamente ${yn(f.ageGateBypassed)}")
+            }
+        } else appendLine("Anti-robô: não")
         appendLine()
         appendLine("Vídeo:")
         appendLine("  elementos: video=${f.videoCount.coerceIn(0, 999)}  iframe=${f.iframeCount.coerceIn(0, 999)}  source=${f.sourceCount.coerceIn(0, 999)}")
@@ -225,7 +235,7 @@ object AnonReport {
         "syntaxerror", "rangeerror", "urierror", "evalerror", "securityerror", "networkerror",
         "aborterror", "notallowederror", "notsupportederror", "quotaexceedederror",
         "timeouterror", "dataerror", "encodingerror", "unknownerror",
-        "js_challenge", "cookie_required", "geo_block", "age_gate",
+        "js_challenge", "cookie_required", "geo_block", "age_gate", "passou", "automaticamente",
         "no_media", "extractor_error", "extractor_generic",
     )
 

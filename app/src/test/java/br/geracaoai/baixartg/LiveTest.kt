@@ -9,7 +9,7 @@ import java.io.File
 class LiveTest {
     private fun crawl(u: String, d: Int, p: Int): List<Found> = runBlocking {
         val out = ArrayList<Found>()
-        val n = Crawler(CrawlOpts(d, p)) { pg -> Downloader.probe(Downloader.DEFAULT_SERVER, pg) }.run(u, { }, { out += it })
+        val n = Crawler(CrawlOpts(d, p), probe = { pg -> Downloader.probe(Downloader.DEFAULT_SERVER, pg) }).run(u, { }, { out += it })
         println("== $u -> $n vídeos"); out.forEach { println("  [${it.kind}] ${it.url}  (pág: ${it.page})") }; out
     }
     @Test fun crawlSites() {

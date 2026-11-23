@@ -748,6 +748,7 @@ fun HistoryTab(goQueue: () -> Unit) {
 fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
     var depth by remember { mutableFloatStateOf(Prefs.depth.toFloat()) }
     var pages by remember { mutableStateOf(Prefs.maxPages.toString()) }
+    var loadAllPages by remember { mutableStateOf(Prefs.loadAllMaxPages.toString()) }
     var probe by remember { mutableStateOf(Prefs.probe) }
     var server by remember { mutableStateOf(Prefs.server) }
     var pd by remember { mutableFloatStateOf(Prefs.parDown.toFloat()) }
@@ -758,7 +759,7 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
     var auto by remember { mutableStateOf(Prefs.autoSend) }
     var test by remember { mutableStateOf("") }; var testing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    fun save() { Prefs.depth = depth.toInt(); Prefs.maxPages = pages.toIntOrNull()?.coerceIn(1, 5000) ?: 500; Prefs.probe = probe; Prefs.parDown = pd.toInt(); Prefs.parUp = pu.toInt()
+    fun save() { Prefs.depth = depth.toInt(); Prefs.maxPages = pages.toIntOrNull()?.coerceIn(1, 5000) ?: 500; Prefs.loadAllMaxPages = loadAllPages.toIntOrNull()?.coerceIn(1, 100) ?: 20; Prefs.probe = probe; Prefs.parDown = pd.toInt(); Prefs.parUp = pu.toInt()
         Prefs.server = server.trim().ifBlank { Downloader.DEFAULT_SERVER }; Prefs.botToken = token.trim(); Prefs.quality = quality; Prefs.autoSend = auto }
     DisposableEffect(Unit) { onDispose { save() } }
     Scaffold(topBar = { TopAppBar(title = { Text("Configurações", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
@@ -790,6 +791,7 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
                 Text("Profundidade dos links: ${depth.toInt()}")
                 Slider(depth, { depth = it }, valueRange = 0f..20f, steps = 19)
                 OutlinedTextField(pages, { pages = it.filter(Char::isDigit) }, label = { Text("Máximo de páginas") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(loadAllPages, { loadAllPages = it.filter(Char::isDigit) }, label = { Text("Limite de páginas ao Carregar tudo") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                 SwitchRow("Usar servidor (yt-dlp) em todas as páginas", "Acha vídeos de players difíceis. Mais lento.", probe) { probe = it }
                 var strong by remember { mutableStateOf(Prefs.strongBlock) }
                 SwitchRow("Bloqueador forte", "No Navegador: bloqueia anúncios, pop-ups e redirecionamentos. Nunca bloqueia os vídeos.", strong) { strong = it; Prefs.strongBlock = it; br.geracaoai.baixartg.web.AdBlock.enabled = it }

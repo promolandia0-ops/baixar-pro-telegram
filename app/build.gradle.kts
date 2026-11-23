@@ -4,7 +4,7 @@ val ks = Properties().apply { val f = rootProject.file("keystore/keystore.proper
 android {
   namespace = "br.geracaoai.baixartg"
   compileSdk = 35
-  defaultConfig { applicationId = "br.geracaoai.baixartg"; minSdk = 30; targetSdk = 35; versionCode = 52; versionName = "1.9.16"
+  defaultConfig { applicationId = "br.geracaoai.baixartg"; minSdk = 30; targetSdk = 35; versionCode = 53; versionName = "1.9.17"
     ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") } }
   signingConfigs { create("release") { if (ks.isNotEmpty()) { storeFile = rootProject.file(ks["storeFile"] as String); storePassword = ks["storePassword"] as String; keyAlias = ks["keyAlias"] as String; keyPassword = ks["keyPassword"] as String } } }
   buildTypes { release { isMinifyEnabled = true; isShrinkResources = true; proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"); signingConfig = signingConfigs.getByName("release") } }
@@ -22,6 +22,7 @@ dependencies {
   implementation("androidx.compose.ui:ui")
   implementation("androidx.activity:activity-compose:1.9.2")
   implementation("androidx.core:core-ktx:1.13.1")
+  implementation("androidx.webkit:webkit:1.12.1")
   implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.6")
   implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
   implementation("io.github.tdlib-android:core:0.1.1")

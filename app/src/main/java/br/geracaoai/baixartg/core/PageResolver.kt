@@ -12,7 +12,7 @@ object PageResolver {
     /** "capa/thumb/poster" no caminho só derruba quando não é arquivo de vídeo (antes derrubava até .mp4 de verdade). */
     fun isReal(f: Found): Boolean = f.kind != Kind.PHOTO && !Extract.isSegmentUrl(f.url) && !(Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) &&
         !(Extract.isVideoThumb(f.url) && !Extract.isVideoUrl(f.url) && !Extract.isHls(f.url)) && !TitleFix.isSubtitleUrl(f.url) &&
-        (f.kind == Kind.SERVER || f.kind == Kind.HLS || f.kind == Kind.DIRECT || Extract.isVideoUrl(f.url))
+        (f.kind == Kind.SERVER || f.kind == Kind.HLS || f.kind == Kind.DIRECT || f.kind == Kind.MSE || Extract.isVideoUrl(f.url))
     private fun isPreview(f: Found) = Extract.isPreviewVideo(f.url)
 
     /**
@@ -59,7 +59,16 @@ object PageResolver {
         pr?.videos?.let { cand += it.filter { v -> v.kind != Kind.SERVER } }
         if (best(cand) == null && js.apis.isNotEmpty()) cand += fromApis(js.apis, card)
         if (best(cand) == null) pr?.videos?.let { cand += it }
-        return title to best(cand)
+        val picked = best(cand)
+        val snap = MseCapture.snapshot(card)
+        val mseHit = js.mse || js.specialHeader || snap.hasMse || snap.hasJsChallenge || snap.hasSpecialHeader || snap.manifests.any { MseCapture.isDash(it) }
+        if (picked == null && (mseHit || js.challenge || snap.rangesOrDirect.isNotEmpty())) {
+            return title to Found(card, card, title.ifBlank { "vídeo" }, Kind.MSE, ref = card, extra = title)
+        }
+        if (picked != null && picked.kind == Kind.SERVER && (mseHit || Extract.isDash(picked.url))) {
+            return title to Found(card, card, title.ifBlank { picked.title }.ifBlank { "vídeo" }, Kind.MSE, ref = card, extra = picked.extra)
+        }
+        return title to picked
     }
 
     /**
@@ -104,8 +113,21 @@ object PageResolver {
             val tt = TitleFix.pick(realTitle, t).ifBlank { t }
             if (wv != null) return wv.copy(page = card, ref = wv.ref ?: card, title = tt, extra = listOf(tt, ctx, wv.extra).joinToString(" ").trim())
         }
-        if (browserOpen) return null
-        val pt = withTimeoutOrNull(60_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) } ?: return null
-        return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
+        if (browserOpen) {
+            val snap = MseCapture.snapshot(card)
+            if (snap.hasMse || snap.hasJsChallenge || snap.hasSpecialHeader || snap.manifests.isNotEmpty() || snap.rangesOrDirect.isNotEmpty() ||
+                Downloader.lastProbeError?.contains("403") == true) {
+                return Found(card, card, t, Kind.MSE, ref = card, extra = listOf(t, ctx).joinToString(" ").trim())
+            }
+            return null
+        }
+        val pt = withTimeoutOrNull(60_000) { Downloader.probe(br.geracaoai.baixartg.Prefs.server, card) }
+        if (pt != null) return Found(card, card, TitleFix.pick(t, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(t, ctx, pt).joinToString(" ").trim())
+        val snap = MseCapture.snapshot(card)
+        if (snap.hasMse || snap.hasJsChallenge || snap.hasSpecialHeader || snap.manifests.isNotEmpty() || snap.rangesOrDirect.isNotEmpty() ||
+            Downloader.lastProbeError?.contains("403") == true) {
+            return Found(card, card, t, Kind.MSE, ref = card, extra = listOf(t, ctx).joinToString(" ").trim())
+        }
+        return null
     }
 }

@@ -250,7 +250,7 @@ object BrowserDetect {
     private fun busy(d: Int) { scope.launch(Dispatchers.Main) { photoBusy.intValue = (photoBusy.intValue + d).coerceAtLeast(0) } }
     /** Quando a página atual começou a abrir (para o "Procurando…" ter fim). */
     val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
-    fun newPage() { alreadyHere.intValue = 0; suppressed.clear(); pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
+    fun newPage() { BrowserLoadMore.stop(); alreadyHere.intValue = 0; suppressed.clear(); pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(10)
     /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
@@ -349,7 +349,7 @@ object BrowserDetect {
 
     private fun isRealVideo(f: Found): Boolean =
         f.kind != Kind.PHOTO && !BrowserGrouping.isFilteredOutVideoUrl(f.url) &&
-            (f.kind == Kind.SERVER || f.kind == Kind.HLS || Extract.isVideoUrl(f.url) || f.kind == Kind.DIRECT)
+            (f.kind == Kind.SERVER || f.kind == Kind.HLS || Extract.isVideoUrl(f.url) || f.kind == Kind.DIRECT || f.kind == Kind.MSE)
 
     /**
      * Adiciona (ou troca por qualidade maior) — dedupe por identidade do vídeo.
@@ -565,7 +565,11 @@ object BrowserDetect {
     }
 
     /** Cards coletados do DOM (JsScripts.COLLECT). */
-    fun onCollected(page: String, c: JsScripts.Collected, background: Boolean = false) {
+    fun totalDetectedCount(): Int = list.count { !it.sent }
+    fun seenItemsCount(): Int = synchronized(seenCards) { seenCards.size } + list.count { !it.sent }
+    fun staticCollectPage(url: String, html: String): JsScripts.Collected? = staticCollect(url, html)
+
+    fun onCollected(page: String, c: JsScripts.Collected, background: Boolean = false, autoFollow: Boolean = true) {
         if (!background) browsing = page
         val prevInfo = pageInfo.put(normPage(page), c.bestPageTitle to c.pageText)
         if (!background && !(Extract.isPhotoUrl(page) && !Extract.isVideoUrl(page))) {
@@ -615,13 +619,13 @@ object BrowserDetect {
         }
         // paginação dos resultados ("próxima", rel=next): segue sozinho quando há busca/nome
         val nx = c.next.substringBefore('#')
-        if (nx.startsWith("http") && Extract.host(nx) == root && nx != page && (term.value.isNotBlank() || SiteSearch.isSearchUrl(page) || background) &&
+        if (autoFollow && nx.startsWith("http") && Extract.host(nx) == root && nx != page && (term.value.isNotBlank() || SiteSearch.isSearchUrl(page) || background) &&
             followed.size < 30 && followed.add(normPage(nx) + "?" + nx.substringAfter('?', ""))) {
             scope.launch {
                 // próxima página: só o HTML (sem página oculta: ela dividia o motor de páginas com o navegador visível)
                 val h = PageResolver.fetch(nx, page)
                 val col = h?.let { staticCollect(nx, it) }
-                if (col != null && col.anchors.isNotEmpty()) withContext(Dispatchers.Main) { onCollected(nx, col, background = true) }
+                if (col != null && col.anchors.isNotEmpty()) withContext(Dispatchers.Main) { onCollected(nx, col, background = true, autoFollow = autoFollow) }
                 // fotos também nas próximas páginas da busca ("Só fotos" / "Vídeos e fotos")
                 if (photosOn.value && h != null) {
                     val ps = Photos.fromHtml(nx, h); val cs = Photos.cardsFromHtml(nx, h)
@@ -746,7 +750,13 @@ object BrowserDetect {
                     }
                     val pt = withTimeoutOrNull(40_000) { Downloader.probe(Prefs.server, card, Net.browserSlow) }
                     if (pt != null) publish(Found(card, card, TitleFix.pick(tt, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(ctxAll, pt).joinToString(" ")), listOf("ip:" + normPage(card)))
-                    else markFailed(card)
+                    else {
+                        val snap = MseCapture.snapshot(card)
+                        if (snap.hasMse || snap.hasJsChallenge || snap.hasSpecialHeader || snap.manifests.isNotEmpty() || snap.rangesOrDirect.isNotEmpty() ||
+                            Downloader.lastProbeError?.contains("403") == true) {
+                            publish(Found(card, card, tt, Kind.MSE, ref = card, extra = ctxAll), listOf("ip:" + normPage(card)))
+                        } else markFailed(card)
+                    }
                 } }
                 if (ok == null) markFailed(card)
             } catch (e: Exception) { if (e is CancellationException) throw e; markFailed(card) }
@@ -757,9 +767,168 @@ object BrowserDetect {
     fun warm() { scope.launch { Downloader.warmUp(Prefs.server) } }
 }
 
+object BrowserLoadMore {
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private var job: Job? = null
+    val running = mutableStateOf(false)
+    val pageNum = mutableIntStateOf(1)
+    val round = mutableIntStateOf(0)
+    val status = mutableStateOf("")
+
+    fun stop() {
+        running.value = false
+        job?.cancel()
+        job = null
+    }
+
+    fun start(web: android.webkit.WebView?) {
+        if (web == null) return
+        stop()
+        running.value = true
+        pageNum.intValue = 1
+        round.intValue = 0
+        status.value = "${BrowserDetect.totalDetectedCount()} vídeos encontrados"
+        job = scope.launch {
+            try {
+                val startAt = System.currentTimeMillis()
+                val startUrl = withContext(Dispatchers.Main) { web.url.orEmpty() }
+                if (!startUrl.startsWith("http", true)) return@launch
+
+                var noNew = 0
+                var lastScrollH = -1L
+                var anyClicked = false
+                var r = 0
+                while (running.value && r < LoadMore.MAX_SCROLL_ROUNDS && System.currentTimeMillis() - startAt < LoadMore.MAX_DURATION_MS) {
+                    currentCoroutineContext().ensureActive()
+                    r++
+                    round.intValue = r
+                    val beforeItems = BrowserDetect.seenItemsCount()
+                    val stepRaw = evalMain(web, LoadMore.STEP_JS)
+                    val stepObj = try { org.json.JSONObject(stepRaw ?: "{}") } catch (_: Exception) { org.json.JSONObject() }
+                    val clicked = stepObj.optInt("clicked") == 1
+                    val scrollH = stepObj.optLong("scrollH", 0L)
+                    if (clicked) anyClicked = true
+
+                    // espera conteúdo novo carregar + roda coleta incremental na página visível
+                    delay(if (clicked) 1_800L else 1_100L)
+                    val waitEnd = System.currentTimeMillis() + 3_000L
+                    while (running.value && System.currentTimeMillis() < waitEnd) {
+                        val prog = withContext(Dispatchers.Main) { web.progress }
+                        if (prog >= 100) break
+                        delay(250)
+                    }
+                    collectIncrementalNow(web)
+                    delay(350)
+
+                    val afterItems = BrowserDetect.seenItemsCount()
+                    val total = BrowserDetect.totalDetectedCount()
+                    status.value = "$total vídeo${if (total == 1) "" else "s"} encontrados"
+                    if (afterItems > beforeItems || (scrollH > lastScrollH && lastScrollH > 0)) {
+                        noNew = 0
+                    } else {
+                        noNew++
+                    }
+                    lastScrollH = maxOf(lastScrollH, scrollH)
+
+                    // Se não clicou em nenhum botão "ver mais" e não trouxe itens novos, verifica se há paginação 1,2,3/próxima
+                    if (!anyClicked && noNew >= 1) {
+                        val seeds = readPaginationSeeds(web, startUrl)
+                        if (seeds.isNotEmpty()) break
+                    }
+                    if (noNew >= LoadMore.MAX_NO_NEW_ROUNDS) break
+                }
+
+                if (running.value && System.currentTimeMillis() - startAt < LoadMore.MAX_DURATION_MS) {
+                    val seeds = readPaginationSeeds(web, startUrl)
+                    if (seeds.isNotEmpty()) {
+                        LoadMore.runPagination(
+                            startUrl = startUrl,
+                            seedUrls = seeds,
+                            maxPages = Prefs.loadAllMaxPages,
+                            isStopped = { !running.value || System.currentTimeMillis() - startAt >= LoadMore.MAX_DURATION_MS },
+                            itemCount = { BrowserDetect.totalDetectedCount() },
+                            fetchHtml = { u, ref -> PageResolver.fetch(u, ref) },
+                            renderHtml = { u ->
+                                if (JsRender.available()) {
+                                    val js = JsRender.listing(u, 20_000)
+                                    js?.html to js?.collected
+                                } else null to null
+                            },
+                            collectPage = { u, html, preCol ->
+                                val before = BrowserDetect.seenItemsCount()
+                                val col = preCol ?: BrowserDetect.staticCollectPage(u, html)
+                                if (col != null && (col.anchors.isNotEmpty() || col.videos.isNotEmpty())) {
+                                    withContext(Dispatchers.Main) {
+                                        BrowserDetect.onCollected(u, col, background = true, autoFollow = false)
+                                    }
+                                    delay(150)
+                                }
+                                (BrowserDetect.seenItemsCount() - before).coerceAtLeast(0)
+                            },
+                            onProgress = { pg, tot ->
+                                pageNum.intValue = pg
+                                status.value = "página $pg • $tot vídeos"
+                            },
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+            } finally {
+                running.value = false
+            }
+        }
+    }
+
+    private suspend fun readPaginationSeeds(web: android.webkit.WebView, startUrl: String): List<String> {
+        val raw = evalMain(web, LoadMore.PAGINATION_JS)
+        val out = LinkedHashSet<String>()
+        try {
+            val a = org.json.JSONArray(raw ?: "[]")
+            for (i in 0 until a.length()) {
+                val u = a.optString(i)
+                if (u.startsWith("http", true)) out += u
+            }
+        } catch (_: Exception) {}
+        if (out.isEmpty()) {
+            val html = evalMain(web, "(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()")
+            if (!html.isNullOrBlank()) out += LoadMore.extractNextUrls(startUrl, html, setOf(startUrl.substringBefore('#')), 1)
+        }
+        return out.toList()
+    }
+
+    private suspend fun collectIncrementalNow(web: android.webkit.WebView) {
+        val page = withContext(Dispatchers.Main) { web.url.orEmpty() }
+        if (!page.startsWith("http", true)) return
+        val raw = evalMain(web, JsScripts.COLLECT_INC) ?: return
+        val col = JsScripts.parseCollected(raw) ?: return
+        if (!col.same) {
+            withContext(Dispatchers.Main) {
+                try { BrowserDetect.onCollected(page, col, background = false, autoFollow = false) } catch (_: Exception) {}
+            }
+        }
+    }
+
+    private suspend fun evalMain(web: android.webkit.WebView, js: String): String? =
+        withTimeoutOrNull(5_000L) {
+            suspendCancellableCoroutine { cont ->
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    try {
+                        web.evaluateJavascript(js) { raw ->
+                            val s = if (raw.isNullOrBlank() || raw == "null") null
+                            else try { (org.json.JSONTokener(raw).nextValue() as? String) ?: raw } catch (_: Exception) { raw }
+                            if (cont.isActive) cont.resume(s) {}
+                        }
+                    } catch (_: Exception) { if (cont.isActive) cont.resume(null) {} }
+                }
+            }
+        }
+}
+
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearchSite: (String) -> Unit) {
+fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onLoadAll: () -> Unit = {}, onSearchSite: (String) -> Unit) {
     var onlyChecked by remember { mutableStateOf(false) }
     var tab by remember { mutableIntStateOf(0) }
     var q by remember { mutableStateOf(BrowserDetect.term.value) }
@@ -790,9 +959,22 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     Text("${checked.size} de $total marcados", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                     if (pending > 0) { CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(6.dp)); Text("resolvendo $pending", style = MaterialTheme.typography.labelMedium) }
                 }
+                val loadAllOn by BrowserLoadMore.running
+                val loadAllStatus by BrowserLoadMore.status
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton({ BrowserDetect.setAll(true) }, Modifier.weight(1f), enabled = checked.size < total) { Text("Marcar todos", maxLines = 1) }
                     OutlinedButton({ BrowserDetect.setAll(false) }, Modifier.weight(1f), enabled = checked.isNotEmpty()) { Text("Desmarcar todos", maxLines = 1) }
+                }
+                if (loadAllOn) {
+                    Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Text(loadAllStatus.ifBlank { "$total vídeos encontrados" }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        OutlinedButton({ BrowserLoadMore.stop() }, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) { Text("Parar") }
+                    }
+                } else {
+                    OutlinedButton(onLoadAll, Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                        Icon(Icons.Rounded.UnfoldMore, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Carregar tudo (ver mais / páginas)")
+                    }
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("Mostrar só os marcados", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
@@ -809,7 +991,7 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     items(visible, key = { it.key }) { d ->
                         ListItem(
                             headlineContent = { Text(d.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text((when (d.state) { 1 -> "carregando…"; 2 -> "não achou vídeo"; else -> d.f.typeLabel + " • " + (if (d.f.kind == Kind.SERVER) "via servidor" else "pronto") }) + (if (d.badge.isNotBlank()) " • " + d.badge else "") + if (d.sent) " • Já enviado" else "") },
+                            supportingContent = { Text((when (d.state) { 1 -> "carregando…"; 2 -> "não achou vídeo"; else -> d.f.typeLabel + " • " + (when (d.f.kind) { Kind.SERVER -> "via servidor"; Kind.MSE -> "pelo navegador"; else -> "pronto" }) }) + (if (d.badge.isNotBlank()) " • " + d.badge else "") + if (d.sent) " • Já enviado" else "") },
                             leadingContent = { Checkbox(d.sel && !d.sent, { v -> BrowserDetect.toggle(d.key, v) }, enabled = !d.sent) },
                             trailingContent = {
                                 TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent) { Text(if (d.force || d.badge.isNotBlank()) "Baixar mesmo assim" else "Baixar") }

@@ -42,7 +42,7 @@ object JsRender {
     val aliveQueue = java.util.concurrent.atomic.AtomicInteger(0)
     @Volatile var lastUnavailable = false
 
-    private const val PLAY_JS = """
+    const val PLAY_JS_SCRIPT = """
         (function(){
           function q(s){try{return document.querySelectorAll(s)}catch(e){return []}}
           // textContent (não força recalcular o layout da página, que é dividida com o navegador visível)
@@ -88,28 +88,12 @@ object JsRender {
         })()
     """
 
-    const val HOOK_JS = """
-        (function(){
-          if(window.__bptHook)return 'ok'; window.__bptHook=1; window.__bptNet=window.__bptNet||[];
-          function add(u){if(!u||typeof u!=='string')return; if(/^blob:|^data:/i.test(u))return;
-            if(/\\.(ts|m4s|m4f|cmfv|cmfa)(\\?|$)|\\/(?:init|seg(?:ment)?[-_]?\\d+|chunk[-_]?\\d+|frag[-_]?\\d+)\\.(?:mp4|m4s|webm)/i.test(u))return; if(/\\.(m3u8|mpd|mp4|m4v|webm)(\\?|$)/i.test(u)||/\\/video\\//i.test(u)||/application\\/(vnd\\.apple\\.)?mpegurl|dash\\+xml/i.test(u)) window.__bptNet.push(u);}
-          try{var of=window.fetch; if(of) window.fetch=function(){try{var a=arguments[0]; add(typeof a==='string'?a:(a&&a.url))}catch(e){} return of.apply(this,arguments)};}catch(e){}
-          try{var X=XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open=function(m,u){try{add(u)}catch(e){} return X.apply(this,arguments)};}catch(e){}
-          try{
-            var MSE=window.MediaSource||window.WebKitMediaSource;
-            if(MSE&&MSE.prototype&&MSE.prototype.addSourceBuffer){
-              var asb=MSE.prototype.addSourceBuffer;
-              MSE.prototype.addSourceBuffer=function(m){try{if(m)window.__bptNet.push('mse:'+m)}catch(e){} return asb.apply(this,arguments)};
-            }
-          }catch(e){}
-          if(!window.__bptHookT){window.__bptHookT=setInterval(function(){try{document.querySelectorAll('video,audio').forEach(function(v){add(v.currentSrc||v.src||'');})}catch(e){}},1000);}
-          return 'ok';
-        })()
-    """
+    const val HOOK_JS = MseHookScript.SCRIPT
 
     fun bind(act: Activity) { activity = WeakReference(act) }
     fun unbind(act: Activity) { if (activity?.get() === act) activity = null }
-    fun available(): Boolean = activity?.get()?.let { !it.isDestroyed && !it.isFinishing } == true
+    fun hostActivity(): Activity? = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing }
+    fun available(): Boolean = hostActivity() != null
 
     /** Container que nunca consome toques (passam para a tela de verdade). */
     private class PassThrough(c: Context) : FrameLayout(c) {
@@ -138,6 +122,15 @@ object JsRender {
             ticks++
             wv.evaluateJavascript("(function(){var t=document.title||'';return (/just a moment|attention required|checking your browser|verify you are human|um momento/i.test(t)||!!document.querySelector('#challenge-form,#challenge-stage,[name=cf-turnstile-response]'))?'CH':'ok'})()") { ch ->
                 if (ch?.contains("CH") == true) { challengeSeen = true; stable = 0; wv.postDelayed({ tick() }, 1_000); return@evaluateJavascript }
+                wv.evaluateJavascript(AgeGate.BYPASS_JS) { agRaw ->
+                    try {
+                        val ag = org.json.JSONObject(unescapeJs(agRaw) ?: agRaw ?: "{}")
+                        if (ag.optInt("clicked") == 1) {
+                            stable = 0
+                            try { CookieManager.getInstance().flush() } catch (_: Exception) {}
+                        }
+                    } catch (_: Exception) {}
+                }
                 wv.evaluateJavascript(JsScripts.SCROLL_STEP) { sig ->
                     if (sig == lastSig && wv.progress >= 100) stable++ else stable = 0
                     lastSig = sig ?: ""
@@ -169,29 +162,67 @@ object JsRender {
     private suspend fun page(url: String, timeoutMs: Long, play: Boolean, pool: Semaphore = gate, slotWait: Long = 20_000, queue: Boolean = false): JsPage? {
         val wait = if (play) timeoutMs.coerceIn(8_000L, 25_000L) else timeoutMs
         return drive(url, wait + 3_000, !play, pool, slotWait, skipVisibleGate = queue) { wv, hits, done ->
-            val start = System.currentTimeMillis()
+            var start = System.currentTimeMillis()
             var firstHitAt = 0L
+            var ageGateSeen = false
+            var ageGateClicked = false
             fun finish() {
-                wv.evaluateJavascript(JsScripts.COLLECT) { raw ->
-                    val c = JsScripts.parseCollected(raw)
-                    c?.videos?.forEach { v -> if (Extract.mediaKindOf(v) != null && !Extract.isSegmentUrl(v) && !MediaPick.isAdUrl(v)) synchronized(hits) { hits += v } }
-                    wv.evaluateJavascript("(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()") { rawHtml ->
-                        val media = mediaOf(hits, url)
-                        done(JsPage(unescapeJs(rawHtml), media, challenge = c?.challenge == true, collected = c,
-                            apis = synchronized(hits) { hits.filter { it.startsWith("api:") }.map { it.removePrefix("api:") } }.take(12)))
+                wv.evaluateJavascript("(function(){try{var a=window.__bptReqLog||[];window.__bptReqLog=[];return JSON.stringify({m:window.__bptMseActive?1:0,r:a})}catch(e){return '{}'}})()") { mraw ->
+                    try {
+                        val ms = unescapeJs(mraw) ?: mraw ?: "{}"
+                        val mo = org.json.JSONObject(ms)
+                        if (mo.optInt("m") == 1) MseCapture.recordMse(url, "sb_js", "video/mp4")
+                        mo.optJSONArray("r")?.let { MseCapture.ingestJsReqLog(url, it.toString()) }
+                    } catch (_: Exception) {}
+                    wv.evaluateJavascript(JsScripts.COLLECT) { raw ->
+                        val c = JsScripts.parseCollected(raw)
+                        if (c?.challenge == true) MseCapture.recordChallenge(url)
+                        c?.videos?.forEach { v -> if (Extract.mediaKindOf(v) != null && !Extract.isSegmentUrl(v) && !MediaPick.isAdUrl(v)) synchronized(hits) { hits += v } }
+                        val snap = MseCapture.snapshot(url)
+                        wv.evaluateJavascript("(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()") { rawHtml ->
+                            val media = mediaOf(hits, url)
+                            val hasMseOrVideo = media.isNotEmpty() || snap.hasMse || snap.manifests.isNotEmpty() || snap.rangesOrDirect.isNotEmpty()
+                            val agBypassed: Boolean? = if (ageGateSeen || ageGateClicked) (ageGateClicked && (hasMseOrVideo || (c?.videos?.isNotEmpty() == true))) else null
+                            done(JsPage(unescapeJs(rawHtml), media, challenge = c?.challenge == true, collected = c,
+                                apis = synchronized(hits) { hits.filter { it.startsWith("api:") }.map { it.removePrefix("api:") } }.take(12),
+                                mse = snap.hasMse || snap.manifests.any { MseCapture.isDash(it) },
+                                specialHeader = snap.hasSpecialHeader,
+                                ageGateBypassed = agBypassed))
+                        }
                     }
                 }
             }
+            var mseSeenAt = 0L
             fun tick() {
-                if (play && wv.progress >= 60) { wv.evaluateJavascript(HOOK_JS) { }; wv.evaluateJavascript(PLAY_JS) { } }
-                wv.evaluateJavascript("(function(){try{return JSON.stringify(window.__bptNet||[])}catch(e){return '[]'}})()") { raw ->
-                    val arr = unescapeJs(raw) ?: raw?.trim()?.trim('"') ?: "[]"
+                if (wv.progress >= 30) {
+                    wv.evaluateJavascript(AgeGate.BYPASS_JS) { agRaw ->
+                        try {
+                            val ag = org.json.JSONObject(unescapeJs(agRaw) ?: agRaw ?: "{}")
+                            if (ag.optInt("detected") == 1) ageGateSeen = true
+                            if (ag.optInt("clicked") == 1) {
+                                ageGateSeen = true
+                                if (!ageGateClicked) {
+                                    ageGateClicked = true
+                                    start = maxOf(start, System.currentTimeMillis() - (wait / 2))
+                                    try { CookieManager.getInstance().flush() } catch (_: Exception) {}
+                                }
+                            }
+                        } catch (_: Exception) {}
+                    }
+                }
+                if (play && wv.progress >= 40) { wv.evaluateJavascript(HOOK_JS) { }; wv.evaluateJavascript(PLAY_JS_SCRIPT) { } }
+                wv.evaluateJavascript("(function(){try{var a=window.__bptReqLog||[];window.__bptReqLog=[];return JSON.stringify({net:window.__bptNet||[],m:window.__bptMseActive?1:0,r:a})}catch(e){return '{}'}})()") { raw ->
+                    val jsStr = unescapeJs(raw) ?: raw?.trim() ?: "{}"
                     try {
-                        val a = org.json.JSONArray(arr)
-                        for (i in 0 until a.length()) {
+                        val o = org.json.JSONObject(jsStr)
+                        val a = o.optJSONArray("net")
+                        if (a != null) for (i in 0 until a.length()) {
                             val u = a.optString(i)
                             if (u.startsWith("http") && !MediaPick.isAdUrl(u)) synchronized(hits) { hits += u }
+                            else if (u.startsWith("mse:")) MseCapture.recordMse(url, "sb_js", u.removePrefix("mse:"))
                         }
+                        if (o.optInt("m") == 1) MseCapture.recordMse(url, "sb_js", "video/mp4")
+                        o.optJSONArray("r")?.let { MseCapture.ingestJsReqLog(url, it.toString()) }
                     } catch (_: Exception) {}
                 }
 
@@ -199,9 +230,12 @@ object JsRender {
                 val cands = urls.map { MediaPick.Cand(it, pageUrl = url) }
                 val now = System.currentTimeMillis()
                 if (cands.any { !MediaPick.isLikelyAd(it) } && firstHitAt == 0L) firstHitAt = now
+                val snap = MseCapture.snapshot(url)
+                if ((snap.hasMse || snap.manifests.isNotEmpty()) && mseSeenAt == 0L) mseSeenAt = now
                 val waited = now - start
                 val gotMain = firstHitAt > 0 && now - firstHitAt >= 1_500L
-                if (gotMain || (play && MediaPick.readyToPick(cands, waited)) || now - start >= wait || (!play && wv.progress >= 100 && now - start > 2_500)) finish()
+                val gotMse = mseSeenAt > 0 && now - mseSeenAt >= 1_800L
+                if (gotMain || gotMse || (play && MediaPick.readyToPick(cands, waited)) || now - start >= wait || (!play && wv.progress >= 100 && now - start > 2_500)) finish()
                 else wv.postDelayed({ tick() }, 500)
             }
             wv.postDelayed({ tick() }, 800)
@@ -277,6 +311,7 @@ object JsRender {
         val wv = WebView(act)
         val s = wv.settings
         s.javaScriptEnabled = true
+        try { CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true) } catch (_: Exception) {}
         s.domStorageEnabled = true
         s.mediaPlaybackRequiresUserGesture = false
         s.loadsImagesAutomatically = true
@@ -287,6 +322,9 @@ object JsRender {
         try { s.userAgentString = Net.userAgent } catch (_: Exception) {}
         wv.isFocusable = false
         wv.isClickable = false
+        if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(wv, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
+        }
         fun isHit(u: String): Boolean {
             if (u.isBlank() || u.startsWith("blob:", true) || u.startsWith("data:", true)) return false
             if (MediaPick.isAdUrl(u)) return false
@@ -294,11 +332,18 @@ object JsRender {
             return Extract.mediaKindOf(u) != null || Extract.isHls(u) || Extract.isDash(u)
         }
         wv.webViewClient = object : WebViewClient() {
+            override fun onPageStarted(view: WebView, u: String?, favicon: android.graphics.Bitmap?) {
+                try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}
+            }
             override fun shouldInterceptRequest(v: WebView, request: WebResourceRequest): android.webkit.WebResourceResponse? {
                 val u = request.url?.toString().orEmpty()
+                val hdrs = request.requestHeaders ?: emptyMap()
+                if (u.startsWith("http", true) && (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u) || Extract.isSegmentUrl(u) || hdrs.keys.any { it.equals("Range", true) })) {
+                    MseCapture.recordRequest(pageUrl, u, request.method ?: "GET", hdrs, source = "jsrender")
+                }
                 if (isHit(u)) {
                     synchronized(hits) { hits += u }
-                    PlayCapture.record(u, pageUrl, request.requestHeaders?.get("Referer") ?: pageUrl)
+                    PlayCapture.record(u, pageUrl, hdrs["Referer"] ?: pageUrl)
                 }
                 else if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, pageUrl, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                 else if (!block && !request.isForMainFrame && u.startsWith("http") && !STATIC.containsMatchIn(u.substringBefore('#')) && API_PATH.containsMatchIn(u) &&

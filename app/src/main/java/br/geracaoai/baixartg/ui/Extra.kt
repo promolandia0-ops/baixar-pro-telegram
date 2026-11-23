@@ -24,7 +24,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -109,8 +113,15 @@ object BrowserRuntime {
 @Composable
 fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (url: String, site: Boolean) -> Unit) {
     var web by remember { mutableStateOf(BrowserRuntime.web) }
-    var address by remember { mutableStateOf(br.geracaoai.baixartg.Prefs.browserUrl.ifBlank { br.geracaoai.baixartg.Prefs.lastUrl }.ifBlank { "https://" }) }
+    val initialAddr = remember { BrowserRuntime.web?.url?.takeIf { it.isNotBlank() } ?: br.geracaoai.baixartg.Prefs.browserUrl.ifBlank { br.geracaoai.baixartg.Prefs.lastUrl }.ifBlank { "https://" } }
+    var addrField by remember { mutableStateOf(TextFieldValue(initialAddr, TextRange(initialAddr.length))) }
+    var addrFocused by remember { mutableStateOf(false) }
     var current by remember { mutableStateOf(BrowserRuntime.web?.url.orEmpty()) }
+    val focusManager = LocalFocusManager.current
+    fun syncAddress(u: String) {
+        if (u.isBlank() || addrFocused) return
+        if (addrField.text != u) addrField = TextFieldValue(u, TextRange(u.length))
+    }
     var progress by remember { mutableIntStateOf(0) }
     var canBack by remember { mutableStateOf(BrowserRuntime.web?.canGoBack() == true) }; var canFwd by remember { mutableStateOf(BrowserRuntime.web?.canGoForward() == true) }
     var ask by remember { mutableStateOf(false) }
@@ -121,7 +132,17 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             BrowserNav.BackAction.PREVIOUS_TAB -> onLeaveTab()
         }
     }
-    fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }
+    fun go(t: String) {
+        val u = BrowserAddress.toLoadUrl(t)
+        focusManager.clearFocus()
+        addrFocused = false
+        if (u.isNotEmpty()) {
+            addrField = TextFieldValue(u, TextRange(u.length))
+            web?.loadUrl(u)
+        } else if (current.startsWith("http")) {
+            addrField = TextFieldValue(current, TextRange(current.length))
+        }
+    }
     fun savePanel() { val v = BrowserDetect.list.toList(); val p = BrowserDetect.photos.toList(); val h = BrowserDetect.loadedHostSet()
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { BrowserStore.savePanel(v, p, h) } }
     DisposableEffect(visible) {
@@ -159,6 +180,17 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         collectState.busy = true; collectState.lastAt = now
         // só o que mudou desde a última vez (nada, se a página não mudou)
         val full = BrowserDetect.fullCollect.also { if (it) BrowserDetect.fullCollect = false }
+        v.evaluateJavascript("(function(){try{var r=window.__bptReqLog||[];window.__bptReqLog=[];var m=window.__bptMseActive?1:0;var t=window.__bptMseTracks||[];return JSON.stringify({m:m,r:r,t:t})}catch(e){return '{}'}})()") { mraw ->
+            collectScope.launch {
+                try {
+                    val ms = try { (org.json.JSONTokener(mraw ?: "").nextValue() as? String) } catch (_: Exception) { null } ?: mraw ?: "{}"
+                    val mo = org.json.JSONObject(ms)
+                    if (mo.optInt("m") == 1) MseCapture.recordMse(page, "sb_vis", "video/mp4")
+                    mo.optJSONArray("t")?.let { ta -> for (i in 0 until ta.length()) { val to = ta.optJSONObject(i) ?: continue; MseCapture.recordMse(page, to.optString("id"), to.optString("mime")) } }
+                    mo.optJSONArray("r")?.let { MseCapture.ingestJsReqLog(page, it.toString()) }
+                } catch (_: Exception) {}
+            }
+        }
         v.evaluateJavascript(if (full) JsScripts.COLLECT else JsScripts.COLLECT_INC) { raw ->
             BrowserDiag.timed(System.currentTimeMillis() - now)
             collectScope.launch {
@@ -203,32 +235,146 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs)
         if (BrowserDetect.photosOn.value) { handler.removeCallbacks(photoRun); handler.postDelayed(photoRun, delayMs + 300) } }
     LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_000); if (web != null) scheduleCollect(0) } }
+    val mode by BrowserDetect.mode
+    val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
+    val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
+    val phN by remember { derivedStateOf { BrowserDetect.photos.size } }
+    val pendingN by BrowserDetect.pending
+    val photoBusy by BrowserDetect.photoBusy
+    val pageAt by BrowserDetect.pageAt
+    val loadAllOn by BrowserLoadMore.running
+    val loadAllPg by BrowserLoadMore.pageNum
+    var nowTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); nowTick = System.currentTimeMillis(); BrowserDetect.watchLoading(nowTick) } }
+    val working = (if (mode == 1) 0 else pendingN) + (if (mode != 0) photoBusy else 0)
+    val searching = detected == 0 && phN == 0 && working > 0 && (pageAt == 0L || nowTick - pageAt < 25_000)
+    var moreMenu by remember { mutableStateOf(false) }
+
     Scaffold(topBar = {
-        Column {
-            TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) },
-                actions = {
-                    IconButton({ web?.goBack() }, enabled = canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
-                    IconButton({ web?.goForward() }, enabled = canFwd) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
-                    IconButton({ web?.reload() }) { Icon(Icons.Rounded.Refresh, "Recarregar") }
-                    IconButton({ BrowserStore.toggleFav(current, web?.title ?: "") }, enabled = current.startsWith("http")) {
-                        Icon(if (BrowserStore.isFav(current)) Icons.Rounded.Star else Icons.Rounded.StarBorder, "Favorito") }
-                    IconButton({ showSites = true }) { Icon(Icons.Rounded.History, "Recentes") }
-                }, colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
-            OutlinedTextField(address, { address = it }, Modifier.fillMaxWidth().padding(horizontal = 12.dp), singleLine = true, shape = MaterialTheme.shapes.extraLarge,
-                leadingIcon = { Icon(if (current.startsWith("https")) Icons.Rounded.Lock else Icons.Rounded.Public, null) },
-                placeholder = { Text("Digite um endereço ou pesquise") },
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go), keyboardActions = KeyboardActions(onGo = { go(address) }))
-            if (progress in 1..99) LinearProgressIndicator({ progress / 100f }, Modifier.fillMaxWidth().padding(top = 6.dp)) else Spacer(Modifier.height(10.dp))
+        Column(Modifier.statusBarsPadding().padding(top = 4.dp)) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                IconButton({ web?.goBack() }, Modifier.size(36.dp), enabled = canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar", Modifier.size(20.dp)) }
+                IconButton({ web?.goForward() }, Modifier.size(36.dp), enabled = canFwd) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar", Modifier.size(20.dp)) }
+                IconButton({ web?.reload() }, Modifier.size(36.dp)) { Icon(Icons.Rounded.Refresh, "Recarregar", Modifier.size(20.dp)) }
+                OutlinedTextField(
+                    value = addrField,
+                    onValueChange = { addrField = it },
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp).onFocusChanged { fs ->
+                        val nowF = fs.isFocused
+                        if (nowF && !addrFocused) {
+                            addrFocused = true
+                            addrField = addrField.copy(selection = TextRange(0, addrField.text.length))
+                        } else if (!nowF && addrFocused) {
+                            addrFocused = false
+                            if (current.startsWith("http")) addrField = TextFieldValue(current, TextRange(current.length))
+                        }
+                    },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.extraLarge,
+                    leadingIcon = { Icon(if (current.startsWith("https")) Icons.Rounded.Lock else Icons.Rounded.Public, null, Modifier.size(16.dp)) },
+                    trailingIcon = {
+                        if (addrField.text.isNotEmpty()) {
+                            IconButton({ addrField = TextFieldValue("", TextRange(0)) }, Modifier.size(28.dp)) {
+                                Icon(Icons.Rounded.Close, "Limpar", Modifier.size(16.dp))
+                            }
+                        }
+                    },
+                    placeholder = { Text("Endereço ou pesquisa", maxLines = 1) },
+                    textStyle = MaterialTheme.typography.bodySmall,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Go),
+                    keyboardActions = KeyboardActions(onGo = { go(addrField.text) }),
+                )
+                IconButton({ BrowserStore.toggleFav(current, web?.title ?: "") }, Modifier.size(36.dp), enabled = current.startsWith("http")) {
+                    Icon(if (BrowserStore.isFav(current)) Icons.Rounded.Star else Icons.Rounded.StarBorder, "Favorito", Modifier.size(20.dp))
+                }
+                IconButton({ showSites = true }, Modifier.size(36.dp)) { Icon(Icons.Rounded.History, "Recentes", Modifier.size(20.dp)) }
+            }
+            if (progress in 1..99) LinearProgressIndicator({ progress / 100f }, Modifier.fillMaxWidth().padding(top = 4.dp)) else Spacer(Modifier.height(4.dp))
         }
     }, bottomBar = {
-        Surface(tonalElevation = 3.dp) { Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
-            Button({ ask = true }, Modifier.fillMaxWidth().height(52.dp), enabled = current.startsWith("http"), shape = MaterialTheme.shapes.medium) {
-                Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Usar esta página no app") }
-            OutlinedButton({ analyze = true }, Modifier.fillMaxWidth().padding(top = 8.dp), enabled = current.startsWith("http"), shape = MaterialTheme.shapes.medium) {
-                Text("Analisar este site") }
-            Text("Entre na sua conta normalmente. O app usa só os cookies desta sessão; sua senha nunca é lida nem guardada.",
-                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
-        } }
+        Surface(tonalElevation = 2.dp) {
+            Row(
+                Modifier.fillMaxWidth().height(46.dp).padding(horizontal = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                val countLabel = when {
+                    loadAllOn -> if (loadAllPg > 1) "pág $loadAllPg • $detected" else "$detected vídeos…"
+                    mode == 1 -> "$phN fotos"
+                    BrowserDetect.term.value.isNotBlank() && detected > 0 -> "$marked/$detected vídeos"
+                    detected > 0 -> "$detected vídeo${if (detected == 1) "" else "s"}" + (if (pendingN > 0) " (+$pendingN)" else "")
+                    mode == 2 && phN > 0 -> "$phN fotos"
+                    searching -> "Procurando…"
+                    else -> "0 vídeos"
+                }
+                FilledTonalButton(
+                    onClick = { sheet = true },
+                    modifier = Modifier.weight(1f).height(34.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                ) {
+                    if (searching || loadAllOn || pendingN > 0) {
+                        CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
+                    } else {
+                        Icon(Icons.Rounded.VideoLibrary, null, Modifier.size(16.dp))
+                    }
+                    Spacer(Modifier.width(5.dp))
+                    Text(countLabel, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.labelMedium)
+                }
+                OutlinedButton(
+                    onClick = { if (loadAllOn) BrowserLoadMore.stop() else BrowserLoadMore.start(web) },
+                    modifier = Modifier.height(34.dp),
+                    enabled = current.startsWith("http"),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                ) {
+                    Icon(if (loadAllOn) Icons.Rounded.Stop else Icons.Rounded.UnfoldMore, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text(if (loadAllOn) "Parar" else "Carregar tudo", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                }
+                FilledTonalButton(
+                    onClick = { ask = true },
+                    modifier = Modifier.height(34.dp),
+                    enabled = current.startsWith("http"),
+                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
+                ) {
+                    Icon(Icons.Rounded.Download, null, Modifier.size(16.dp))
+                    Spacer(Modifier.width(4.dp))
+                    Text("Usar", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                }
+                Box {
+                    IconButton({ moreMenu = true }, Modifier.size(36.dp)) {
+                        Icon(Icons.Rounded.MoreVert, "Mais opções", Modifier.size(20.dp))
+                    }
+                    DropdownMenu(moreMenu, { moreMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Analisar este site") },
+                            leadingIcon = { Icon(Icons.Rounded.BugReport, null) },
+                            enabled = current.startsWith("http"),
+                            onClick = { moreMenu = false; analyze = true },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Usar esta página no app") },
+                            leadingIcon = { Icon(Icons.Rounded.Download, null) },
+                            enabled = current.startsWith("http"),
+                            onClick = { moreMenu = false; ask = true },
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (loadAllOn) "Parar carregamento" else "Carregar tudo (ver mais / páginas)") },
+                            leadingIcon = { Icon(if (loadAllOn) Icons.Rounded.Stop else Icons.Rounded.UnfoldMore, null) },
+                            enabled = current.startsWith("http"),
+                            onClick = { moreMenu = false; if (loadAllOn) BrowserLoadMore.stop() else BrowserLoadMore.start(web) },
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Sobre cookies (sessão)") },
+                            leadingIcon = { Icon(Icons.Rounded.Lock, null) },
+                            onClick = {
+                                moreMenu = false
+                                android.widget.Toast.makeText(ctx, "O app usa só os cookies desta sessão; sua senha nunca é lida nem guardada.", android.widget.Toast.LENGTH_LONG).show()
+                            },
+                        )
+                    }
+                }
+            }
+        }
     }) { pad ->
         AndroidView(factory = { c ->
             val existing = BrowserRuntime.web
@@ -242,29 +388,45 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(true)
             settings.userAgentString = Net.userAgent
             CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
+            }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(v: WebView, request: android.webkit.WebResourceRequest): Boolean {
                     if (!request.isForMainFrame) return false
                     return br.geracaoai.baixartg.web.AdBlock.blockNavigation(request.url.toString(), v.url ?: current, request.hasGesture(), request.isRedirect)
                 }
-                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) { if (url != current) BrowserDetect.newPage(); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
+                    if (url != current) BrowserDetect.newPage()
+                    v.evaluateJavascript(MseHookScript.SCRIPT) { }
+                    if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
+                    current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward()
+                }
                 override fun onPageFinished(v: WebView, url: String) {
                     if (url.startsWith("http")) { br.geracaoai.baixartg.Prefs.browserUrl = url; BrowserStore.visit(url, v.title ?: ""); BrowserDetect.restore(Extract.host(url)) }
-                    current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url); if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }; v.evaluateJavascript(br.geracaoai.baixartg.core.JsRender.HOOK_JS) { }; scheduleCollect(400) }
+                    current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url)
+                    if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
+                    v.evaluateJavascript(MseHookScript.SCRIPT) { }
+                    scheduleCollect(400)
+                }
                 override fun shouldInterceptRequest(v: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
                     val u = request.url?.toString().orEmpty()
                     if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, current, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
+                    val hdrs = request.requestHeaders ?: emptyMap()
+                    val pg = current
+                    if (u.startsWith("http") && pg.startsWith("http") && (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u) || Extract.isSegmentUrl(u) || hdrs.keys.any { it.equals("Range", true) })) {
+                        MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-tab")
+                    }
                     if (u.startsWith("http") && Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u))) {
-                        val pg = current
                         if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
                             BrowserDetect.intercepted(u, pg, "")
-                            val ref = request.requestHeaders?.get("Referer") ?: pg
+                            val ref = hdrs["Referer"] ?: pg
                             br.geracaoai.baixartg.core.PlayCapture.record(u, pg, ref)
                         }
                     }
                     return super.shouldInterceptRequest(v, request)
                 }
-                override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; address = url; canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward() }
             }
             settings.setSupportMultipleWindows(true); settings.javaScriptCanOpenWindowsAutomatically = false
             webChromeClient = object : WebChromeClient() {
@@ -293,18 +455,17 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             setOnScrollChangeListener { _, _, _, _, _ -> scheduleCollect(1_200) }
             web = this
             BrowserRuntime.adopt(this)
-            if (address.length > 8) loadUrl(address)
+            if (initialAddr.length > 8) loadUrl(initialAddr)
         }
         }, update = { w ->
             web = w
             w.visibility = if (visible) android.view.View.VISIBLE else android.view.View.INVISIBLE
             val u = w.url.orEmpty()
-            if (u.isNotBlank()) { current = u; if (!address.startsWith("http") || address != u) address = u }
+            if (u.isNotBlank()) { current = u; syncAddress(u) }
             canBack = w.canGoBack(); canFwd = w.canGoForward()
         }, onRelease = { BrowserRuntime.detach() }, modifier = Modifier.fillMaxSize().padding(pad))
-        DetectFab(Modifier.fillMaxSize().padding(pad).padding(16.dp), current.startsWith("http")) { sheet = true }
     }
-    if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }) { term ->
+    if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }, onLoadAll = { BrowserLoadMore.start(web) }) { term ->
         val v = web; val page = v?.url
         if (v != null && page != null && page.startsWith("http")) {
             v.evaluateJavascript("(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()") { raw ->
@@ -318,10 +479,10 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         text = {
             androidx.compose.foundation.lazy.LazyColumn(Modifier.heightIn(max = 480.dp)) {
                 if (BrowserStore.favorites.isNotEmpty()) item { Text("Favoritos", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(vertical = 6.dp)) }
-                items(BrowserStore.favorites.toList(), key = { "f" + it.url }) { s -> SiteRow(s, Icons.Rounded.Star, { showSites = false; address = s.url; web?.loadUrl(s.url) }, { BrowserStore.removeFav(s.url) }) }
+                items(BrowserStore.favorites.toList(), key = { "f" + it.url }) { s -> SiteRow(s, Icons.Rounded.Star, { showSites = false; addrFocused = false; syncAddress(s.url); web?.loadUrl(s.url) }, { BrowserStore.removeFav(s.url) }) }
                 item { Text("Recentes (segure para remover)", style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(vertical = 6.dp)) }
                 if (BrowserStore.recents.isEmpty()) item { Text("Nenhum site visitado ainda.", style = MaterialTheme.typography.bodySmall) }
-                items(BrowserStore.recents.toList(), key = { "r" + it.url }) { s -> SiteRow(s, Icons.Rounded.History, { showSites = false; address = s.url; web?.loadUrl(s.url) }, { BrowserStore.removeRecent(s.url) }) }
+                items(BrowserStore.recents.toList(), key = { "r" + it.url }) { s -> SiteRow(s, Icons.Rounded.History, { showSites = false; addrFocused = false; syncAddress(s.url); web?.loadUrl(s.url) }, { BrowserStore.removeRecent(s.url) }) }
             }
         },
         confirmButton = { TextButton({ showSites = false }) { Text("Fechar") } })

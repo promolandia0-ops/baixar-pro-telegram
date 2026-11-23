@@ -23,7 +23,7 @@ object SiteAnalyzer {
     const val TOTAL_MS = 60_000L
 
     data class YtdlpResult(val ok: Boolean, val extractor: String = "", val error: String = "", val httpCode: Int = 0)
-    data class HiddenResult(val found: Boolean, val formats: List<String> = emptyList(), val code: String = "NO_MEDIA")
+    data class HiddenResult(val found: Boolean, val formats: List<String> = emptyList(), val code: String = "NO_MEDIA", val ageGateBypassed: Boolean? = null)
     data class JsSnap(
         val video: Int = 0, val iframe: Int = 0, val source: Int = 0,
         val needsClick: Boolean = false,
@@ -259,9 +259,10 @@ try{
         val cross = iframes.firstOrNull { !SiteHash.sameHost(pageUrl, it) }
         val htmlMedia = mediaUrlsInHtml(pageUrl, html)
         val allMedia = (captured + htmlMedia).distinct()
+        val mseSnap = MseCapture.snapshot(pageUrl)
         val fmt = formatOf(
-            snap.formatHints + (if (snap.mse) listOf("MSE") else emptyList()) + (if (snap.blob) listOf("blob") else emptyList()),
-            allMedia,
+            snap.formatHints + (if (snap.mse || mseSnap.hasMse) listOf("MSE") else emptyList()) + (if (snap.blob) listOf("blob") else emptyList()),
+            allMedia + mseSnap.manifests.map { it.url },
         )
         val htmlOk = htmlMedia.isNotEmpty()
         val capOk = captured.isNotEmpty()
@@ -276,6 +277,7 @@ try{
             redirectCount = fetch.redirects,
             challenge = chal,
             challengeType = chalType,
+            ageGateBypassed = if (chalType == "age_gate") (hidden.ageGateBypassed ?: hidden.found) else hidden.ageGateBypassed,
             videoCount = videoCount,
             iframeCount = iframeCount,
             sourceCount = sourceCount,
@@ -286,7 +288,7 @@ try{
             linkExpires = header.expires ?: expires,
             needsReferer = header.needsReferer,
             needsCookie = header.needsCookie,
-            needsSpecialHeader = header.needsSpecialHeader,
+            needsSpecialHeader = if (mseSnap.hasSpecialHeader) true else header.needsSpecialHeader,
             drm = snap.drm, drmType = snap.drmType,
             htmlDirect = when {
                 htmlOk -> AnonReport.Attempt(true, "OK")
@@ -494,8 +496,9 @@ try{
                         else -> null
                     }
                 }
-                if (js?.media.orEmpty().isNotEmpty()) HiddenResult(true, fmts, "OK")
-                else HiddenResult(false, emptyList(), "NO_MEDIA")
+                val ag = js?.ageGateBypassed
+                if (js?.media.orEmpty().isNotEmpty() || js?.mse == true) HiddenResult(true, fmts.ifEmpty { if (js?.mse == true) listOf("MSE") else emptyList() }, "OK", ag)
+                else HiddenResult(false, emptyList(), "NO_MEDIA", ag)
             } else HiddenResult(false, emptyList(), "SKIPPED")
         } ?: HiddenResult(false, emptyList(), "TIMEOUT")
         currentCoroutineContext().ensureActive()

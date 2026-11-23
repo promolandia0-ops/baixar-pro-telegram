@@ -13,6 +13,7 @@ object Prefs {
     var server: String get() = p.getString("server", Downloader.DEFAULT_SERVER)!!; set(v) = p.edit().putString("server", v).apply()
     var depth: Int get() = p.getInt("depth", 10); set(v) = p.edit().putInt("depth", v).apply()
     var maxPages: Int get() = p.getInt("pages", 500); set(v) = p.edit().putInt("pages", v).apply()
+    var loadAllMaxPages: Int get() = p.getInt("load_all_pages", 20); set(v) = p.edit().putInt("load_all_pages", v).apply()
     var strongBlock: Boolean get() = p.getBoolean("strong_block", true); set(v) = p.edit().putBoolean("strong_block", v).apply()
     /** "Fotos também": coleta fotos de verdade (nunca capas/miniaturas) numa seção separada. Desligado por padrão. */
     /** 0 = Só vídeos (padrão), 1 = Só fotos, 2 = Vídeos e fotos. (Antes: chave "photos" ligada = 2.) */

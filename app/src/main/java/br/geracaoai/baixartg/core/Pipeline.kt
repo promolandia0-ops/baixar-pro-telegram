@@ -538,15 +538,20 @@ object Pipeline {
                         beat.remove(t0.id)
                     }
                     if (t0.id in userCancel) { markCancelled(t0); continue }
-                    if (resolved == null) {
+                    if (resolved == null && !t0.photo && testResolve == null && t0.page.startsWith("http", true)) {
+                        val fb = Found(t0.page, t0.page, t0.title.ifBlank { "vídeo" }, Kind.MSE, ref = t0.page, extra = t0.extra)
+                        upd(t0.id) { it.copy(f = fb, st = PS.DOWN, msg = "tentando pelo navegador…") }
+                        t0.copy(f = fb, st = PS.DOWN)
+                    } else if (resolved == null) {
                         val msg = if (stalled) "Tempo esgotado ao abrir a página. Toque em Reenviar."
                         else "Não consegui carregar o vídeo desta página. Toque em Reenviar."
                         markFailed(t0, emptySet(), msg)
                         continue
+                    } else {
+                        val nt = TitleFix.pick(resolved.title, t0.title).ifBlank { t0.title }
+                        upd(t0.id) { it.copy(f = resolved, title = nt, st = PS.DOWN, msg = "") }
+                        t0.copy(f = resolved, title = nt, st = PS.DOWN)
                     }
-                    val nt = TitleFix.pick(resolved.title, t0.title).ifBlank { t0.title }
-                    upd(t0.id) { it.copy(f = resolved, title = nt, st = PS.DOWN, msg = "") }
-                    t0.copy(f = resolved, title = nt, st = PS.DOWN)
                 }
             }
 
@@ -666,18 +671,27 @@ object Pipeline {
         }
         try {
             val steps = ArrayList<Pair<String, suspend () -> File>>()
-            val playHit = if (f.kind != Kind.PHOTO) PlayCapture.bestFor(f) else null
+            val canMse = f.kind != Kind.PHOTO && f.kind != Kind.MEGA && (f.page.startsWith("http", true) || f.url.startsWith("http", true))
+            val mseFirst = canMse && MseCapture.shouldUseBrowserFirst(f)
+            val mseStep: suspend () -> File = {
+                BrowserMseDownloader.download(f, dir, 0, prog()) { warn ->
+                    upd(t.id, persist = false) { it.copy(msg = warn) }
+                }
+            }
+            if (mseFirst) steps += "navegador" to mseStep
+            val playHit = if (f.kind != Kind.PHOTO && !mseFirst) PlayCapture.bestFor(f) else null
             if (playHit != null) steps += "play" to {
                 Downloader.download(PlayCapture.toFound(f, playHit), dir, Prefs.server, 0, fast = true, prog())
             }
-            steps += "direct" to { Downloader.download(f, dir, Prefs.server, 0, fast = true, prog()) }
-            if (f.kind != Kind.PHOTO && f.page.isNotBlank() && !Extract.isVideoUrl(f.page))
+            if (f.kind != Kind.MSE) steps += "direct" to { Downloader.download(f, dir, Prefs.server, 0, fast = true, prog()) }
+            if (f.kind != Kind.PHOTO && f.kind != Kind.MSE && f.page.isNotBlank() && !Extract.isVideoUrl(f.page))
                 steps += "server" to { Downloader.viaServer(f.page, dir, Prefs.server, prog()) }
-            if (f.kind != Kind.PHOTO && (f.kind == Kind.DIRECT || f.url.contains(".m3u8", true) || f.url.contains(".mpd", true) || f.url.contains("video.twimg.com", true)))
+            if (f.kind != Kind.PHOTO && f.kind != Kind.MSE && (f.kind == Kind.DIRECT || f.url.contains(".m3u8", true) || f.url.contains(".mpd", true) || f.url.contains("video.twimg.com", true)))
                 steps += "hls" to {
                     if (f.url.contains(".m3u8", true) || f.kind == Kind.HLS) Downloader.hls(f.url, f.ref ?: f.page, dir, t.title, prog(), maxHeight = 0)
                     else Downloader.download(f.copy(kind = Kind.HLS), dir, Prefs.server, 0, fast = true, prog())
                 }
+            if (canMse && !mseFirst) steps += "navegador" to mseStep
             for ((name, fn) in steps) {
                 currentCoroutineContext().ensureActive()
                 tried = markTried(tried, name)
@@ -693,6 +707,10 @@ object Pipeline {
                     f = nf
                     upd(t.id) { it.copy(f = nf, title = TitleFix.pick(nf.title, it.title).ifBlank { it.title }, tried = tried) }
                     try { file = finish(Downloader.download(nf, dir, Prefs.server, 0, fast = true, prog())) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
+                } else if (canMse && !hasTried(tried, "navegador")) {
+                    tried = markTried(tried, "navegador")
+                    upd(t.id, persist = false) { it.copy(tried = tried, msg = "baixando pelo navegador…") }
+                    try { file = finish(mseStep()) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
                 }
             }
             if (file == null) {

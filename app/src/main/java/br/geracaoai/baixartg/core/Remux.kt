@@ -144,6 +144,26 @@ object Remux {
         }
     }
 
+
+    /** Junta faixas de vídeo/áudio (ex.: DASH ou fMP4 capturado) para o arquivo [out]. */
+    fun muxTracks(video: File, audio: File?, out: File): File {
+        val tmp = File(out.parentFile, out.nameWithoutExtension + ".remux.mp4")
+        try {
+            toMp4(listOfNotNull(video, audio?.takeIf { it.exists() }), tmp)
+            if (tmp.length() < 1024) { tmp.delete(); throw IllegalStateException("Remux vazio") }
+            if (Faststart.process(tmp, out)) tmp.delete() else tmp.renameTo(out)
+            video.delete(); audio?.delete()
+            return out
+        } catch (e: Exception) {
+            tmp.delete()
+            if (audio == null && Mp4Boxes.isValidMp4(video)) {
+                if (video.renameTo(out)) return out
+                video.copyTo(out, true); video.delete(); return out
+            }
+            throw e
+        }
+    }
+
     /** Remuxa e deixa pronto pra streaming (moov no início). Devolve o MP4 final; apaga as entradas. */
     fun finish(video: File, audio: File?): File {
         val tmp = File(video.parentFile, video.name.substringBefore(".hls.") + ".remux.mp4")

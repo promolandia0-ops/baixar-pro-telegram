@@ -26,16 +26,19 @@ object Downloader {
     @Volatile var lastProbeError: String? = null
     const val DEFAULT_SERVER = "https://baixar-video-ezck.onrender.com"
 
-    private fun req(url: String, referer: String?) = Request.Builder().url(url).header("Accept", "*/*").apply {
-        val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
-        if (ref != null) {
-            header("Referer", ref)
-            try {
-                val o = java.net.URI(ref)
-                if (o.scheme != null && o.authority != null) header("Origin", "${o.scheme}://${o.authority}")
-            } catch (_: Exception) {}
-        }
-    }.build()
+    private fun req(url: String, referer: String?, headers: Map<String, String> = emptyMap()): Request {
+        if (headers.isNotEmpty()) return MseDownloader.buildRequest(url, headers, referer)
+        return Request.Builder().url(url).header("Accept", "*/*").apply {
+            val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
+            if (ref != null) {
+                header("Referer", ref)
+                try {
+                    val o = java.net.URI(ref)
+                    if (o.scheme != null && o.authority != null) header("Origin", "${o.scheme}://${o.authority}")
+                } catch (_: Exception) {}
+            }
+        }.build()
+    }
 
     fun sniffFile(file: File): String = file.inputStream().use { ins ->
         val buf = ByteArray(64)
@@ -63,6 +66,7 @@ object Downloader {
             }
             Kind.SERVER -> viaServer(f.url, dir, server, progress)
             Kind.MEGA -> Mega.download(f, dir, progress)
+            Kind.MSE -> BrowserMseDownloader.download(f, dir, maxHeight, progress)
         }
         if (f.kind == Kind.PHOTO) return raw
         val k = sniffFile(raw)
@@ -333,10 +337,10 @@ object Downloader {
         }
     }
 
-    private suspend fun text(url: String, referer: String?): String = Net.http.newCall(req(url, referer)).await().use { r ->
+    private suspend fun text(url: String, referer: String?, headers: Map<String, String> = emptyMap()): String = Net.http.newCall(req(url, referer, headers)).await().use { r ->
         if (!r.isSuccessful) throw DlException("HTTP ${r.code} na playlist"); r.body!!.string()
     }
-    private suspend fun bytes(url: String, referer: String?): ByteArray = Net.http.newCall(req(url, referer)).await().use { r ->
+    private suspend fun bytes(url: String, referer: String?, headers: Map<String, String> = emptyMap()): ByteArray = Net.http.newCall(req(url, referer, headers)).await().use { r ->
         if (!r.isSuccessful) throw DlException("HTTP ${r.code} no segmento"); r.body!!.bytes()
     }
 
@@ -373,18 +377,18 @@ object Downloader {
     }
 
     /** HLS: maior qualidade, segmentos em paralelo (ordem preservada), AES-128 e EXT-X-MAP. Sem recodificar. */
-    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8, maxHeight: Int = 0): File {
-        var plUrl = url; var pl = text(plUrl, referer)
+    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8, maxHeight: Int = 0, headers: Map<String, String> = emptyMap()): File {
+        var plUrl = url; var pl = text(plUrl, referer, headers)
         var audioUrl: String? = null
         if (pl.contains("#EXT-X-STREAM-INF")) {
             val v = pickVariant(plUrl, pl, maxHeight) ?: throw DlException("Playlist sem variantes")
             audioUrl = audioRendition(plUrl, pl, v.audio)
-            plUrl = v.url; pl = text(plUrl, referer)
+            plUrl = v.url; pl = text(plUrl, referer, headers)
         }
         val base = File(dir, safe(title) + "_" + System.nanoTime())
-        val video = media(plUrl, pl, referer, base.path + ".hls", parallel, progress)
+        val video = media(plUrl, pl, referer, base.path + ".hls", parallel, progress, headers)
         if (audioUrl != null) {
-            val a = media(audioUrl, text(audioUrl, referer), referer, base.path + ".a.hls", parallel) { _, _ -> }
+            val a = media(audioUrl, text(audioUrl, referer, headers), referer, base.path + ".a.hls", parallel, { _, _ -> }, headers)
             if (!a.renameTo(audioOf(video))) { a.copyTo(audioOf(video), true); a.delete() }
         }
         return video
@@ -392,7 +396,7 @@ object Downloader {
 
     private class Seg(val url: String, val key: String?, val iv: ByteArray?, val seq: Long)
 
-    private suspend fun media(plUrl: String, pl: String, referer: String?, outBase: String, parallel: Int, progress: (Long, Long) -> Unit): File = coroutineScope {
+    private suspend fun media(plUrl: String, pl: String, referer: String?, outBase: String, parallel: Int, progress: (Long, Long) -> Unit, headers: Map<String, String> = emptyMap()): File = coroutineScope {
         if (Regex("""METHOD=SAMPLE-AES""").containsMatchIn(pl)) throw DlException("Vídeo protegido (DRM)")
         val segs = ArrayList<Seg>(); var key: String? = null; var iv: ByteArray? = null; var seq = 0L; var mapUrl: String? = null
         for (l in pl.lines().map { it.trim() }) when {
@@ -409,16 +413,16 @@ object Downloader {
         }
         if (segs.isEmpty()) throw DlException("Playlist vazia")
         val keys = HashMap<String, ByteArray>()
-        segs.mapNotNull { it.key }.distinct().forEach { keys[it] = retry { bytes(it, referer) } }
+        segs.mapNotNull { it.key }.distinct().forEach { keys[it] = retry { bytes(it, referer, headers) } }
         val out = File(outBase + if (mapUrl != null) ".mp4" else ".ts")
         try {
             out.outputStream().buffered(1 shl 20).use { os ->
-                mapUrl?.let { os.write(retry { bytes(it, referer) }) }
+                mapUrl?.let { os.write(retry { bytes(it, referer, headers) }) }
                 var total = 0L; var n = 0
                 // janela deslizante: até `parallel` segmentos em voo, gravados na ordem
                 val window = ArrayDeque<kotlinx.coroutines.Deferred<ByteArray>>()
                 val it = segs.iterator()
-                fun launchNext() { if (it.hasNext()) { val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer) } } }
+                fun launchNext() { if (it.hasNext()) { val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer, headers) } } }
                 repeat(parallel.coerceAtLeast(1)) { launchNext() }
                 while (window.isNotEmpty()) {
                     coroutineContext.ensureActive()
@@ -432,8 +436,8 @@ object Downloader {
         out
     }
 
-    private suspend fun fetchSeg(s: Seg, keys: Map<String, ByteArray>, referer: String?): ByteArray {
-        var data = retry { bytes(s.url, referer) }
+    private suspend fun fetchSeg(s: Seg, keys: Map<String, ByteArray>, referer: String?, headers: Map<String, String> = emptyMap()): ByteArray {
+        var data = retry { bytes(s.url, referer, headers) }
         if (s.key != null) {
             val k = keys[s.key]!!
             val ivb = s.iv ?: ByteArray(16).also { b -> var v = s.seq; for (j in 15 downTo 8) { b[j] = (v and 0xff).toByte(); v = v shr 8 } }

@@ -18,6 +18,7 @@ class App : Application() {
         br.geracaoai.baixartg.web.AdBlock.enabled = Prefs.strongBlock; br.geracaoai.baixartg.web.AdBlock.init(this)
         getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(WorkService.CHANNEL, "Downloads e envios", NotificationManager.IMPORTANCE_LOW))
         Td.init(this)
+        br.geracaoai.baixartg.core.BrowserMseDownloader.init(this)
         br.geracaoai.baixartg.core.Pipeline.init(this)
         br.geracaoai.baixartg.ui.BrowserStore.init(this)
         val refreshBrowser = { br.geracaoai.baixartg.ui.BrowserDetect.clearDedupMemory() }

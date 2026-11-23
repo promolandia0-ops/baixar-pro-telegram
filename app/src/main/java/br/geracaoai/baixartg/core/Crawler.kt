@@ -31,7 +31,7 @@ private val RX_CRAWLER_14 = Regex("\\}\\s*,\\s*\\{")
 private val RX_CRAWLER_15 = Regex("""https?://\S+""")
 
 
-enum class Kind { DIRECT, HLS, SERVER, MEGA, PHOTO }
+enum class Kind { DIRECT, HLS, SERVER, MEGA, PHOTO, MSE }
 
 /** ref = Referer no download; extra = texto associado com folga curta (nunca o título da página inteira). */
 data class Found(val url: String, val page: String, val title: String, val kind: Kind, val ref: String? = null, val extra: String = "", val quality: Int = 0) {
@@ -41,6 +41,7 @@ data class Found(val url: String, val page: String, val title: String, val kind:
         Kind.SERVER -> "Via servidor (yt-dlp)"
         Kind.MEGA -> "MEGA (descriptografado no celular)"
         Kind.PHOTO -> "Foto"
+        Kind.MSE -> "Pelo navegador (MSE)"
     }
     val typeLabel get() = when {
         kind == Kind.PHOTO -> "Foto"
@@ -71,7 +72,7 @@ data class CrawlProgress(
     val searchPages: Int = 0, val cards: Int = 0, val resolved: Int = 0, val failed: Int = 0, val detail: String = "",
 )
 
-data class JsPage(val html: String? = null, val media: List<Found> = emptyList(), val challenge: Boolean = false, val cards: Int = -1, val collected: JsScripts.Collected? = null, val apis: List<String> = emptyList())
+data class JsPage(val html: String? = null, val media: List<Found> = emptyList(), val challenge: Boolean = false, val cards: Int = -1, val collected: JsScripts.Collected? = null, val apis: List<String> = emptyList(), val mse: Boolean = false, val specialHeader: Boolean = false, val ageGateBypassed: Boolean? = null)
 
 object Extract {
     private val VIDEO_EXT = Regex("""\.(mp4|webm|m3u8|mpd|mov|m4v|mkv)(?:$|[?#/])""", RegexOption.IGNORE_CASE)
