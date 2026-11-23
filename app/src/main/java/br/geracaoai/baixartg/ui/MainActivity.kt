@@ -68,6 +68,7 @@ class MainActivity : ComponentActivity() {
     override fun onDestroy() {
         try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
         br.geracaoai.baixartg.core.JsRender.unbind(this)
+        BrowserRuntime.release()
         super.onDestroy()
     }
     /** Uma vez: notificações (Android 13+) e "não otimizar bateria" — para a fila não ser parada em segundo plano. */

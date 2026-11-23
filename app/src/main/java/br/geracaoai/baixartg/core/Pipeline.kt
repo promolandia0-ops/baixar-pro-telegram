@@ -148,7 +148,9 @@ object Pipeline {
     private fun normPage(u: String) = PageKey.norm(u)
 
     // ---------------- API ----------------
-    data class In(val page: String, val title: String, val extra: String, val keys: List<String>, val f: Found?, val photo: Boolean = false, val uniq: String = "")
+    data class In(val page: String, val title: String, val extra: String, val keys: List<String>, val f: Found?, val photo: Boolean = false, val uniq: String = "", val force: Boolean = false)
+    @Volatile var onCleared: (() -> Unit)? = null
+    private fun notifyCleared() { try { onCleared?.invoke() } catch (_: Throwable) {} }
 
     /** Entra na fila na hora (resolvido ou não) e a fila começa a andar. Devolve quantos entraram. */
     fun add(list: List<In>): Int {
@@ -160,6 +162,15 @@ object Pipeline {
             var added = 0
             for (it in list) {
                 val uk = uniqueKey(it.page, it.title, it.keys, it.f, it.uniq)
+                if (it.force) {
+                    val existIdx = curItems.indexOfFirst { ex -> uniqueKey(ex.page, ex.title, ex.keys, ex.f) == uk || uniqueKey(ex.page, ex.title, ex.keys, ex.f, "") == uk }
+                    if (existIdx >= 0 && curItems[existIdx].st in setOf(PS.SKIP, PS.FAIL, PS.CANCEL)) {
+                        val ex = curItems[existIdx]
+                        userCancel.remove(ex.id)
+                        curItems[existIdx] = ex.copy(st = if ((it.f ?: ex.f) != null) PS.READY else PS.WAIT, f = it.f ?: ex.f, force = true, msg = "", prog = 0f, stalls = 0, tried = "")
+                        have.add(uk); added++; continue
+                    }
+                }
                 if (!have.add(uk)) continue
                 val extraKey = it.uniq.trim().takeIf { k -> k.isNotBlank() }?.let { k -> "id:$k" }
                 val newKeys = expandKeys(it.page, it.keys + listOfNotNull(extraKey), it.f)
@@ -172,7 +183,7 @@ object Pipeline {
                     val betterTitle = TitleFix.pick(ex.title, it.title).ifBlank { ex.title }
                     curItems[sameIdx] = ex.copy(f = betterF, title = betterTitle, keys = (ex.keys + newKeys).distinct())
                 } else {
-                    curItems += PItem(nextId++, it.page, it.title, it.extra, newKeys, it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo)
+                    curItems += PItem(nextId++, it.page, it.title, it.extra, newKeys, it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo, force = it.force)
                     added++
                 }
             }
@@ -195,7 +206,7 @@ object Pipeline {
             items.value = items.value.filter { it.st in keep }
         }
         gone.forEach { releaseQueue(it) }
-        paused.value = false; saveAsync()
+        paused.value = false; saveAsync(); notifyCleared()
     }
     fun retry(id: Long) { userCancel.remove(id); upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, tried = "") }; start() }
     fun retryFailed() { synchronized(lock) { items.value = items.value.map { if (it.st == PS.FAIL || it.st == PS.ANALYZE || it.st == PS.ANALYZING) { userCancel.remove(it.id); it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", tried = "") } else it } }; save(); start() }
@@ -223,14 +234,14 @@ object Pipeline {
     fun clearFailed() {
         val gone: List<PItem>
         synchronized(lock) { val rm = items.value.filter { it.st == PS.FAIL || it.st == PS.ANALYZE }; gone = rm; items.value = items.value.filter { it.st != PS.FAIL && it.st != PS.ANALYZE } }
-        gone.forEach { releaseQueue(it) }; saveAsync()
+        gone.forEach { releaseQueue(it) }; saveAsync(); notifyCleared()
     }
     fun clearQueue() {
         engine?.cancel()
         val gone: List<PItem>
         synchronized(lock) { gone = items.value.filter { it.st in WORK }; items.value = items.value.filter { it.st !in WORK } }
         synchronized(claimed) { claimed.clear() }
-        gone.forEach { releaseQueue(it) }; paused.value = false; saveAsync()
+        gone.forEach { releaseQueue(it) }; paused.value = false; saveAsync(); notifyCleared()
     }
     fun clearAll(alsoSentMemory: Boolean = false) {
         engine?.cancel()
@@ -246,7 +257,7 @@ object Pipeline {
             try { VisualHash.clear() } catch (_: Throwable) {}
             try { Prefs.synced = false } catch (_: Throwable) {}
         }
-        paused.value = false; saveAsync()
+        paused.value = false; saveAsync(); notifyCleared()
     }
     /** Identidade única do item na fila: nunca junta dois vídeos só porque estão na mesma página. */
     fun uniqueKey(page: String, title: String, keys: List<String>, f: Found?, uniq: String = ""): String {
@@ -279,6 +290,43 @@ object Pipeline {
         return k.distinct()
     }
     private fun releaseQueue(t: PItem) { try { Sent.unqueue(keysToUnqueue(t)) } catch (_: Exception) {} }
+
+    fun identityKeys(t: PItem): Set<String> {
+        val k = LinkedHashSet<String>()
+        k += keysToUnqueue(t)
+        k += mediaKeysOf(t)
+        k += t.keys
+        return k.filter { it.isNotBlank() }.toHashSet()
+    }
+    fun isActiveFor(keys: Collection<String>): Boolean {
+        val ks = keys.filter { it.isNotBlank() }.toHashSet()
+        if (ks.isEmpty()) return false
+        return synchronized(lock) { items.value.any { t -> t.st in WORK && identityKeys(t).any { it in ks } } }
+    }
+    fun confirmedSentFor(f: Found?, keys: Collection<String>): Boolean {
+        val all = (keys + (f?.let { Sent.keysOf(it) } ?: emptyList())).filter { it.isNotBlank() }
+        if (all.isNotEmpty() && Sent.anySent(all)) return true
+        if (f != null && f.kind != Kind.PHOTO && Sent.hasCanonical(f)) return true
+        val ks = all.toHashSet()
+        return synchronized(lock) { items.value.any { t -> t.st == PS.DONE && identityKeys(t).any { it in ks } } }
+    }
+    fun finishedStatusFor(keys: Collection<String>): String? {
+        val ks = keys.filter { it.isNotBlank() }.toHashSet()
+        if (ks.isEmpty()) return null
+        val t = synchronized(lock) {
+            items.value.lastOrNull { it.st in setOf(PS.FAIL, PS.SKIP, PS.CANCEL, PS.ANALYZE, PS.ANALYZING) && identityKeys(it).any { k -> k in ks } }
+        }
+        return t?.st?.name
+    }
+    fun hideReason(f: Found?, keys: Collection<String>): BrowserHide.Reason =
+        BrowserHide.decide(isActiveFor(keys), confirmedSentFor(f, keys), finishedStatusFor(keys))
+
+    private fun markSkipped(t: PItem, msg: String, ks: Set<String> = emptySet()) {
+        if (ks.isNotEmpty()) synchronized(claimed) { claimed.removeAll(ks) }
+        var gone: PItem? = null
+        upd(t.id) { it.copy(st = PS.SKIP, msg = msg, prog = 0f, speed = 0).also { n -> gone = n } }
+        gone?.let { releaseQueue(it) }
+    }
 
     private class UserCancelException : CancellationException("cancelado")
     private val userCancel = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
@@ -505,7 +553,7 @@ object Pipeline {
             if (cur.id in userCancel) { markCancelled(cur); continue }
             val f = cur.f!!
             if (!cur.force && sentBefore(cur)) {
-                upd(cur.id) { it.copy(st = PS.SKIP, msg = "já enviado antes (pulado)", prog = 0f) }
+                markSkipped(cur, "já enviado antes (pulado)")
                 continue
             }
             val ks = claimKeys(cur)
@@ -525,8 +573,8 @@ object Pipeline {
                             merged = true
                         }
                     }
-                    if (!merged) upd(cur.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }
-                    else saveAsync()
+                    if (!merged) markSkipped(cur, "mesmo item já está na fila (pulado)")
+                    else { releaseQueue(cur); saveAsync() }
                     continue
                 }
             }
@@ -686,8 +734,7 @@ object Pipeline {
             // Idempotência: confere de novo logo antes de enviar
             val fk = Jobs.fileKey(file)
             if (!t.force && ((fk != null && Sent.has(fk)) || sentBefore(t))) {
-                synchronized(claimed) { claimed.removeAll(ks) }
-                upd(t.id) { it.copy(st = PS.SKIP, prog = 0f, msg = "mesmo arquivo já enviado antes (pulado)") }
+                markSkipped(t, "mesmo arquivo já enviado antes (pulado)", ks)
                 return
             }
             // Repetido pela imagem (muito rigoroso; na dúvida envia). Nunca apaga nada: só pula e deixa "Enviar mesmo assim".
@@ -704,8 +751,7 @@ object Pipeline {
                         if (Prefs.replaceHigher && vfp.pixels > m.pixels) {
                             VisualHash.release(t.id)   // qualidade maior: envia esta também
                         } else {
-                            synchronized(claimed) { claimed.removeAll(ks) }
-                            upd(t.id) { it.copy(st = PS.SKIP, prog = 0f, speed = 0, msg = "igual a: " + m.title.ifBlank { "vídeo já enviado" }.take(90)) }
+                            markSkipped(t, "igual a: " + m.title.ifBlank { "vídeo já enviado" }.take(90), ks)
                             return
                         }
                     }

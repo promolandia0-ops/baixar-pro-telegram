@@ -46,7 +46,8 @@ import java.util.Date
 import java.util.Locale
 
 enum class Tab(val label: String, val icon: ImageVector) {
-    HOME("Início", Icons.Rounded.Home), SITE("Varrer tudo", Icons.Rounded.TravelExplore), PAGE("Filtrar", Icons.Rounded.FilterAlt),
+    HOME("Início", Icons.Rounded.Home), BROWSER("Navegador", Icons.Rounded.Public),
+    SITE("Varrer tudo", Icons.Rounded.TravelExplore), PAGE("Filtrar", Icons.Rounded.FilterAlt),
     QUEUE("Fila", Icons.Rounded.Downloading), HIST("Histórico", Icons.Rounded.History)
 }
 
@@ -54,9 +55,10 @@ enum class Tab(val label: String, val icon: ImageVector) {
 @Composable
 fun MainShell(shared: MutableState<String?>) {
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
+    var prevTab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var settings by rememberSaveable { mutableStateOf(false) }
-    var browser by rememberSaveable { mutableStateOf(false) }
     var mega by rememberSaveable { mutableStateOf(false) }
+    fun goTab(t: Tab) { if (t != tab) { prevTab = tab; tab = t } }
     val homeText = rememberSaveable { mutableStateOf("") }
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) { perms.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -69,25 +71,23 @@ fun MainShell(shared: MutableState<String?>) {
     var dedupe by rememberSaveable { mutableStateOf(false) }
     if (dedupe) { BackHandler { dedupe = false }; DedupeScreen { dedupe = false }; return }
     if (settings) { BackHandler { settings = false }; SettingsScreen({ settings = false }) { settings = false; dedupe = true }; return }
-    if (browser) { BrowserScreen({ browser = false }) { u, site -> if (site) { Handoff.site.value = u; tab = Tab.SITE } else { Handoff.page.value = u; tab = Tab.PAGE }; browser = false }; return }
-    if (mega) { MegaScreen({ mega = false }) { mega = false; tab = Tab.QUEUE }; return }
+    if (mega) { MegaScreen({ mega = false }) { mega = false; goTab(Tab.QUEUE) }; return }
     Scaffold(
         topBar = {
-            TopAppBar(title = {
+            if (tab != Tab.BROWSER) TopAppBar(title = {
                 Column { Text(tab.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text("Baixar pro Telegram", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } },
                 actions = { IconButton({ mega = true }) { Icon(Icons.Rounded.Cloud, "MEGA") }
-                    IconButton({ browser = true }) { Icon(Icons.Rounded.Public, "Navegador") }
                     IconButton({ dedupe = true }) { Icon(Icons.Rounded.DeleteSweep, "Limpar repetidos") }
                     IconButton({ settings = true }) { Icon(Icons.Rounded.Settings, "Configurações") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
         },
         bottomBar = {
             Column {
-                ActivityBar(phase) { tab = Tab.QUEUE }
+                ActivityBar(phase) { goTab(Tab.QUEUE) }
                 NavigationBar {
                     Tab.entries.forEach { t ->
-                        NavigationBarItem(selected = tab == t, onClick = { tab = t }, label = { Text(t.label, maxLines = 1) },
+                        NavigationBarItem(selected = tab == t, onClick = { goTab(t) }, label = { Text(t.label, maxLines = 1) },
                             icon = { if (t == Tab.QUEUE && (items.isNotEmpty())) BadgedBox(badge = { Badge { Text(if (active > 0) "$active" else "${items.size}") } }) { Icon(t.icon, null) } else Icon(t.icon, null) })
                     }
                 }
@@ -95,13 +95,24 @@ fun MainShell(shared: MutableState<String?>) {
         }
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad)) {
-            AnimatedContent(tab, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tab") { t ->
-                when (t) {
-                    Tab.HOME -> HomeTab(homeText) { tab = Tab.QUEUE }
-                    Tab.SITE -> SiteTab { tab = Tab.QUEUE }
-                    Tab.PAGE -> PageTab()
-                    Tab.QUEUE -> QueueTab()
-                    Tab.HIST -> HistoryTab { tab = Tab.QUEUE }
+            // Navegador sempre composto: trocar de aba só esconde, a mesma instância do WebView continua viva
+            Box(Modifier.fillMaxSize()) {
+                BrowserScreen(visible = tab == Tab.BROWSER, onLeaveTab = { tab = prevTab }) { u, site ->
+                    if (site) { Handoff.site.value = u; goTab(Tab.SITE) } else { Handoff.page.value = u; goTab(Tab.PAGE) }
+                }
+            }
+            if (tab != Tab.BROWSER) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    AnimatedContent(tab, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tab") { t ->
+                        when (t) {
+                            Tab.HOME -> HomeTab(homeText) { goTab(Tab.QUEUE) }
+                            Tab.BROWSER -> {}
+                            Tab.SITE -> SiteTab { goTab(Tab.QUEUE) }
+                            Tab.PAGE -> PageTab()
+                            Tab.QUEUE -> QueueTab()
+                            Tab.HIST -> HistoryTab { goTab(Tab.QUEUE) }
+                        }
+                    }
                 }
             }
         }

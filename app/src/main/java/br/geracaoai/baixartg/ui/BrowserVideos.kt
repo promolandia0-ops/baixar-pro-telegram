@@ -51,7 +51,7 @@ object BrowserDiag {
 
 object BrowserDetect {
     /** state: 0 = vídeo resolvido; 1 = carregando (página do card ainda sendo aberta); 2 = não carregou. */
-    data class Det(val key: String, val f: Found, val sent: Boolean = false, val sel: Boolean = false, val keys: List<String> = emptyList(), val state: Int = 0)
+    data class Det(val key: String, val f: Found, val sent: Boolean = false, val sel: Boolean = false, val keys: List<String> = emptyList(), val state: Int = 0, val badge: String = "", val addedAt: Long = System.currentTimeMillis(), val force: Boolean = false)
     val list = mutableStateListOf<Det>()
     /** Termo da busca do painel: marca só os vídeos cujo título/texto do card/nome do arquivo têm todas as palavras. */
     val term = mutableStateOf("")
@@ -242,14 +242,15 @@ object BrowserDetect {
     }
     fun toggle(key: String, v: Boolean) { val i = list.indexOfFirst { it.key == key }; if (i >= 0 && !list[i].sent) list[i] = list[i].copy(sel = v) }
     val pending = mutableIntStateOf(0)
-    /** Cards desta página que já estão na fila ou já foram enviados (não são abertos de novo). */
+    /** Cards desta página escondidos (só se estiver ativo na fila ou envio confirmado). */
     val alreadyHere = mutableIntStateOf(0)
+    val suppressed = mutableStateListOf<Det>()
     /** Fotos sendo conferidas agora (posts abertos / tamanhos medidos). */
     val photoBusy = mutableIntStateOf(0)
     private fun busy(d: Int) { scope.launch(Dispatchers.Main) { photoBusy.intValue = (photoBusy.intValue + d).coerceAtLeast(0) } }
     /** Quando a página atual começou a abrir (para o "Procurando…" ter fim). */
     val pageAt = androidx.compose.runtime.mutableLongStateOf(0L)
-    fun newPage() { alreadyHere.intValue = 0; pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
+    fun newPage() { alreadyHere.intValue = 0; suppressed.clear(); pageAt.longValue = System.currentTimeMillis(); BrowserDiag.resetPage() }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val gate = Semaphore(10)
     /** Posts de foto que precisam de WebView: no máximo 1 por vez, para não tirar vagas dos vídeos. */
@@ -267,8 +268,9 @@ object BrowserDetect {
         }
         list.clear(); followed.clear()
     }
-    /** Zera toda a memória em RAM/disco de duplicados do navegador (chamado ao limpar histórico/Apagar tudo). */
+    /** Zera toda a memória em RAM/disco de duplicados do navegador (chamado ao limpar histórico/Apagar tudo/fila/falhas). */
     fun clearDedupMemory() {
+        jobs.values.forEach { it.cancel() }; jobs.clear()
         loadedHosts.clear(); relaunched = 0
         synchronized(seenCards) {
             seenCards.clear(); keys.clear(); processed.clear(); cardPages.clear(); seenCardThumbs.clear()
@@ -276,10 +278,35 @@ object BrowserDetect {
         photoKeys.clear(); thumbKeys.clear(); photoPosts.clear(); probing.clear()
         followed.clear()
         BrowserStore.clearPanels()
+        fullCollect = true
+        alreadyHere.intValue = 0
+        pending.intValue = 0
         scope.launch(Dispatchers.Main) {
-            hidden.clear()
-            for (i in list.indices) if (list[i].sent) list[i] = list[i].copy(sent = false)
+            hidden.clear(); suppressed.clear(); alreadyHere.intValue = 0
+            for (i in list.indices) if (list[i].sent || list[i].badge.isNotBlank()) list[i] = list[i].copy(sent = false, badge = "")
             for (i in photos.indices) if (photos[i].sent) photos[i] = photos[i].copy(sent = false)
+        }
+    }
+    fun showHidden(): Int {
+        val bring = synchronized(this) { suppressed.toList().also { suppressed.clear() } }
+        alreadyHere.intValue = 0
+        synchronized(seenCards) {
+            keys.entries.filter { it.value.startsWith("x:") }.map { it.key }.forEach { keys.remove(it) }
+        }
+        var n = 0
+        for (d in bring) {
+            if (list.none { it.key == d.key }) {
+                list += d.copy(sent = false, sel = true, force = true, badge = d.badge.ifBlank { "escondido antes" })
+                n++
+            }
+        }
+        return n
+    }
+    fun watchLoading(now: Long = System.currentTimeMillis()) {
+        val stale = list.filter { it.state == 1 && BrowserHide.loadingTimedOut(it.addedAt, now) }
+        for (d in stale) {
+            jobs.remove(normPage(d.f.page))?.cancel()
+            markFailed(d.f.page)
         }
     }
     /** Páginas de card (página de UM vídeo) — só elas viram chave permanente de "já pedido". */
@@ -302,9 +329,14 @@ object BrowserDetect {
         run {
             if (synchronized(seenCards) { pk.any { keys.containsKey(it) } }) return
             val k = "card:" + normPage(card)
-            if (isBlocked) { synchronized(seenCards) { pk.forEach { keys[it] = "x:$k" } }; return }
+            if (isBlocked) {
+                synchronized(seenCards) { pk.forEach { keys[it] = "x:$k" } }
+                rememberHidden(card, f, pk, hideReasonOf(f, pk))
+                return
+            }
+            val badge = BrowserHide.badge(hideReasonOf(f, pk)).orEmpty()
             synchronized(seenCards) { pk.forEach { keys[it] = k }; keys[k] = k }
-            list += Det(k, f, sel = matches(f), keys = pk, state = 1)
+            list += Det(k, f, sel = matches(f), keys = pk, state = 1, badge = badge)
         }
     }
     private fun markFailed(card: String) = scope.launch(Dispatchers.Main) {
@@ -338,7 +370,7 @@ object BrowserDetect {
                     val better = cur.state != 0 || MediaIdentity.isBetter(f, cur.f)
                     val nf = if (better) f else cur.f
                     val pk = (cur.keys + ksPage).distinct()
-                    preSent = cur.sent || Sent.isSent(f) || Sent.hasCanonical(f) || Jobs.isQueuedOrSent(nf, pk)
+                    preSent = cur.sent || BrowserHide.shouldHide(hideReasonOf(nf, pk))
                 } else if (preKey == null) preBlocked = blocked(f, ks)
             } catch (_: Exception) {}
             withContext(Dispatchers.Main) { publishMain(f, ks, ksPage, preKey, preSent, preBlocked) }
@@ -362,11 +394,13 @@ object BrowserDetect {
                 val nf = if (better) f else list[i].f
                 val pk = (list[i].keys + ksPage).distinct()
                 // conferido fora da tela; se o item mudou nesse meio tempo, confere de novo (raro)
-                val sent2 = if (preKey == hitKey) preSent || list[i].sent
-                    else list[i].sent || Sent.isSent(f) || Sent.hasCanonical(f) || Jobs.isQueuedOrSent(nf, pk)
                 val keepTitle = if (list[i].state != 0 && !TitleFix.isJunk(list[i].f.title) && TitleFix.isJunk(nf.title)) nf.copy(title = list[i].f.title) else nf
-                if (sent2) list.removeAt(i)
-                else list[i] = list[i].copy(f = keepTitle, sel = list[i].sel, keys = pk, state = 0)
+                val sent2 = if (preKey == hitKey) preSent || list[i].sent
+                    else list[i].sent || BrowserHide.shouldHide(hideReasonOf(keepTitle, pk))
+                if (sent2) {
+                    rememberHidden(keepTitle.page.ifBlank { keepTitle.url }, keepTitle, pk, hideReasonOf(keepTitle, pk))
+                    list.removeAt(i)
+                } else list[i] = list[i].copy(f = keepTitle, sel = list[i].sel, keys = pk, state = 0)
             }
             synchronized(seenCards) { ks.forEach { keys[it] = hitKey } }
             return
@@ -374,7 +408,11 @@ object BrowserDetect {
         val k = ks.first()
         // já mandado baixar/enviado (nesta ou em outra sessão, mesmo com outra URL): nunca reaparece
         val isBlocked = if (preKey == null) preBlocked else blocked(f, ks)
-        if (isBlocked) { synchronized(seenCards) { ks.forEach { keys[it] = "x:$k" } }; return }
+        if (isBlocked) {
+            synchronized(seenCards) { ks.forEach { keys[it] = "x:$k" } }
+            rememberHidden(f.page.ifBlank { f.url }, f, ks, hideReasonOf(f, ks))
+            return
+        }
         synchronized(seenCards) { ks.forEach { keys[it] = k } }
         list += Det(k, f, sel = matches(f), keys = ksPage)
     }
@@ -464,9 +502,15 @@ object BrowserDetect {
             (!(k.startsWith("ip:") || k.startsWith("p:")) || k.substringAfter(':') in cardPages || d.f.kind == Kind.SERVER && k.substringAfter(':') == normPage(d.f.url)) } + Sent.keysOf(d.f) + ("pg:" + pgNorm(d.f.url)) +
             (if (d.f.page.isNotBlank() && d.key.startsWith("card:")) listOf("pg:" + pgNorm(d.f.page)) else emptyList())).distinct()
 
-    private fun blocked(f: Found, ks: List<String>): Boolean {
-        val all = ks + Sent.keysOf(f) + ("pg:" + pgNorm(f.url)) + (if (f.page != browsing) listOf("pg:" + pgNorm(f.page)) else emptyList())
-        return Sent.isQueued(all) || Sent.anySent(all) || Jobs.isQueuedOrSent(f, ks.filter { it.startsWith("ip:") || it.startsWith("p:") })
+    private fun hideKeys(f: Found, ks: List<String>): List<String> =
+        ks + Sent.keysOf(f) + ("pg:" + pgNorm(f.url)) + (if (f.page.isNotBlank() && f.page != browsing) listOf("pg:" + pgNorm(f.page)) else emptyList())
+    private fun hideReasonOf(f: Found, ks: List<String>): BrowserHide.Reason = Pipeline.hideReason(f, hideKeys(f, ks))
+    /** Só esconde se está ATIVO na fila agora ou se o envio foi confirmado. FAIL/SKIP/CANCEL e queued_keys sozinhos não escondem. */
+    private fun blocked(f: Found, ks: List<String>): Boolean = BrowserHide.shouldHide(hideReasonOf(f, ks))
+    private fun rememberHidden(card: String, f: Found, pk: List<String>, reason: BrowserHide.Reason) {
+        val k = "card:" + normPage(card)
+        if (suppressed.none { it.key == k }) suppressed += Det(k, f, keys = pk, badge = BrowserHide.badge(reason).orEmpty())
+        alreadyHere.intValue = suppressed.size
     }
 
     /** Some da lista na hora, grava como "já pedido" e entra na fila (se houver envio rodando, entra assim que ele terminar). */
@@ -476,8 +520,8 @@ object BrowserDetect {
         // fila persistente: resolvidos vão direto para baixar/enviar; os "carregando…" a fila abre a página sozinha
         Pipeline.add(ds.map { d ->
             val page = d.f.page.ifBlank { d.f.url }
-            if (d.state == 0) Pipeline.In(page, d.f.title, d.f.extra, d.keys, d.f, uniq = d.key)
-            else Pipeline.In(page, d.f.title, d.f.extra, d.keys, null, uniq = d.key)
+            if (d.state == 0) Pipeline.In(page, d.f.title, d.f.extra, d.keys, d.f, uniq = d.key, force = d.force)
+            else Pipeline.In(page, d.f.title, d.f.extra, d.keys, null, uniq = d.key, force = d.force)
         })
     }
 
@@ -652,11 +696,12 @@ object BrowserDetect {
         if (!Extract.isVideoUrl(card)) {
             val pk = listOf("ip:" + normPage(card), "p:" + normPage(card))
             // só consultas rápidas aqui (thread da tela); a conferência completa roda fora dela, no placeholder
-            val skip = try { val all = pk + ("pg:" + pgNorm(card)); Sent.isQueued(all) || Sent.anySent(all) } catch (_: Exception) { false }
-            if (skip) {
+            val fSkip = Found(card, card, "vídeo", Kind.SERVER)
+            val reason = try { hideReasonOf(fSkip, pk + ("pg:" + pgNorm(card))) } catch (_: Exception) { BrowserHide.Reason.NONE }
+            if (BrowserHide.shouldHide(reason)) {
                 val k = "card:" + normPage(card)
                 synchronized(seenCards) { pk.forEach { if (!keys.containsKey(it)) keys[it] = "x:$k" } }
-                scope.launch(Dispatchers.Main) { alreadyHere.intValue++ }
+                scope.launch(Dispatchers.Main) { rememberHidden(card, fSkip, pk, reason) }
                 return
             }
         }
@@ -667,10 +712,12 @@ object BrowserDetect {
         jobs[normPage(card)] = scope.launch {
             try {
                 if (!Extract.isVideoUrl(card) && blocked(Found(card, card, "vídeo", Kind.SERVER), listOf("ip:" + normPage(card), "p:" + normPage(card)))) {
-                    withContext(Dispatchers.Main) { alreadyHere.intValue++ }; return@launch
+                    val fSkip = Found(card, card, "vídeo", Kind.SERVER)
+                    val pk = listOf("ip:" + normPage(card), "p:" + normPage(card))
+                    withContext(Dispatchers.Main) { rememberHidden(card, fSkip, pk, hideReasonOf(fSkip, pk)) }; return@launch
                 }
                 // cada card tem prazo: nada fica "carregando…" para sempre
-                val ok = withTimeoutOrNull(75_000) { gate.withPermit {
+                val ok = withTimeoutOrNull(BrowserHide.LOADING_TIMEOUT_MS) { gate.withPermit {
                     var t = TitleFix.pick(title, cardCtx.take(150))
                     val tEarly = t.ifBlank { TitleFix.pick(pageInfo[normPage(page)]?.first, Extract.fileName(card)).ifBlank { "vídeo" } }
                     if (Extract.isVideoUrl(card)) { publish(Found(card, page, tEarly, Extract.mediaKindOf(card) ?: Kind.DIRECT, ref = page, extra = tEarly)); return@withPermit }
@@ -703,7 +750,7 @@ object BrowserDetect {
                 } }
                 if (ok == null) markFailed(card)
             } catch (e: Exception) { if (e is CancellationException) throw e; markFailed(card) }
-            finally { withContext(NonCancellable + Dispatchers.Main) { pending.intValue-- } }
+            finally { withContext(NonCancellable + Dispatchers.Main) { pending.intValue = (pending.intValue - 1).coerceAtLeast(0) } }
         }
     }
 
@@ -751,6 +798,10 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     Text("Mostrar só os marcados", Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                     Switch(onlyChecked, { onlyChecked = it })
                 }
+                val hiddenN by BrowserDetect.alreadyHere
+                if (hiddenN > 0) OutlinedButton({ BrowserDetect.showHidden() }, Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    Text("Mostrar os $hiddenN escondidos")
+                }
                 Button({
                     BrowserDetect.sendAsync(checked, onSent)
                 }, Modifier.fillMaxWidth().padding(top = 4.dp), enabled = checked.isNotEmpty()) { Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Baixar marcados (${checked.size})") }
@@ -758,10 +809,10 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onSearch
                     items(visible, key = { it.key }) { d ->
                         ListItem(
                             headlineContent = { Text(d.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text(when (d.state) { 1 -> "carregando…"; 2 -> "não carregou aqui (a fila tenta de novo)"; else -> d.f.typeLabel + " • " + (if (d.f.kind == Kind.SERVER) "via servidor" else "pronto") } + if (d.sent) " • Já enviado" else "") },
+                            supportingContent = { Text((when (d.state) { 1 -> "carregando…"; 2 -> "não achou vídeo"; else -> d.f.typeLabel + " • " + (if (d.f.kind == Kind.SERVER) "via servidor" else "pronto") }) + (if (d.badge.isNotBlank()) " • " + d.badge else "") + if (d.sent) " • Já enviado" else "") },
                             leadingContent = { Checkbox(d.sel && !d.sent, { v -> BrowserDetect.toggle(d.key, v) }, enabled = !d.sent) },
                             trailingContent = {
-                                TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent) { Text("Baixar") }
+                                TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent) { Text(if (d.force || d.badge.isNotBlank()) "Baixar mesmo assim" else "Baixar") }
                             })
                     }
                 }

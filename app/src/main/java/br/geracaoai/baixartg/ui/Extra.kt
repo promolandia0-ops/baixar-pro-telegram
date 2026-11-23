@@ -55,7 +55,7 @@ private fun DetectFab(modifier: Modifier, show: Boolean, onOpen: () -> Unit) {
     val already by BrowserDetect.alreadyHere
     val pageAt by BrowserDetect.pageAt
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); now = System.currentTimeMillis() } }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(1_000); now = System.currentTimeMillis(); BrowserDetect.watchLoading(now) } }
     val working = (if (mode == 1) 0 else pendingN) + (if (mode != 0) photoBusy else 0)
     // "Procurando" tem prazo: sem nada novo em 25 s, diz que não há nada novo
     val searching = detected == 0 && phN == 0 && working > 0 && (pageAt == 0L || now - pageAt < 25_000)
@@ -76,26 +76,63 @@ object Handoff { val page = mutableStateOf<String?>(null); val site = mutableSta
 
 // ---------------- Navegador ----------------
 
+/**
+ * WebView único do Navegador, vivo no nível do app (fora da recomposição).
+ * Trocar de aba só esconde; não destroi, não recarrega, preserva página, scroll, login e histórico de voltar.
+ */
+object BrowserRuntime {
+    @Volatile var web: WebView? = null
+        private set
+    @Volatile private var started = false
+    fun adopt(w: WebView) { if (web !== w) web = w }
+    fun detach() { web?.let { v -> (v.parent as? ViewGroup)?.removeView(v) } }
+    fun goBack(): Boolean {
+        val w = web ?: return false
+        if (!w.canGoBack()) return false
+        w.goBack(); return true
+    }
+    fun onEnter() {
+        if (started) return
+        started = true
+        BrowserDetect.warm()
+        val u = br.geracaoai.baixartg.Prefs.browserUrl.ifBlank { br.geracaoai.baixartg.Prefs.lastUrl }
+        if (u.startsWith("http")) BrowserDetect.restore(Extract.host(u))
+    }
+    fun release() {
+        try { web?.destroy() } catch (_: Exception) {}
+        web = null; started = false
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Unit) {
-    var web by remember { mutableStateOf<WebView?>(null) }
+fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (url: String, site: Boolean) -> Unit) {
+    var web by remember { mutableStateOf(BrowserRuntime.web) }
     var address by remember { mutableStateOf(br.geracaoai.baixartg.Prefs.browserUrl.ifBlank { br.geracaoai.baixartg.Prefs.lastUrl }.ifBlank { "https://" }) }
-    var current by remember { mutableStateOf("") }
+    var current by remember { mutableStateOf(BrowserRuntime.web?.url.orEmpty()) }
     var progress by remember { mutableIntStateOf(0) }
-    var canBack by remember { mutableStateOf(false) }; var canFwd by remember { mutableStateOf(false) }
+    var canBack by remember { mutableStateOf(BrowserRuntime.web?.canGoBack() == true) }; var canFwd by remember { mutableStateOf(BrowserRuntime.web?.canGoForward() == true) }
     var ask by remember { mutableStateOf(false) }
     var analyze by remember { mutableStateOf(false) }
-    BackHandler { if (web?.canGoBack() == true) web?.goBack() else onClose() }
+    BackHandler(enabled = visible) {
+        when (BrowserNav.onBack(web?.canGoBack() == true)) {
+            BrowserNav.BackAction.WEBVIEW -> web?.goBack()
+            BrowserNav.BackAction.PREVIOUS_TAB -> onLeaveTab()
+        }
+    }
     fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }
     fun savePanel() { val v = BrowserDetect.list.toList(); val p = BrowserDetect.photos.toList(); val h = BrowserDetect.loadedHostSet()
         kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch { BrowserStore.savePanel(v, p, h) } }
-    DisposableEffect(Unit) {
-        JsRender.browserVisible = true
-        BrowserDetect.reset(); BrowserDetect.warm()
-        BrowserDetect.restore(Extract.host(address))   // lista salva deste site volta como estava
-        onDispose { JsRender.browserVisible = false; savePanel(); CookieManager.getInstance().flush(); web?.destroy() }
+    DisposableEffect(visible) {
+        JsRender.browserVisible = visible
+        if (visible) BrowserRuntime.onEnter()
+        onDispose {
+            JsRender.browserVisible = false
+            savePanel()
+            try { CookieManager.getInstance().flush() } catch (_: Exception) {}
+            // não destroi o WebView: ele vive em BrowserRuntime e é só reanexado na próxima vez
+        }
     }
     // grava a lista do painel no disco quando muda (sobrevive a fechar/atualizar o app)
     LaunchedEffect(Unit) {
@@ -168,7 +205,7 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
     LaunchedEffect(web) { while (true) { kotlinx.coroutines.delay(2_000); if (web != null) scheduleCollect(0) } }
     Scaffold(topBar = {
         Column {
-            TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.Rounded.Close, "Fechar") } },
+            TopAppBar(title = { Text("Navegador", fontWeight = FontWeight.SemiBold) },
                 actions = {
                     IconButton({ web?.goBack() }, enabled = canBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") }
                     IconButton({ web?.goForward() }, enabled = canFwd) { Icon(Icons.AutoMirrored.Rounded.ArrowForward, "Avançar") }
@@ -193,7 +230,13 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 6.dp))
         } }
     }) { pad ->
-        AndroidView(factory = { c -> WebView(c).apply {
+        AndroidView(factory = { c ->
+            val existing = BrowserRuntime.web
+            if (existing != null) {
+                (existing.parent as? ViewGroup)?.removeView(existing)
+                web = existing
+                existing
+            } else WebView(c).apply {
             layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT)
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.databaseEnabled = true
             settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(true)
@@ -249,8 +292,16 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
             }
             setOnScrollChangeListener { _, _, _, _, _ -> scheduleCollect(1_200) }
             web = this
+            BrowserRuntime.adopt(this)
             if (address.length > 8) loadUrl(address)
-        } }, modifier = Modifier.fillMaxSize().padding(pad))
+        }
+        }, update = { w ->
+            web = w
+            w.visibility = if (visible) android.view.View.VISIBLE else android.view.View.INVISIBLE
+            val u = w.url.orEmpty()
+            if (u.isNotBlank()) { current = u; if (!address.startsWith("http") || address != u) address = u }
+            canBack = w.canGoBack(); canFwd = w.canGoForward()
+        }, onRelease = { BrowserRuntime.detach() }, modifier = Modifier.fillMaxSize().padding(pad))
         DetectFab(Modifier.fillMaxSize().padding(pad).padding(16.dp), current.startsWith("http")) { sheet = true }
     }
     if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }) { term ->
