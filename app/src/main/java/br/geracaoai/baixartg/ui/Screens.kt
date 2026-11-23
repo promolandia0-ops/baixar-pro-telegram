@@ -438,6 +438,9 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
                 if (fail + analyzing > 0) FilledTonalButton({ Pipeline.retryFailed() }, Modifier.weight(1f)) { Text("Reenviar falhas", maxLines = 1) }
                 OutlinedButton({ clearWhich = "menu" }, Modifier.weight(1f)) { Text("Limpar", maxLines = 1) }
             }
+            if (skip > 0) {
+                FilledTonalButton({ Pipeline.forceSendAllSkipped() }, Modifier.fillMaxWidth()) { Text("Baixar repetidos mesmo assim", maxLines = 1) }
+            }
         } }
         if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Cancelar tudo?") },
             text = { Text("Os vídeos que ainda não foram enviados saem da fila e voltam a aparecer no navegador.") },
@@ -499,7 +502,7 @@ fun PipeRow(t: Pipeline.PItem) {
                 }
             }
             if (t.st == Pipeline.PS.FAIL || t.st == Pipeline.PS.ANALYZE) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
-            if (t.st == Pipeline.PS.SKIP) TextButton({ Pipeline.forceSend(t.id) }) { Text("Enviar mesmo assim") }
+            if (t.st == Pipeline.PS.SKIP) TextButton({ Pipeline.forceSend(t.id) }) { Text("Baixar mesmo assim") }
             if (t.st == Pipeline.PS.CANCEL) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
             if (t.st in setOf(Pipeline.PS.WAIT, Pipeline.PS.READY, Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP, Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING))
                 TextButton({ Pipeline.cancel(t.id) }) { Text("Cancelar") }
@@ -537,7 +540,7 @@ private fun ClearQueueDialog(which: String, l: List<Pipeline.PItem>, setWhich: (
         "tudo" -> Triple("Apagar tudo?", "Limpa a fila inteira (falhas, pendentes e enviados) e a lista do Histórico. A memória de “já enviado” você escolhe abaixo.", { })
         else -> Triple("", "", { })
     }
-    var alsoMem by remember { mutableStateOf(false) }
+    var alsoMem by remember(which) { mutableStateOf(which == "tudo") }
     AlertDialog(onDismissRequest = close, title = { Text(title) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -550,7 +553,7 @@ private fun ClearQueueDialog(which: String, l: List<Pipeline.PItem>, setWhich: (
         confirmButton = { TextButton({
             when (which) {
                 "historico" -> { Jobs.clearHistoryList(); if (alsoMem) Jobs.clearSentMemory() }
-                "tudo" -> Pipeline.clearAll(alsoSentMemory = alsoMem)
+                "tudo" -> { Pipeline.clearAll(alsoSentMemory = alsoMem); if (alsoMem) Jobs.clearSentMemory() }
                 else -> act()
             }
             close()

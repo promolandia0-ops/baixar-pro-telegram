@@ -43,9 +43,20 @@ object MediaIdentity {
         "st", "e", "start", "end", "t", "s", "uid", "session", "jwt", "access_key", "key",
         "utm_source", "utm_medium", "utm_campaign", "fbclid", "gclid",
     )
+    private val ID_QUERY = setOf(
+        "id", "vid", "video", "video_id", "videoid", "v", "docid", "file", "file_id", "fileid",
+        "media", "media_id", "mediaid", "mid", "pid", "cid", "clip", "clip_id", "item", "item_id",
+        "post", "post_id", "slug", "code", "asset", "asset_id", "episode", "ep",
+    )
+    private val DIR_QUALITY = Regex(
+        """/(?:\d{3,4}p\d{0,2}|[1-8]k|uhd|fhd|qhd|hd|sd|ld|hq|lq|low|mid|med|high|mobile|source|original|orig|\d{3,5}k(?:bps)?)$""",
+        RegexOption.IGNORE_CASE,
+    )
     private val WEAK_STEMS = setOf(
         "master", "playlist", "index", "manifest", "video", "source", "file", "media",
         "stream", "movie", "clip", "default", "output", "download", "play", "player",
+        "watch", "embed", "view", "get", "serve", "load", "fetch", "hls", "dash",
+        "proxy", "cdn", "chunklist", "prog_index", "index-v1-a1",
     )
     private val MASTER_NAME = Regex("""(?:^|/)(?:master|playlist|index|manifest|video)(?:_all)?\.m3u8(?:$|\?)""", RegexOption.IGNORE_CASE)
 
@@ -93,12 +104,12 @@ object MediaIdentity {
     fun canonicalPage(url: String): String = Sent.norm(url)
 
     fun canonicalMedia(url: String): String {
-        val base = stripQuery(url)
+        val base = stripQueryNoParams(url)
         val stripped = stripQuality(base)
-        // se o nome do arquivo for genérico (ex.: playlist.m3u8, video.mp4?id=123), preserva query identificadora
+        // volta ao comportamento da v1.9.7; só preserva query identificadora (id, vid, etc.) se o arquivo for genérico
         val stem = fileStem(url)
-        val iq = if (!usefulStem(stem)) PageKey.idQuery(url) else ""
-        return if (iq.isNotEmpty() && '?' !in stripped) stripped + iq else stripped
+        val iq = if (!usefulStem(stem)) mediaIdQuery(url) else ""
+        return if (iq.isNotEmpty()) stripped + iq else stripped
     }
 
     fun fileStem(url: String): String {
@@ -113,7 +124,15 @@ object MediaIdentity {
 
     fun usefulStem(stem: String): Boolean = stem.length >= 3 && stem !in WEAK_STEMS
 
-    fun mediaDir(url: String): String = stripQuery(url).substringBeforeLast('/')
+    fun mediaDir(url: String): String {
+        var d = stripQueryNoParams(url).substringBeforeLast('/')
+        while (DIR_QUALITY.containsMatchIn(d)) {
+            val next = DIR_QUALITY.replace(d, "")
+            if (next.isBlank() || '/' !in next) break
+            d = next
+        }
+        return d
+    }
 
     fun mediaIdQuery(url: String): String {
         val stem = fileStem(url)
@@ -122,7 +141,7 @@ object MediaIdentity {
         if (q.isBlank()) return ""
         val ps = q.split('&').filter { part ->
             val k = part.substringBefore('=').lowercase()
-            part.isNotBlank() && '=' in part && part.substringAfter('=').isNotBlank() && k !in SKIP_QUERY && k !in setOf("ex", "t", "ts", "_", "cb", "nocache", "amp")
+            part.isNotBlank() && '=' in part && part.substringAfter('=').isNotBlank() && k in ID_QUERY
         }.map { it.lowercase() }.sorted()
         return if (ps.isEmpty()) "" else "?" + ps.joinToString("&")
     }
@@ -130,15 +149,22 @@ object MediaIdentity {
     fun keys(f: Found): List<String> {
         val out = LinkedHashSet<String>()
         val pq = if (f.kind == Kind.PHOTO) PageKey.idQuery(f.url) else mediaIdQuery(f.url)
-        val media = canonicalMedia(f.url)
+        val media = if (f.kind == Kind.PHOTO) {
+            val base = stripQuery(f.url)
+            val stripped = stripQuality(base)
+            if (pq.isNotEmpty() && '?' !in stripped) stripped + pq else stripped
+        } else canonicalMedia(f.url)
         if (media.isNotBlank()) out += if ('?' in media) "m:$media" else "m:$media$pq"
         val page = canonicalPage(f.page)
-        val stem = fileStem(f.url) + pq
-        if (page.isNotBlank() && usefulStem(stem)) out += "ps:$page|$stem"
-        if (usefulStem(stem) && stem.length >= 8) out += "s:$stem"
-        if (pq.isEmpty() && (Extract.isHls(f.url) || Extract.isDash(f.url))) {
+        val rawStem = fileStem(f.url)
+        if (page.isNotBlank() && usefulStem(rawStem)) out += "ps:$page|$rawStem"
+        if (usefulStem(rawStem) && rawStem.length >= 8) out += "s:$rawStem"
+        if ((Extract.isHls(f.url) || Extract.isDash(f.url)) && !usefulStem(rawStem)) {
             val dir = mediaDir(f.url)
-            if (dir.length >= 8) out += "d:$dir"
+            if (dir.length >= 8 && '/' in dir) {
+                if (pq.isEmpty()) out += "d:$dir"
+                else out += "hd:$dir$pq"
+            }
         }
         return out.toList()
     }
@@ -161,6 +187,15 @@ object MediaIdentity {
                 score(a, sizes[a.url] ?: -1).compareTo(score(b, sizes[b.url] ?: -1))
             }!!
         }
+    }
+
+    private fun stripQueryNoParams(url: String): String = try {
+        val x = URI(url.trim().substringBefore('#').replace(" ", "%20"))
+        val host = (x.host ?: "").lowercase().removePrefix("www.").removePrefix("m.")
+        val path = (try { URLDecoder.decode(x.rawPath ?: "", "UTF-8") } catch (_: Exception) { x.rawPath ?: "" }).trimEnd('/')
+        host + path.lowercase()
+    } catch (_: Exception) {
+        Sent.norm(url)
     }
 
     private fun stripQuery(url: String): String = try {

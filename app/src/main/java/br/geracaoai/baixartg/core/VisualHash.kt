@@ -164,6 +164,14 @@ object VisualHash {
         }
     }
     fun release(id: Long) { synchronized(lock) { pending.remove(id) } }
+    fun clear() {
+        synchronized(lock) {
+            sent.clear()
+            pending.clear()
+            try { file?.delete() } catch (_: Exception) {}
+            loaded = false
+        }
+    }
     fun markSent(id: Long, f: Fp?) {
         val v = f ?: synchronized(lock) { pending[id] } ?: return
         ensure()

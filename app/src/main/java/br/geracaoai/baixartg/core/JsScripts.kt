@@ -70,7 +70,7 @@ object JsScripts {
             var th=thumb(a);var row=[h,txt(a),th,inNav(a)?1:0,card(a),lvl];
             if(S){var sg=row[1]+'|'+row[2]+'|'+row[3]+'|'+row[4];if(S.sig[h]===sg)continue;S.sig[h]=sg}
             out.a.push(row);}
-          root.querySelectorAll('video,video source,source[src]').forEach(function(v){if(v.closest&&v.closest('track'))return;var s=v.currentSrc||v.src||v.getAttribute('src')||'';if(s&&s.indexOf('http')===0&&!vseen[s]){vseen[s]=1;if(S){if(S.vs[s])return;S.vs[s]=1}out.v.push(s)}});
+          root.querySelectorAll('video,video source,source[src]').forEach(function(v){if(v.closest&&v.closest('track'))return;var vid=v.closest?v.closest('video'):null;var c=v.closest?v.closest(CARD):null;if(v.closest&&v.closest('a[href]'))return;if(vid&&(vid.muted||vid.loop)&&!vid.controls&&c&&c.querySelector('a[href] img'))return;var s=v.currentSrc||v.src||v.getAttribute('src')||'';if(!s||s.indexOf('http')!==0)return;if(/(?:preview|previews|teaser|hover|thumb[-_]?video|video[-_]?thumb|videothumb|animated|sprite|\.(?:ts|m4s))(?:[?#&_.=-]|$)/i.test(s))return;if(!vseen[s]){vseen[s]=1;if(S){if(S.vs[s])return;S.vs[s]=1}out.v.push(s)}});
         }
         function hostsOf(root){var r=[];var all=root.querySelectorAll('*');for(var j=0;j<all.length;j++){if(all[j].shadowRoot)r.push(all[j])}return r}
         function walk(root,d,hosts){

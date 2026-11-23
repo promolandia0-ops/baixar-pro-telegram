@@ -20,6 +20,7 @@ class App : Application() {
         Td.init(this)
         br.geracaoai.baixartg.core.Pipeline.init(this)
         br.geracaoai.baixartg.ui.BrowserStore.init(this)
+        br.geracaoai.baixartg.core.Sent.onClear = { br.geracaoai.baixartg.ui.BrowserDetect.clearDedupMemory() }
         br.geracaoai.baixartg.core.Dedupe.init(this)
         if (br.geracaoai.baixartg.core.Dedupe.hasPendingDelete()) br.geracaoai.baixartg.core.Dedupe.resumeDelete()
         if (br.geracaoai.baixartg.core.Pipeline.hasWork()) br.geracaoai.baixartg.core.Pipeline.start()

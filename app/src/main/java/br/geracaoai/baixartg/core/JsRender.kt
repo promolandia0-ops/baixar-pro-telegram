@@ -92,7 +92,7 @@ object JsRender {
         (function(){
           if(window.__bptHook)return 'ok'; window.__bptHook=1; window.__bptNet=window.__bptNet||[];
           function add(u){if(!u||typeof u!=='string')return; if(/^blob:|^data:/i.test(u))return;
-            if(/\\.(m3u8|mpd|mp4|m4v|webm|ts)(\\?|$)/i.test(u)||/\\/video\\//i.test(u)||/application\\/(vnd\\.apple\\.)?mpegurl|dash\\+xml/i.test(u)) window.__bptNet.push(u);}
+            if(/\\.(ts|m4s|m4f|cmfv|cmfa)(\\?|$)|\\/(?:init|seg(?:ment)?[-_]?\\d+|chunk[-_]?\\d+|frag[-_]?\\d+)\\.(?:mp4|m4s|webm)/i.test(u))return; if(/\\.(m3u8|mpd|mp4|m4v|webm)(\\?|$)/i.test(u)||/\\/video\\//i.test(u)||/application\\/(vnd\\.apple\\.)?mpegurl|dash\\+xml/i.test(u)) window.__bptNet.push(u);}
           try{var of=window.fetch; if(of) window.fetch=function(){try{var a=arguments[0]; add(typeof a==='string'?a:(a&&a.url))}catch(e){} return of.apply(this,arguments)};}catch(e){}
           try{var X=XMLHttpRequest.prototype.open; XMLHttpRequest.prototype.open=function(m,u){try{add(u)}catch(e){} return X.apply(this,arguments)};}catch(e){}
           try{
@@ -174,7 +174,7 @@ object JsRender {
             fun finish() {
                 wv.evaluateJavascript(JsScripts.COLLECT) { raw ->
                     val c = JsScripts.parseCollected(raw)
-                    c?.videos?.forEach { v -> if (Extract.mediaKindOf(v) != null && !MediaPick.isAdUrl(v)) synchronized(hits) { hits += v } }
+                    c?.videos?.forEach { v -> if (Extract.mediaKindOf(v) != null && !Extract.isSegmentUrl(v) && !MediaPick.isAdUrl(v)) synchronized(hits) { hits += v } }
                     wv.evaluateJavascript("(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()") { rawHtml ->
                         val media = mediaOf(hits, url)
                         done(JsPage(unescapeJs(rawHtml), media, challenge = c?.challenge == true, collected = c,
@@ -208,9 +208,13 @@ object JsRender {
         }
     }
 
-    private fun mediaOf(hits: Set<String>, url: String): List<Found> = synchronized(hits) { hits.filter { !it.startsWith("api:") } }.mapNotNull { hu ->
-        val kind = Extract.mediaKindOf(hu) ?: return@mapNotNull null
-        Found(hu, url, Extract.mediaTitle(hu, ""), kind, ref = url, extra = "")
+    private fun mediaOf(hits: Set<String>, url: String): List<Found> {
+        val raw = synchronized(hits) { hits.filter { !it.startsWith("api:") && !Extract.isSegmentUrl(it) } }
+        val nonPrev = raw.any { !Extract.isPreviewVideo(it) }
+        return raw.filterNot { nonPrev && Extract.isPreviewVideo(it) }.mapNotNull { hu ->
+            val kind = Extract.mediaKindOf(hu) ?: return@mapNotNull null
+            Found(hu, url, Extract.mediaTitle(hu, ""), kind, ref = url, extra = "")
+        }
     }
 
     /** Cria o WebView na janela, roda [drive] e devolve o JsPage (ou null em timeout/sem Activity). */

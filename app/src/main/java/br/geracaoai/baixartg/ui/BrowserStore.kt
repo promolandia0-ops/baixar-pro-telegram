@@ -70,6 +70,10 @@ object BrowserStore {
     }
     private fun detJ(d: BrowserDetect.Det) = JSONObject().put("key", d.key).put("f", fToJ(d.f)).put("sel", d.sel).put("keys", JSONArray(d.keys)).put("st", d.state)
 
+    @Synchronized fun clearPanels() {
+        try { dir?.listFiles()?.forEach { it.delete() } } catch (_: Exception) {}
+    }
+
     fun loadPanel(host: String): Pair<List<BrowserDetect.Det>, List<BrowserDetect.Det>> = try {
         val o = JSONObject(fileFor(host).readText())
         fun arr(n: String) = o.optJSONArray(n)?.let { a -> (0 until a.length()).mapNotNull { i ->

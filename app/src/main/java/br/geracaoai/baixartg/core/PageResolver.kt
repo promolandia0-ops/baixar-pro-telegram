@@ -10,10 +10,10 @@ import okhttp3.Request
  */
 object PageResolver {
     /** "capa/thumb/poster" no caminho só derruba quando não é arquivo de vídeo (antes derrubava até .mp4 de verdade). */
-    fun isReal(f: Found): Boolean = f.kind != Kind.PHOTO && !(Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) &&
+    fun isReal(f: Found): Boolean = f.kind != Kind.PHOTO && !Extract.isSegmentUrl(f.url) && !(Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) &&
         !(Extract.isVideoThumb(f.url) && !Extract.isVideoUrl(f.url) && !Extract.isHls(f.url)) && !TitleFix.isSubtitleUrl(f.url) &&
         (f.kind == Kind.SERVER || f.kind == Kind.HLS || f.kind == Kind.DIRECT || Extract.isVideoUrl(f.url))
-    private fun isPreview(f: Found) = f.url.contains("preview", true)
+    private fun isPreview(f: Found) = Extract.isPreviewVideo(f.url)
 
     /**
      * Melhor de uma lista (arquivo/stream antes de "via servidor"; depois maior qualidade).

@@ -258,13 +258,29 @@ object BrowserDetect {
     private val processed = java.util.Collections.synchronizedSet(HashSet<String>())
     private val keys = HashMap<String, String>()
 
+    private val seenCardThumbs = HashSet<String>()
     fun reset() {
         loadedHosts.clear(); relaunched = 0
         synchronized(seenCards) {
-            seenCards.clear(); keys.clear(); processed.clear()
+            seenCards.clear(); keys.clear(); processed.clear(); seenCardThumbs.clear()
             hidden.values.forEach { d -> d.keys.forEach { keys[it] = d.key }; keys[d.key] = d.key }
         }
         list.clear(); followed.clear()
+    }
+    /** Zera toda a memória em RAM/disco de duplicados do navegador (chamado ao limpar histórico/Apagar tudo). */
+    fun clearDedupMemory() {
+        loadedHosts.clear(); relaunched = 0
+        synchronized(seenCards) {
+            seenCards.clear(); keys.clear(); processed.clear(); cardPages.clear(); seenCardThumbs.clear()
+        }
+        photoKeys.clear(); thumbKeys.clear(); photoPosts.clear(); probing.clear()
+        followed.clear()
+        BrowserStore.clearPanels()
+        scope.launch(Dispatchers.Main) {
+            hidden.clear()
+            for (i in list.indices) if (list[i].sent) list[i] = list[i].copy(sent = false)
+            for (i in photos.indices) if (photos[i].sent) photos[i] = photos[i].copy(sent = false)
+        }
     }
     /** Páginas de card (página de UM vídeo) — só elas viram chave permanente de "já pedido". */
     private val cardPages = java.util.Collections.synchronizedSet(HashSet<String>())
@@ -300,9 +316,7 @@ object BrowserDetect {
     }
 
     private fun isRealVideo(f: Found): Boolean =
-        f.kind != Kind.PHOTO && !(Extract.isPhotoUrl(f.url) && !Extract.isVideoUrl(f.url)) &&
-            // "capa/thumb/poster" no caminho só derruba quando NÃO é arquivo de vídeo (antes derrubava até .mp4 de verdade)
-            !(Extract.isVideoThumb(f.url) && !Extract.isVideoUrl(f.url) && !Extract.isHls(f.url)) &&
+        f.kind != Kind.PHOTO && !BrowserGrouping.isFilteredOutVideoUrl(f.url) &&
             (f.kind == Kind.SERVER || f.kind == Kind.HLS || Extract.isVideoUrl(f.url) || f.kind == Kind.DIRECT)
 
     /**
@@ -496,13 +510,14 @@ object BrowserDetect {
     fun intercepted(url: String, page: String, title: String) {
         if (page.isNotBlank()) browsing = page
         if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
+        if (BrowserGrouping.isFilteredOutVideoUrl(url)) return
         val kind = Extract.mediaKindOf(url) ?: return
-        if (Extract.isVideoThumb(url) || url.contains("preview", true) || TitleFix.isSubtitleUrl(url)) return
         val info = pageInfo[normPage(page)]
         val t = TitleFix.pick(info?.first, title).ifBlank { Extract.mediaTitle(url, "") }
         val extra = listOfNotNull(info?.first, info?.second, TitleFix.clean(title)).filter { it.isNotBlank() }.distinct().joinToString(" ")
-        // tudo que o player da página pede (variantes de qualidade, faixas de idioma) = um vídeo só, o de maior qualidade
-        publish(Found(url, page, t, kind, ref = page, extra = extra), listOf("ip:" + normPage(page)))
+        // Na página de UM vídeo (watch/embed), tudo que o player pede vira um vídeo só; na listagem, agrupa por identidade da mídia
+        val xk = if (Extract.looksLikeVideoPage(page)) listOf("ip:" + normPage(page)) else emptyList()
+        publish(Found(url, page, t, kind, ref = page, extra = extra), xk)
     }
 
     /** Cards coletados do DOM (JsScripts.COLLECT). */
@@ -525,13 +540,10 @@ object BrowserDetect {
             }
         }
         val root = Extract.host(page)
-        if (mode.intValue != 1) for (v in c.videos) if (!v.startsWith("blob:")) intercepted(v, page, "")
+        if (mode.intValue != 1) for (v in c.videos) if (!BrowserGrouping.isFilteredOutVideoUrl(v)) intercepted(v, page, "")
         // cada link é examinado uma vez só (antes: todos os links da página, a cada coleta, na thread da tela)
         for (a in c.anchors) {
             val href = a.href.substringBefore('#')
-            // (volta a examinar se o link ganhar miniatura/texto depois — lazy-load)
-            // miniatura de card de VÍDEO (link de página de vídeo ou com duração): só a imagem do próprio link (ou do pai).
-            // Antes todo link com imagem contava (resultados de busca de imagens viravam "miniatura de vídeo").
             if (a.thumb.startsWith("http") && a.thumbLevel <= 1 && !(Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) &&
                 (Extract.looksLikeVideoPage(a.href) || DURATION.containsMatchIn(a.ctx))) thumbKeys += Photos.key(a.thumb)
             if (mode.intValue == 1) continue   // "Só fotos": não abre card de vídeo nenhum (relido inteiro se o modo mudar)
@@ -539,10 +551,22 @@ object BrowserDetect {
             if (a.nav) continue
             if (a.thumb.isBlank() && !Extract.looksLikeVideoPage(a.href) && !DURATION.containsMatchIn(a.ctx)) continue
             if (Extract.isPhotoUrl(href) && !Extract.isVideoUrl(href)) continue
+            if (Extract.isSegmentUrl(href) || Extract.isPreviewVideo(href)) continue
             if (Extract.host(href) != root && !Extract.YTDLP_HOSTS.containsMatchIn(href)) continue
             if (href.trimEnd('/') == page.substringBefore('#').trimEnd('/')) continue
             if (SiteSearch.isSearchUrl(href)) continue
-            if (!synchronized(seenCards) { seenCards.add(href) }) continue
+            if (a.thumbLevel > 1 && !Extract.looksLikeVideoPage(href) && !Extract.isVideoUrl(href)) continue
+            if (BrowserGrouping.isNonVideoNavLink(href)) continue
+            val thNorm = if (a.thumb.startsWith("http")) Sent.norm(a.thumb) else ""
+            if (thNorm.isNotBlank() && a.thumbLevel > 0 && !Extract.looksLikeVideoPage(href) && !Extract.isVideoUrl(href)) {
+                if (synchronized(seenCards) { thNorm in seenCardThumbs }) continue
+            }
+            val cardNorm = normPage(href)
+            if (!synchronized(seenCards) {
+                val added = seenCards.add(cardNorm)
+                if (added && thNorm.isNotBlank() && a.thumbLevel == 0) seenCardThumbs.add(thNorm)
+                added
+            }) continue
             resolve(href, a.bestTitle, page, a.ctx)
         }
         // paginação dos resultados ("próxima", rel=next): segue sozinho quando há busca/nome
@@ -599,10 +623,20 @@ object BrowserDetect {
             val want = ds.map { it.key }.toHashSet()
             // pega a versão atual de cada item (pode ter acabado de carregar)
             // "não carregou" também vai: a fila abre a página de novo e tenta o servidor
-            val cur = list.filter { it.key in want && !it.sent }
-            if (cur.isEmpty()) { onMsg("Nada novo para enviar."); return@launch }
-            val curKeys = cur.map { it.key }.toHashSet()
+            val curRaw = list.filter { it.key in want && !it.sent }
+            if (curRaw.isEmpty()) { onMsg("Nada novo para enviar."); return@launch }
+            val curKeys = curRaw.map { it.key }.toHashSet()
             list.removeAll { it.key in curKeys }   // somem da lista na hora
+            // Mescla variantes do mesmo vídeo dentro da mesma seleção em 1 só item
+            val cur = ArrayList<Det>(curRaw.size)
+            for (d in curRaw) {
+                val idx = if (d.state == 0) cur.indexOfFirst { o -> o.state == 0 && MediaIdentity.same(o.f, d.f) } else -1
+                if (idx >= 0) {
+                    val o = cur[idx]
+                    val bf = if (MediaIdentity.isBetter(d.f, o.f)) d.f else o.f
+                    cur[idx] = o.copy(f = bf, keys = (o.keys + d.keys).distinct())
+                } else cur += d
+            }
             // os que ainda carregavam param aqui: a fila abre cada página sozinha, sem esperar os outros
             cur.filter { it.state != 0 }.forEach { d -> jobs.remove(normPage(d.f.page))?.cancel() }
             dispatch(cur)

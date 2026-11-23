@@ -123,7 +123,11 @@ object Extract {
         } catch (_: Exception) { null }
     }
 
-    fun isVideoUrl(u: String) = VIDEO_EXT.containsMatchIn(u.substringBefore('#')) || u.contains("video.twimg.com", true)
+    private val SEGMENT_URL = Regex("""(?i)(?:\.(?:ts|m4s|m4f|cmfv|cmfa)(?:$|[?#])|/(?:init|seg(?:ment)?[-_]?\d+|chunk[-_]?\d+|frag(?:ment)?[-_]?\d+)\.(?:mp4|m4s|webm|m4v)(?:$|[?#]))""")
+    private val PREVIEW_VIDEO = Regex("""(?i)(?:^|[/?#&_.=-])(?:preview|previews|teaser|hover|thumb[-_]?video|video[-_]?thumb|videothumb|thumbpreview|animated[-_]?thumb|mini[-_]?video|sample[-_]?clip|sprite)(?:$|[/?#&_.=-])""")
+    fun isSegmentUrl(u: String) = SEGMENT_URL.containsMatchIn(u.substringBefore('#'))
+    fun isPreviewVideo(u: String) = PREVIEW_VIDEO.containsMatchIn(u.substringBefore('#'))
+    fun isVideoUrl(u: String) = !isSegmentUrl(u) && (VIDEO_EXT.containsMatchIn(u.substringBefore('#')) || u.contains("video.twimg.com", true))
     fun isPhotoUrl(u: String) = PHOTO_EXT.containsMatchIn(u.substringBefore('#'))
     fun isHls(u: String) = RX_CRAWLER_1.containsMatchIn(u)
     fun isDash(u: String) = RX_CRAWLER_2.containsMatchIn(u)
@@ -254,6 +258,7 @@ object Extract {
     }
 
     fun mediaKindOf(u: String): Kind? = when {
+        isSegmentUrl(u) -> null
         isPhotoUrl(u) && !isVideoUrl(u) -> null
         TitleFix.isSubtitleUrl(u) -> null
         isHls(u) -> Kind.HLS
@@ -380,7 +385,7 @@ object Extract {
         ).joinToString(" ").replace(RX_CRAWLER_12, " ").trim().take(600)
         fun addVideo(u: String?, text: String? = null, kind: Kind? = null) {
             val a = abs(pageUrl, u) ?: return
-            if (TitleFix.isSubtitleUrl(a)) return
+            if (TitleFix.isSubtitleUrl(a) || isSegmentUrl(a)) return
             when {
                 isDash(a) || (kind == Kind.SERVER) -> { if (isDash(a) || YTDLP_HOSTS.containsMatchIn(a)) { server += a; kinds[a] = Kind.SERVER; putCtx(ctx, a, text) } }
                 isVideoUrl(a) -> { media += a; kinds[a] = if (isHls(a)) Kind.HLS else if (isDash(a)) Kind.SERVER else Kind.DIRECT; putCtx(ctx, a, text) }
@@ -504,7 +509,8 @@ object Extract {
             val best = us.maxByOrNull { MediaIdentity.withQuality(Found(it, pageUrl, "", Kind.DIRECT)).quality } ?: return@forEach
             us.filter { it != best }.forEach { dropVariants += it }
         }
-        media.filterNot { (it.contains("preview", true) && media.size > 1) || it in dropVariants }.ifEmpty { media.toList() }.forEach {
+        val nonPrev = media.any { !isPreviewVideo(it) && it !in dropVariants }
+        media.filterNot { (nonPrev && isPreviewVideo(it)) || it in dropVariants }.ifEmpty { media.toList() }.forEach {
             emit(it, when { isHls(it) -> Kind.HLS; isDash(it) -> Kind.SERVER; else -> Kind.DIRECT })
         }
         server.forEach { emit(it, Kind.SERVER) }

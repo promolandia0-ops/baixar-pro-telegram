@@ -60,9 +60,19 @@ object Sent {
     }
     fun isQueued(keys: Collection<String>) = keys.any { it in queued }
     val size get() = set.size
+    @Volatile var onClear: (() -> Unit)? = null
     /** Só a memória de “já enviado” (não apaga o histórico visível nem o “já pedido”). */
-    @Synchronized fun clearSentOnly() { set.clear(); canonIdx.clear(); stemIdx.clear(); file?.delete() }
-    @Synchronized fun clear() { clearSentOnly(); queued.clear(); qfile?.delete() }
+    @Synchronized fun clearSentOnly() {
+        set.clear(); canonIdx.clear(); stemIdx.clear(); file?.delete()
+        try { VisualHash.clear() } catch (_: Throwable) {}
+        try { onClear?.invoke() } catch (_: Throwable) {}
+    }
+    @Synchronized fun clear() {
+        set.clear(); canonIdx.clear(); stemIdx.clear(); file?.delete()
+        queued.clear(); qfile?.delete()
+        try { VisualHash.clear() } catch (_: Throwable) {}
+        try { onClear?.invoke() } catch (_: Throwable) {}
+    }
     @Synchronized private fun addAll(keys: Collection<String>): Int {
         val new = keys.filter { set.add(it) }
         new.forEach { index(it) }
@@ -138,7 +148,7 @@ object Sent {
         val links = URL_RE.findAll(caption).map { it.value.trimEnd('.', ',', ')', ']') }.toList()
         if (links.isEmpty()) return emptyList()
         val k = ArrayList<String>()
-        links.forEach { l -> k += "v:" + norm(l); k += bunkrKeys(l) }
+        links.forEach { l -> k += "v:" + norm(l) + MediaIdentity.mediaIdQuery(l); k += bunkrKeys(l) }
         if (links.size == 1) k += "p:" + norm(links[0])
         return k
     }

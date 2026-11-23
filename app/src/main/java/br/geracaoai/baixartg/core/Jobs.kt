@@ -524,11 +524,11 @@ object Jobs {
         items.update { l -> l.map { val s = Sent.isSent(it.f); if (s && !it.sent) it.copy(sent = true, sel = false) else if (!s && it.sent) it.copy(sent = false) else it } }
     }
 
-    fun clearHistory() { Sent.clear(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Histórico apagado." }
+    fun clearHistory() { Sent.clear(); VisualHash.clear(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Histórico apagado." }
     /** Apaga só a lista visível do Histórico (os envios feitos). A memória de “já enviado” continua. */
     fun clearHistoryList() { History.clear(); syncStatus.value = "Lista do histórico apagada." }
     /** Apaga a memória de “já enviado”: os itens voltam a poder ser baixados no navegador. */
-    fun clearSentMemory() { Sent.clearSentOnly(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Memória de já enviado apagada." }
+    fun clearSentMemory() { Sent.clear(); VisualHash.clear(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Memória de já enviado apagada." }
 
     fun stop() { stopping.value = true; job?.cancel() }
     val busy get() = job?.isActive == true

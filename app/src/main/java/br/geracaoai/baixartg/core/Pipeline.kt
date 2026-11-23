@@ -155,12 +155,29 @@ object Pipeline {
         if (list.isEmpty()) return 0
         val n: Int
         synchronized(lock) {
-            val have = items.value.filter { it.st != PS.FAIL && it.st != PS.ANALYZE && it.st != PS.CANCEL }.map { uniqueKey(it.page, it.title, it.keys, it.f) }.toHashSet()
-            val add = list.filter { have.add(uniqueKey(it.page, it.title, it.keys, it.f, it.uniq)) }.map {
-                PItem(nextId++, it.page, it.title, it.extra, expandKeys(it.page, it.keys + listOfNotNull(it.uniq.trim().takeIf { k -> k.isNotBlank() }?.let { k -> "id:$k" }), it.f), it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo)
+            val curItems = items.value.toMutableList()
+            val have = curItems.filter { it.st != PS.FAIL && it.st != PS.ANALYZE && it.st != PS.CANCEL }.map { uniqueKey(it.page, it.title, it.keys, it.f) }.toHashSet()
+            var added = 0
+            for (it in list) {
+                val uk = uniqueKey(it.page, it.title, it.keys, it.f, it.uniq)
+                if (!have.add(uk)) continue
+                val extraKey = it.uniq.trim().takeIf { k -> k.isNotBlank() }?.let { k -> "id:$k" }
+                val newKeys = expandKeys(it.page, it.keys + listOfNotNull(extraKey), it.f)
+                val sameIdx = if (it.f != null && !it.photo) curItems.indexOfFirst { ex ->
+                    !isFinal(ex.st) && !ex.photo && ex.f != null && MediaIdentity.same(ex.f, it.f)
+                } else -1
+                if (sameIdx >= 0) {
+                    val ex = curItems[sameIdx]
+                    val betterF = if (MediaIdentity.isBetter(it.f!!, ex.f!!)) it.f else ex.f
+                    val betterTitle = TitleFix.pick(ex.title, it.title).ifBlank { ex.title }
+                    curItems[sameIdx] = ex.copy(f = betterF, title = betterTitle, keys = (ex.keys + newKeys).distinct())
+                } else {
+                    curItems += PItem(nextId++, it.page, it.title, it.extra, newKeys, it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo)
+                    added++
+                }
             }
-            items.value = items.value + add
-            n = add.size
+            items.value = curItems
+            n = added
         }
         saveAsync()   // nada de arquivo na thread principal (tocar em Baixar não trava a tela)
         start()
@@ -182,8 +199,26 @@ object Pipeline {
     }
     fun retry(id: Long) { userCancel.remove(id); upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, tried = "") }; start() }
     fun retryFailed() { synchronized(lock) { items.value = items.value.map { if (it.st == PS.FAIL || it.st == PS.ANALYZE || it.st == PS.ANALYZING) { userCancel.remove(it.id); it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", tried = "") } else it } }; save(); start() }
-    /** Item pulado como repetido pela imagem: manda mesmo assim (sem a checagem visual). */
-    fun forceSend(id: Long) { userCancel.remove(id); upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, force = true, stalls = 0) }; start() }
+    /** Item pulado como repetido: baixa e envia mesmo assim, ignorando a checagem de repetido só para este item. */
+    fun forceSend(id: Long) {
+        userCancel.remove(id)
+        upd(id) { it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, force = true, stalls = 0, tried = "") }
+        start()
+    }
+    fun forceSendAllSkipped(): Int {
+        var count = 0
+        synchronized(lock) {
+            items.value = items.value.map {
+                if (it.st == PS.SKIP) {
+                    count++
+                    userCancel.remove(it.id)
+                    it.copy(st = if (it.f != null) PS.READY else PS.WAIT, msg = "", prog = 0f, force = true, stalls = 0, tried = "")
+                } else it
+            }
+        }
+        if (count > 0) { saveAsync(); start() }
+        return count
+    }
     fun clearDone() { synchronized(lock) { items.value = items.value.filter { it.st != PS.DONE } }; saveAsync() }
     fun clearFailed() {
         val gone: List<PItem>
@@ -194,15 +229,23 @@ object Pipeline {
         engine?.cancel()
         val gone: List<PItem>
         synchronized(lock) { gone = items.value.filter { it.st in WORK }; items.value = items.value.filter { it.st !in WORK } }
+        synchronized(claimed) { claimed.clear() }
         gone.forEach { releaseQueue(it) }; paused.value = false; saveAsync()
     }
     fun clearAll(alsoSentMemory: Boolean = false) {
         engine?.cancel()
+        itemJobs.values.forEach { it.cancel() }; itemJobs.clear()
         val gone: List<PItem>
         synchronized(lock) { gone = items.value; items.value = emptyList() }
+        synchronized(claimed) { claimed.clear() }
+        userCancel.clear(); beat.clear(); pendingProg.clear()
         gone.forEach { releaseQueue(it) }
         History.clear()
-        if (alsoSentMemory) { Sent.clear(); Prefs.synced = false }
+        if (alsoSentMemory) {
+            Sent.clear()
+            try { VisualHash.clear() } catch (_: Throwable) {}
+            try { Prefs.synced = false } catch (_: Throwable) {}
+        }
         paused.value = false; saveAsync()
     }
     /** Identidade única do item na fila: nunca junta dois vídeos só porque estão na mesma página. */
@@ -271,8 +314,8 @@ object Pipeline {
         return out.filter { !isPageKey(it) }.toHashSet()
     }
     private fun isPageKey(k: String) = k.startsWith("pg:") || k.startsWith("ip:") || k.startsWith("p:")
-    private fun claimKeys(t: PItem) = mediaKeysOf(t).filter { !it.startsWith("d:") && !it.startsWith("ps:") }.toHashSet()
-    private fun sentKeys(t: PItem) = mediaKeysOf(t)
+    private fun claimKeys(t: PItem) = mediaKeysOf(t).filter { !it.startsWith("d:") && !it.startsWith("hd:") && !it.startsWith("ps:") }.toHashSet()
+    private fun sentKeys(t: PItem) = mediaKeysOf(t).filter { !it.startsWith("d:") && !it.startsWith("hd:") && !it.startsWith("ps:") }.toSet()
 
 
     /**
@@ -313,6 +356,7 @@ object Pipeline {
     private fun alive(id: Long) { beat[id] = System.currentTimeMillis() }
 
     @Volatile var testMode = false
+    @Volatile var testMarkSent = false
     @Volatile var testParDown = 10
     @Volatile var testParUp = 5
     @Volatile var testResolve: (suspend (PItem) -> Found?)? = null
@@ -326,7 +370,8 @@ object Pipeline {
         synchronized(claimed) { claimed.clear() }
         userCancel.clear(); beat.clear(); itemJobs.clear()
         paused.value = false; running.value = false
-        testResolve = null; testDownload = null; testUpload = null
+        testMarkSent = false; testResolve = null; testDownload = null; testUpload = null
+        try { VisualHash.clear() } catch (_: Throwable) {}
     }
 
     @Synchronized fun start() {
@@ -464,10 +509,26 @@ object Pipeline {
                 continue
             }
             val ks = claimKeys(cur)
-            val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
-            if (dup) {
-                upd(cur.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }
-                continue
+            if (!cur.force) {
+                val dup = synchronized(claimed) { if (ks.any { it in claimed }) true else { claimed.addAll(ks); false } }
+                if (dup) {
+                    var merged = false
+                    synchronized(lock) {
+                        val list = items.value.toMutableList()
+                        val winnerIdx = list.indexOfFirst { it.id != cur.id && !isFinal(it.st) && !it.photo && it.f != null && MediaIdentity.same(it.f, f) }
+                        if (winnerIdx >= 0) {
+                            val w = list[winnerIdx]
+                            val betterF = if (MediaIdentity.isBetter(f, w.f!!)) f else w.f
+                            list[winnerIdx] = w.copy(f = betterF, keys = (w.keys + cur.keys).distinct())
+                            list.removeAll { it.id == cur.id }
+                            items.value = list
+                            merged = true
+                        }
+                    }
+                    if (!merged) upd(cur.id) { it.copy(st = PS.SKIP, msg = "mesmo item já está na fila (pulado)", prog = 0f) }
+                    else saveAsync()
+                    continue
+                }
             }
 
             // 2) Baixa no mesmo slot; o vigia de travamento só conta após chegar progresso real (prog())
@@ -611,6 +672,9 @@ object Pipeline {
         if (t.id in userCancel) { markCancelled(t, ks); return }
         testUpload?.let { fn ->
             fn(t, file)
+            if (testMarkSent) {
+                if (isPhoto(t)) Sent.markPhotoSent(sentKeys(t)) else Sent.markSent(f, sentKeys(t))
+            }
             synchronized(claimed) { claimed.removeAll(ks) }
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }
             return
@@ -622,6 +686,7 @@ object Pipeline {
             // Idempotência: confere de novo logo antes de enviar
             val fk = Jobs.fileKey(file)
             if (!t.force && ((fk != null && Sent.has(fk)) || sentBefore(t))) {
+                synchronized(claimed) { claimed.removeAll(ks) }
                 upd(t.id) { it.copy(st = PS.SKIP, prog = 0f, msg = "mesmo arquivo já enviado antes (pulado)") }
                 return
             }
