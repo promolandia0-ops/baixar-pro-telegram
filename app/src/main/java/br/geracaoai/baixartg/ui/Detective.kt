@@ -243,6 +243,7 @@ object Detective {
             if (t != null && tracing != null) { traceVia = traceVia ?: "servidor"; return }
             if (t != null) {
                 val tt = TitleFix.pick(c.title, if (c.page == null) title else null, t).ifBlank { t }
+                Trail.addOnce(listOf(c.url, pg), "achado", "detetive: servidor yt-dlp reconheceu (${c.via})")
                 withContext(Dispatchers.Main) { BrowserDetect.addFound(Found(c.url, pg, tt, Kind.SERVER, ref = pg, extra = tt)) }
                 verifiedV++; wins += "servidor"; if (c.recipe.isNotBlank()) recipesHit += c.recipe
             } else Downloader.lastProbeError?.let { lastServerErr = it }
@@ -264,6 +265,7 @@ object Detective {
             val r = ref ?: DetKnowledge.originOf(c.url)
             if (kind == Kind.SERVER) RefererHints.set(c.url, r)
             val pg = c.page ?: page; val tt = c.title?.ifBlank { null } ?: title
+            Trail.addOnce(listOf(c.url, pg), "achado", "detetive: ${c.via} • ${kind} em ${Extract.host(c.url)} • origem ${Extract.host(r ?: "").ifBlank { "nenhuma" }}")
             val f = Found(c.url, pg, tt.ifBlank { Extract.mediaTitle(c.url, "") }, kind, ref = r, extra = tt, quality = height)
             withContext(Dispatchers.Main) { BrowserDetect.addFound(f) }
             verifiedV++
@@ -486,6 +488,17 @@ object Detective {
                 log.done(if (ub > 0) St.FIXED else St.OK, if (ub > 0) "Fechei $ub janela(s)." else "nenhuma")
             }
 
+            // escondidos: por que estão escondidos; os que eram outro vídeo da mesma página voltam
+            if (full) {
+                val hid = BrowserDetect.suppressed.toList()
+                val back = BrowserDetect.recheckHidden()
+                if (hid.isNotEmpty()) {
+                    log.begin("Escondidos nesta página (${hid.size})")
+                    log.done(if (back > 0) St.FIXED else St.INFO, (if (back > 0) "$back voltaram para a lista: estavam escondidos só por serem da mesma página de outro vídeo já enviado. " else "") +
+                        "Motivos: " + hid.groupingBy { it.badge.ifBlank { "?" } }.eachCount().entries.joinToString("; ") { "${it.key} ×${it.value}" })
+                }
+            }
+
             // aprender com o vídeo de exemplo + repetir o método aprendido neste site
             learnLayer()
             applyLesson()
@@ -610,6 +623,34 @@ object Detective {
             log.done(St.INFO, "${ex.f.title.take(80)} • ${Extract.host(pg)} • baixado em $quando${if (ex.size > 0) " • " + (ex.size / 1_048_576) + " MB" else ""}")
             var l = DetLearn.analyze(pg, media, ex.f.kind.name, ex.f.ref)
 
+            // o rastro: exatamente como este vídeo foi achado, escondido/mostrado, baixado e enviado
+            val hhmm = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale("pt", "BR"))
+            val ev = Trail.of(listOf(media, pg))
+            log.begin("Rastro deste vídeo, do site até o Telegram")
+            var origin = ""
+            if (ev.isNotEmpty()) {
+                log.done(St.OK, ev.joinToString("\n") { "• " + hhmm.format(java.util.Date(it.t)) + " " + it.step + if (it.detail.isNotBlank()) ": " + it.detail else "" })
+                origin = ev.firstOrNull { it.step == "achado" }?.detail.orEmpty()
+            } else {
+                val it0 = Pipeline.items.value.lastOrNull { p -> p.f?.url?.let { u -> u == media || DetLearn.sameVideo(u, media) } == true }
+                log.done(St.INFO, "Este vídeo foi baixado antes do rastro existir (cada vídeo novo, a partir desta versão, guarda o caminho inteiro). O que ficou guardado: " + buildString {
+                    append("link ${ex.f.kind} em ${Extract.host(media)}; origem usada: ${Extract.host(ex.f.ref ?: "").ifBlank { "nenhuma" }}")
+                    if (it0 != null) {
+                        if (it0.keys.any { k -> k.startsWith("ip:") }) append("; foi visto na própria página do vídeo (o player pediu o vídeo)")
+                        if (it0.tried.isNotBlank()) append("; download tentou: " + it0.tried.split(',').joinToString(" → ") { n -> Pipeline.stepName(n) } + " (o último funcionou)")
+                    }
+                })
+            }
+            l = l.copy(via = when {
+                origin.contains("rede do navegador") || origin.contains("service worker") || origin.contains("lido na página") || origin.contains("Content-Type") -> "play"
+                origin.contains("card") && origin.contains("servidor") -> "servidor"
+                origin.contains("card") -> "card"
+                origin.contains("pedaços") -> "mse"
+                origin.startsWith("detetive") -> origin.substringAfter("detetive: ").substringBefore(' ')
+                else -> l.via
+            })
+            if (origin.isNotBlank()) { log.begin("Como ele foi achado"); log.done(St.OK, origin + ". Vou repetir exatamente isso.") }
+
             log.begin("Baixar o começo do vídeo de novo (mesmo link, mesma origem)")
             val (ok, det) = retest(ex.f)
             log.done(if (ok) St.OK else St.INFO, det)
@@ -621,7 +662,7 @@ object Detective {
                 val back = page
                 log.begin("Abrir a página desse vídeo e ver por onde o app acha ele")
                 if (PageKey.norm(pg) != PageKey.norm(page)) { web.loadUrl(pg); waitLoad() }
-                val via = traceExample(media, l)
+                val via = if (l.via.isNotBlank() && origin.isNotBlank()) l.via else traceExample(media, l)
                 log.done(if (via != null) St.FIXED else St.INFO, if (via != null) "Achei o mesmo vídeo de novo ${viaText(via).trim()}. Vou usar esse caminho nos outros vídeos." else "Não achei o mesmo vídeo de novo por nenhum caminho automático (talvez tenha sido achado depois de você dar play ou navegar). Uso o formato do link e a origem.")
                 if (via != null) l = l.copy(via = via)
                 resetPage()
@@ -737,7 +778,12 @@ object Detective {
                 addCand(Cand(u, CK.MEDIA, DetScan.classify(u) ?: DetScan.T.MAYBE, "aprendido", l.refFixed, l.ref))
                 did = "montei o endereço do vídeo desta página"
             }
-            if (l.via == "play" && l.kind != "MSE") { playAll(); waitFor(6_000) }
+            if (l.via == "play" && l.kind != "MSE") {
+                did = "dei play e fiquei ouvindo os pedidos do player, como no exemplo"
+                playAll(); if (!waitFor(15_000)) { playAll(); waitFor(8_000) }
+            }
+            if (l.via == "card") { did = "li os cards da página e abri cada um, como no exemplo"; hooks.collect(); waitFor(12_000) }
+            if (l.via == "mse") { did = "dei play para gravar os pedaços, como no exemplo"; playAll(); waitFor(12_000) }
             if (l.via == "servidor" && l.kind != "SERVER") addCand(Cand(page, CK.SERVER, null, "aprendido", null, DetKnowledge.Ref.PAGE))
             when (l.kind) {
                 "SERVER" -> { addCand(Cand(page, CK.SERVER, null, "aprendido", null, DetKnowledge.Ref.PAGE)); did = did.ifBlank { "vou pedir ao servidor como no exemplo" } }
@@ -819,7 +865,10 @@ object Detective {
 
         fun result(fixed: String?, lessonUrl: String? = null, lessonTitle: String = ""): Result {
             val v = (videos() - startV).coerceAtLeast(0); val p = (BrowserDetect.photos.size - startP).coerceAtLeast(0)
+            val l = lesson?.takeIf { it.site == host }
             val verdict = fixed ?: when {
+                v == 0 && l != null && l.via == "play" -> "Neste site o vídeo de exemplo foi achado quando o player tocou. Dê play no vídeo, deixe tocar uns 10 segundos e abra a lista (se for para Escondidos, toque em Mostrar escondidos)."
+                v == 0 && l != null && l.via == "card" -> "Neste site o vídeo de exemplo veio dos cards da página de lista. Abra a página que mostra a lista de vídeos: o app abre cada um sozinho."
                 v > 0 || p > 0 -> "Pronto: " + listOfNotNull(if (v > 0) "$v vídeo(s)" else null, if (p > 0) "$p foto(s)" else null).joinToString(" e ") + " na lista."
                 drmMaybe -> "Não achei o vídeo e a página tem sinais de DRM. Copie o diagnóstico e mande no chat."
                 pw > 0 -> "Não achei vídeo. A página pede login: entre na conta e abra a página do vídeo."

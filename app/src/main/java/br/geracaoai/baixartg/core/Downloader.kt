@@ -216,6 +216,7 @@ object Downloader {
 
     suspend fun direct(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
         Net.http.newCall(req(url, referer)).await().use { r ->
+            Trail.here("arquivo direto", "HTTP ${r.code} • ${r.header("Content-Type") ?: "?"} • ${Trail.host(url)} • origem ${Trail.host(referer).ifBlank { "nenhuma" }}")
             if (!r.isSuccessful) throw DlException("HTTP ${r.code} ao baixar")
             val ct = r.header("Content-Type")
             if (ct != null && ct.contains("text/html", true)) throw DlException("O link devolveu uma página, não um vídeo")
@@ -318,6 +319,7 @@ object Downloader {
                 val j = JSONObject(r.body?.string() ?: "{}")
                 if (!j.optBoolean("ok")) throw DlException(j.optString("error", "Servidor não conseguiu").take(200))
                 val title = j.optString("title", "video")
+                Trail.here("servidor yt-dlp", "reconheceu (${j.optString("extractor").ifBlank { "?" }}) • entrega: ${j.optString("method")} • origem enviada ${Trail.host(RefererHints.get(pageUrl) ?: pageUrl)}")
                 return when (j.optString("method")) {
                     "redirect" -> direct(j.getString("url"), pageUrl, dir, title, progress)
                     "proxy" -> {
@@ -383,6 +385,7 @@ object Downloader {
         if (pl.contains("#EXT-X-STREAM-INF")) {
             val v = pickVariant(plUrl, pl, maxHeight) ?: throw DlException("Playlist sem variantes")
             audioUrl = audioRendition(plUrl, pl, v.audio)
+            Trail.here("HLS: qualidade", "lista com ${Regex("#EXT-X-STREAM-INF").findAll(pl).count()} qualidade(s) → escolhida ${if (v.height > 0) "${v.height}p" else "a maior"}${if (audioUrl != null) " + áudio separado" else ""}")
             plUrl = v.url; pl = text(plUrl, referer, headers)
         }
         val base = File(dir, safe(title) + "_" + System.nanoTime())
@@ -412,6 +415,7 @@ object Downloader {
             l.isNotEmpty() && !l.startsWith("#") -> { segs += Seg(Extract.abs(plUrl, l) ?: l, key, iv, seq); seq++ }
         }
         if (segs.isEmpty()) throw DlException("Playlist vazia")
+        Trail.here("HLS: pedaços", "${segs.size} pedaço(s)${if (mapUrl != null) " fMP4" else " TS"}${if (segs.any { it.key != null }) " com criptografia AES-128 (chave baixada com a mesma origem)" else ""} • de ${Trail.host(segs.first().url)} • origem ${Trail.host(referer).ifBlank { "nenhuma" }}")
         val keys = HashMap<String, ByteArray>()
         segs.mapNotNull { it.key }.distinct().forEach { keys[it] = retry { bytes(it, referer, headers) } }
         val out = File(outBase + if (mapUrl != null) ".mp4" else ".ts")

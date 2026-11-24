@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.27
+- **Rastro de cada vídeo, de ponta a ponta** (fica só no celular): por onde foi achado (o player pediu pela rede do navegador, service worker, lista de pedidos lida da página, tipo da resposta, card da listagem → HTML / página oculta com play / servidor, gravação em pedaços, detetive), se foi escondido e por quê, quando você mandou baixar, cada tentativa de download (link direto, lista HLS com qualidade escolhida e número de pedaços, AES, servidor yt-dlp, gravação pelo navegador; erro ou sucesso, tamanho e tipo do arquivo) e o envio ao Telegram.
+- **Detetive com vídeo de exemplo** mostra esse rastro completo, diz como o vídeo foi achado e repete exatamente o mesmo caminho (ex.: dar play e ouvir os pedidos do player; abrir os cards da lista; servidor).
+- **Escondidos explicados e corrigidos**: cada escondido mostra o motivo (mesmo link, mesmo arquivo, mesma página, mesmo título — e de qual vídeo). Quando só a PÁGINA batia com um vídeo já enviado mas o vídeo é outro (sites com vários vídeos no mesmo endereço), ele não é mais escondido; os que já estavam escondidos assim voltam para a lista quando o detetive roda.
+
 ## 1.9.26
 - **Detetive de vídeos e fotos** (menu ⋮ → "Detetive: achar vídeos e fotos", ou "Nenhum vídeo? Chamar o detetive"). Investiga camada por camada e corrige sozinho:
   - **Login**: se a página pede login, a janela vira uma faixa pequena; você entra na conta e ele volta sozinho para a página que você tinha aberto.

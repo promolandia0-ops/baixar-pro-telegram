@@ -151,7 +151,7 @@ object BrowserRuntime {
                         BrowserDiag.media("sw", u)
                         if (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u)) MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-sw")
                         if (Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u)) && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
-                            BrowserDetect.intercepted(u, pg, "")
+                            BrowserDetect.intercepted(u, pg, "", src = "pedido do service worker do site")
                             br.geracaoai.baixartg.core.PlayCapture.record(u, pg, hdrs["Referer"] ?: pg)
                         }
                     } catch (_: Throwable) {}
@@ -334,7 +334,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         val u = arr.optString(i)
                         if (!u.startsWith("http")) continue
                         BrowserDiag.media("página", u)
-                        if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "")
+                        if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "", src = "lido na página (lista de pedidos do player / <video>)")
                     }
                     // listas sem ".m3u8"/".mpd" no endereço, reconhecidas pelo Content-Type da resposta
                     val ct = o.optJSONArray("c") ?: org.json.JSONArray()
@@ -344,7 +344,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         if (!u.startsWith("http")) continue
                         BrowserDiag.media("página", u, t)
                         val k = if (t.contains("mpegurl", true)) Kind.HLS else if (t.contains("dash", true)) Kind.SERVER else null
-                        if (k != null && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "", k)
+                        if (k != null && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "", k, src = "pedido reconhecido pelo tipo da resposta (Content-Type)")
                     }
                 } catch (_: Exception) {}
             }
@@ -605,7 +605,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     }
                     if (u.startsWith("http") && Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u))) {
                         if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
-                            BrowserDetect.intercepted(u, pg, "")
+                            BrowserDetect.intercepted(u, pg, "", src = "o player pediu o vídeo pela rede do navegador (origem ${br.geracaoai.baixartg.core.Trail.host(hdrs["Referer"] ?: pg)})")
                             val ref = hdrs["Referer"] ?: pg
                             br.geracaoai.baixartg.core.PlayCapture.record(u, pg, ref)
                         }

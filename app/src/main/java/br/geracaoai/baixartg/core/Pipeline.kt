@@ -318,6 +318,17 @@ object Pipeline {
         }
         return t?.st?.name
     }
+    /** Por que um vídeo seria escondido: quais marcas bateram e com quais itens da fila/enviados. */
+    data class HideWhy(val keys: List<String>, val items: List<PItem>, val canonical: Boolean)
+    fun hideWhy(f: Found?, keys: Collection<String>): HideWhy {
+        val all = (keys + (f?.let { Sent.keysOf(it) } ?: emptyList())).filter { it.isNotBlank() }.distinct()
+        val ks = all.toHashSet()
+        val its = synchronized(lock) { items.value.filter { t -> (t.st in WORK || t.st == PS.DONE) && identityKeys(t).any { it in ks } } }
+        val itemK = its.flatMap { t -> identityKeys(t).filter { it in ks } }
+        val canon = f != null && f.kind != Kind.PHOTO && !all.any { Sent.has(it) } && Sent.hasCanonical(f)
+        return HideWhy((all.filter { Sent.has(it) } + itemK).distinct(), its, canon)
+    }
+
     fun hideReason(f: Found?, keys: Collection<String>): BrowserHide.Reason =
         BrowserHide.decide(isActiveFor(keys), confirmedSentFor(f, keys), finishedStatusFor(keys))
 
@@ -325,6 +336,7 @@ object Pipeline {
         if (ks.isNotEmpty()) synchronized(claimed) { claimed.removeAll(ks) }
         var gone: PItem? = null
         upd(t.id) { it.copy(st = PS.SKIP, msg = msg, prog = 0f, speed = 0).also { n -> gone = n } }
+        Trail.add(listOf(t.f?.url, t.page), "fila: pulado", msg)
         gone?.let { releaseQueue(it) }
     }
 
@@ -611,6 +623,7 @@ object Pipeline {
     }
 
     private fun markFailed(t: PItem, ks: Set<String>, msg: String) {
+        Trail.add(listOf(t.f?.url, t.page), "fila: falhou", msg)
         if (ks.isNotEmpty()) synchronized(claimed) { claimed.removeAll(ks) }
         var toRelease: PItem? = null
         upd(t.id) { cur ->
@@ -635,6 +648,10 @@ object Pipeline {
         (prev.split(',').filter { it.isNotBlank() } + step).distinct().joinToString(",")
 
     private fun hasTried(tried: String, step: String) = tried.split(',').any { it == step }
+    fun stepName(n: String) = when (n) {
+        "direct" -> "link direto"; "server" -> "servidor yt-dlp"; "hls" -> "lista HLS"; "navegador" -> "gravação pelo navegador"
+        "play" -> "link capturado quando o player tocou"; "resolve" -> "reabrir a página"; else -> n
+    }
 
     private suspend fun downloadOne(t: PItem, dir: File): File? {
         testDownload?.let { fn -> return fn(t, dir) }
@@ -692,17 +709,24 @@ object Pipeline {
                     else Downloader.download(f.copy(kind = Kind.HLS), dir, Prefs.server, 0, fast = true, prog())
                 }
             if (canMse && !mseFirst) steps += "navegador" to mseStep
+            val tu = listOf(f.url, t.page, f.page)
+            Trail.add(tu, "download: começou", "link ${f.kind} em ${Trail.host(f.url)} • origem ${Trail.host(f.ref ?: f.page).ifBlank { "nenhuma" }} • ordem: ${steps.joinToString(" → ") { it.first }}")
             for ((name, fn) in steps) {
                 currentCoroutineContext().ensureActive()
                 tried = markTried(tried, name)
                 upd(t.id, persist = false) { it.copy(tried = tried, msg = if (f.kind == Kind.PHOTO) "baixando foto…" else "baixando ($name)…") }
-                try { file = finish(fn()); lastErr = null; break } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { lastErr = e; file?.delete(); file = null }
+                try {
+                    file = finish(withContext(Trail.Ctx(tu)) { fn() }); lastErr = null
+                    Trail.add(tu, "download: funcionou com \"${stepName(name)}\"", "${fmt(file!!.length())} • arquivo ${Downloader.sniffFile(file!!)}")
+                    break
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { lastErr = e; file?.delete(); file = null; Trail.add(tu, "download: \"${stepName(name)}\" falhou", e.message?.take(160) ?: e.javaClass.simpleName) }
             }
             if (file == null && f.kind != Kind.PHOTO && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && !hasTried(tried, "resolve")) {
                 tried = markTried(tried, "resolve")
                 upd(t.id, persist = false) { it.copy(tried = tried, msg = "reabrindo página…") }
                 val nf = withTimeoutOrNull(60_000) { PageResolver.resolveFull(f.page, t.title, t.extra) }
+                Trail.add(listOf(f.url, t.page, f.page, nf?.url), "download: reabriu a página", if (nf != null) "achou link novo ${nf.kind} em ${Trail.host(nf.url)}" else "não achou link novo")
                 if (nf != null) {
                     f = nf
                     upd(t.id) { it.copy(f = nf, title = TitleFix.pick(nf.title, it.title).ifBlank { it.title }, tried = tried) }
@@ -775,6 +799,7 @@ object Pipeline {
                     }
                 }
             }
+            Trail.add(listOf(f.url, t.page, f.page), "Telegram: enviando", "${fmt(file.length())} para as Mensagens Salvas")
             val cap = f.title + "\n" + f.page + (if (f.url != f.page && !Bunkr.isCdn(f.url) && f.kind != Kind.MEGA) "\n" + f.url else "")
             alive(t.id)
             var lastP = -1f; var lastT = System.currentTimeMillis(); var lastU = 0f
@@ -798,6 +823,7 @@ object Pipeline {
                 stalled(t, ks, "envio"); return
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
             if (isPhoto(t)) Sent.markPhotoSent(sentKeys(t) + listOfNotNull(fk)) else Sent.markSent(f, sentKeys(t) + listOfNotNull(fk)); History.add(f, size)
+            Trail.add(listOf(f.url, t.page, f.page), "Telegram: enviado ✓", "marcas gravadas como já enviado: " + sentKeys(t).plus(Sent.keysOf(f)).map { it.substringBefore(':') }.distinct().joinToString())
             synchronized(claimed) { claimed.removeAll(claimKeys(t)) }
             if (vfp != null) VisualHash.markSent(t.id, vfp)
             upd(t.id) { it.copy(st = PS.DONE, prog = 1f, msg = "", speed = 0) }

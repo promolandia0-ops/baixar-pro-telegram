@@ -71,6 +71,7 @@ object BrowserDiag {
         appendLine("coleta: ${collects}× última=${collectMs}ms pior=${collectMaxMs}ms  <img> na página=$lastImgs")
         appendLine("fotos (coletor ${PhotoGrab.VERSION}): imagens brutas=$lastRaw candidatas=$lastCands na lista=$lastKept")
         appendLine("script de fotos: ${if (BrowserDetect.photosOn.value) "ligado" else "desligado"}  rodou=$photoCalls respondeu=$photoReplies erros=$photoErrs" + (if (lastPhotoErr.isNotBlank()) "  último erro: $lastPhotoErr" else ""))
+        if (BrowserDetect.suppressed.isNotEmpty()) appendLine("escondidos: " + BrowserDetect.suppressed.toList().groupingBy { it.badge.ifBlank { "?" }.replace(Regex("«[^»]*»"), "«…»") }.eachCount().entries.joinToString("; ") { "${it.key} ×${it.value}" })
         if (counters.isNotEmpty()) appendLine("contadores: " + counters.entries.sortedBy { it.key }.joinToString("; ") { "${it.key}×${it.value.get()}" })
         if (photoRejects.isNotEmpty()) appendLine("fotos descartadas: " + photoRejects.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
         if (br.geracaoai.baixartg.core.BrowserProbeStats.fails.isNotEmpty()) appendLine("falhas ao medir foto: " + br.geracaoai.baixartg.core.BrowserProbeStats.fails.entries.sortedByDescending { it.value.get() }.joinToString("; ") { "${it.key}×${it.value.get()}" })
@@ -315,6 +316,19 @@ object BrowserDetect {
             for (i in photos.indices) if (photos[i].sent) photos[i] = photos[i].copy(sent = false)
         }
     }
+    /** Confere de novo os escondidos: os que só batiam pela página (outro vídeo) voltam para a lista. Só thread principal. */
+    fun recheckHidden(): Int {
+        val back = suppressed.toList().filter { d -> try { wrongHide(d.f, hideKeys(d.f, d.keys)) } catch (_: Exception) { false } }
+        if (back.isEmpty()) return 0
+        suppressed.removeAll(back.toSet()); alreadyHere.intValue = suppressed.size
+        synchronized(seenCards) { back.forEach { d -> d.keys.forEach { k -> if (keys[k]?.startsWith("x:") == true) keys.remove(k) } } }
+        back.forEach { d ->
+            Trail.add(listOf(d.f.url, d.f.page), "voltou dos escondidos", "era outro vídeo na mesma página")
+            if (list.none { it.key == d.key }) list += d.copy(sent = false, sel = matches(d.f), badge = "")
+        }
+        return back.size
+    }
+
     fun showHidden(): Int {
         val bring = synchronized(this) { suppressed.toList().also { suppressed.clear() } }
         alreadyHere.intValue = 0
@@ -325,6 +339,7 @@ object BrowserDetect {
         for (d in bring) {
             if (list.none { it.key == d.key }) {
                 list += d.copy(sent = false, sel = true, force = true, badge = d.badge.ifBlank { "escondido antes" })
+                Trail.add(listOf(d.f.url, d.f.page), "você tocou em Mostrar escondidos", d.badge)
                 n++
             }
         }
@@ -532,18 +547,58 @@ object BrowserDetect {
 
     private fun hideKeys(f: Found, ks: List<String>): List<String> =
         ks + Sent.keysOf(f) + ("pg:" + pgNorm(f.url)) + (if (f.page.isNotBlank() && f.page != browsing) listOf("pg:" + pgNorm(f.page)) else emptyList())
-    private fun hideReasonOf(f: Found, ks: List<String>): BrowserHide.Reason = Pipeline.hideReason(f, hideKeys(f, ks))
+    private val PAGE_KEYS = listOf("ip:", "p:", "pg:", "t:", "card:")
+    private fun mediaIds(u: String) = MediaIdentity.keys(Found(u, "", "", Kind.DIRECT)).filter { it.startsWith("m:") || it.startsWith("s:") }.toSet()
+    /**
+     * Escondido "por engano": só a PÁGINA (ou o título) bate com um vídeo já enviado/na fila, mas o vídeo é outro.
+     * Acontece em sites onde vários vídeos ficam no mesmo endereço de página: depois do 1º, todos iam para Escondidos.
+     */
+    private fun wrongHide(f: Found, hk: List<String>): Boolean {
+        if (f.kind == Kind.PHOTO || f.url == f.page || f.page.isBlank() || Extract.isVideoUrl(f.page)) return false
+        val w = Pipeline.hideWhy(f, hk)
+        if (w.canonical || w.keys.isEmpty() || !w.keys.all { k -> PAGE_KEYS.any { k.startsWith(it) } }) return false
+        val others = w.items.mapNotNull { it.f?.url }.filter { it.startsWith("http") && Sent.norm(it) != Sent.norm(f.page) }
+        if (others.isEmpty()) return false
+        val mine = mediaIds(f.url)
+        return others.none { o -> DetLearn.sameVideo(o, f.url) || mediaIds(o).intersect(mine).isNotEmpty() }
+    }
+    private fun hideReasonOf(f: Found, ks: List<String>): BrowserHide.Reason {
+        val hk = hideKeys(f, ks)
+        val r = Pipeline.hideReason(f, hk)
+        if (BrowserHide.shouldHide(r) && wrongHide(f, hk)) {
+            Trail.addOnce(listOf(f.url, f.page), "não escondido", "a página é a mesma de um vídeo já enviado/na fila, mas este vídeo é outro: liberado")
+            return BrowserHide.Reason.NONE
+        }
+        return r
+    }
+    /** Motivo em português de um item escondido (aparece na aba Escondidos e no rastro). */
+    fun hideWhyText(f: Found, ks: List<String>): String {
+        val hk = hideKeys(f, ks)
+        val w = Pipeline.hideWhy(f, hk)
+        val active = Pipeline.isActiveFor(hk)
+        val kinds = w.keys.map { k -> when {
+            k.startsWith("v:") || k.startsWith("c:") || k.startsWith("m:") || k.startsWith("u:") -> "mesmo link de vídeo"
+            k.startsWith("s:") || k.startsWith("ps:") -> "mesmo nome de arquivo"
+            k.startsWith("ip:") || k.startsWith("p:") || k.startsWith("pg:") || k.startsWith("card:") -> "mesma página"
+            k.startsWith("t:") -> "mesmo título"
+            else -> k.substringBefore(':')
+        } }.distinct() + (if (w.canonical) listOf("mesmo vídeo em outra qualidade/link") else emptyList())
+        val who = w.items.firstOrNull()?.let { " de «" + it.title.take(50) + "» (" + (if (it.st == Pipeline.PS.DONE) "enviado" else "na fila") + ")" }.orEmpty()
+        return (if (active) "na fila agora" else "já enviado") + ": " + kinds.ifEmpty { listOf("marca de já enviado") }.joinToString(" + ") + who
+    }
     /** Só esconde se está ATIVO na fila agora ou se o envio foi confirmado. FAIL/SKIP/CANCEL e queued_keys sozinhos não escondem. */
     private fun blocked(f: Found, ks: List<String>): Boolean = BrowserHide.shouldHide(hideReasonOf(f, ks))
     private fun rememberHidden(card: String, f: Found, pk: List<String>, reason: BrowserHide.Reason) {
         val k = "card:" + normPage(card)
-        if (suppressed.none { it.key == k }) suppressed += Det(k, f, keys = pk, badge = BrowserHide.badge(reason).orEmpty())
+        val why = try { hideWhyText(f, pk) } catch (_: Exception) { "" }
+        if (suppressed.none { it.key == k }) { suppressed += Det(k, f, keys = pk, badge = why.ifBlank { BrowserHide.badge(reason).orEmpty() }); Trail.addOnce(listOf(f.url, f.page, card), "escondido", why) }
         alreadyHere.intValue = suppressed.size
     }
 
     /** Some da lista na hora, grava como "já pedido" e entra na fila (se houver envio rodando, entra assim que ele terminar). */
     private fun dispatch(ds: List<Det>) {
         if (ds.isEmpty()) return
+        ds.forEach { d -> Trail.add(listOf(d.f.url, d.f.page), "você mandou baixar", if (d.state == 0) "${d.f.kind} pronto em ${Trail.host(d.f.url)}${if (d.force) " (mesmo já enviado antes)" else ""}" else "ainda carregando: a fila abre a página sozinha") }
         ds.forEach { d -> val ak = allKeys(d); Sent.markQueued(ak); synchronized(seenCards) { ak.forEach { k -> if (!keys.containsKey(k)) keys[k] = "x:" + d.key } } }
         // fila persistente: resolvidos vão direto para baixar/enviar; os "carregando…" a fila abre a página sozinha
         Pipeline.add(ds.map { d ->
@@ -579,11 +634,12 @@ object BrowserDetect {
     fun setAll(v: Boolean) { for (i in list.indices) { val d = list[i]; val nv = v && !d.sent; if (d.sel != nv) list[i] = d.copy(sel = nv) } }
 
     /** Mídia interceptada pelo navegador (pedido de rede de vídeo). */
-    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null, force: Boolean = false) {
+    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null, force: Boolean = false, src: String = "navegador") {
         if (page.isNotBlank()) browsing = page
         if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
-        if (!force && BrowserGrouping.isFilteredOutVideoUrl(url)) return
+        if (!force && BrowserGrouping.isFilteredOutVideoUrl(url)) { Trail.addOnce(listOf(url, page), "visto e ignorado", "$src • parecia prévia/anúncio/miniatura"); return }
         val kind = Extract.mediaKindOf(url) ?: kindHint ?: return
+        Trail.addOnce(listOf(url, page), "achado", "$src • $kind em ${Trail.host(url)} • página ${Trail.host(page)}")
         val info = pageInfo[normPage(page)]
         val t = TitleFix.pick(info?.first, title).ifBlank { Extract.mediaTitle(url, "") }
         val extra = listOfNotNull(info?.first, info?.second, TitleFix.clean(title)).filter { it.isNotBlank() }.distinct().joinToString(" ")
@@ -758,8 +814,8 @@ object BrowserDetect {
                 val ok = withTimeoutOrNull(BrowserHide.LOADING_TIMEOUT_MS) { gate.withPermit {
                     var t = TitleFix.pick(title, cardCtx.take(150))
                     val tEarly = t.ifBlank { TitleFix.pick(pageInfo[normPage(page)]?.first, Extract.fileName(card)).ifBlank { "vídeo" } }
-                    if (Extract.isVideoUrl(card)) { publish(Found(card, page, tEarly, Extract.mediaKindOf(card) ?: Kind.DIRECT, ref = page, extra = tEarly)); return@withPermit }
-                    if (Extract.YTDLP_HOSTS.containsMatchIn(card)) { publish(Found(card, card, tEarly, Kind.SERVER, extra = tEarly)); return@withPermit }
+                    if (Extract.isVideoUrl(card)) { Trail.addOnce(listOf(card, page), "achado", "link de vídeo direto num card da página ${Trail.host(page)}"); publish(Found(card, page, tEarly, Extract.mediaKindOf(card) ?: Kind.DIRECT, ref = page, extra = tEarly)); return@withPermit }
+                    if (Extract.YTDLP_HOSTS.containsMatchIn(card)) { Trail.addOnce(listOf(card, page), "achado", "card de site que o servidor conhece (${Trail.host(card)})"); publish(Found(card, card, tEarly, Kind.SERVER, extra = tEarly)); return@withPermit }
                     val html = try {
                         Net.browser.newCall(Request.Builder().url(card).header("Referer", page).build()).await().use { r ->
                             val ct = r.header("Content-Type") ?: ""
@@ -772,22 +828,25 @@ object BrowserDetect {
                     val vids = pr?.let { r -> r.videos.map { MediaIdentity.withQuality(it) }.filter { isRealVideo(it) && !it.url.contains("preview", true) } }.orEmpty()
                     val best = vids.filter { it.kind != Kind.SERVER || vids.none { o -> o.kind != Kind.SERVER } }
                         .reduceOrNull { a, b -> if (MediaIdentity.isBetter(b, a)) b else a }
-                    if (best != null) { publish(best.copy(page = card, title = t, extra = listOf(ctxAll, best.extra).joinToString(" ").trim()), listOf("ip:" + normPage(card))); return@withPermit }
+                    if (best != null) { Trail.addOnce(listOf(best.url, card, page), "achado", "card da página ${Trail.host(page)} → o app abriu a página do card (HTML) e achou ${best.kind} em ${Trail.host(best.url)}"); publish(best.copy(page = card, title = t, extra = listOf(ctxAll, best.extra).joinToString(" ").trim()), listOf("ip:" + normPage(card))); return@withPermit }
                     // "Só fotos": não abre página oculta nem servidor para card de vídeo (só pesaria; os vídeos ficam escondidos)
                     if (mode.intValue == 1) { markFailed(card); return@withPermit }
                     // vídeo só carrega depois de abrir a página e tocar em "assistir"/play: WebView oculto com play automático
                     val (realTitle, wv) = PageResolver.viaWebView(card) { u -> JsRender.render(u, 20_000, play = true) }
                     val tt = TitleFix.pick(realTitle, t).ifBlank { t }
                     if (wv != null) {
+                        Trail.addOnce(listOf(wv.url, card, page), "achado", "card → página oculta com play automático → ${wv.kind} em ${Trail.host(wv.url)}")
                         publish(wv.copy(page = card, ref = wv.ref ?: card, title = tt, extra = listOf(tt, ctxAll, wv.extra).joinToString(" ").trim()), listOf("ip:" + normPage(card)))
                         return@withPermit
                     }
                     val pt = withTimeoutOrNull(40_000) { Downloader.probe(Prefs.server, card, Net.browserSlow) }
+                    if (pt != null) Trail.addOnce(listOf(card, page), "achado", "card → servidor yt-dlp reconheceu a página")
                     if (pt != null) publish(Found(card, card, TitleFix.pick(tt, pt).ifBlank { pt }, Kind.SERVER, extra = listOf(ctxAll, pt).joinToString(" ")), listOf("ip:" + normPage(card)))
                     else {
                         val snap = MseCapture.snapshot(card)
                         if (snap.hasMse || snap.hasJsChallenge || snap.hasSpecialHeader || snap.manifests.isNotEmpty() || snap.rangesOrDirect.isNotEmpty() ||
                             Downloader.lastProbeError?.contains("403") == true) {
+                            Trail.addOnce(listOf(card, page), "achado", "card → vídeo montado em pedaços (será gravado pelo navegador)")
                             publish(Found(card, card, tt, Kind.MSE, ref = card, extra = ctxAll), listOf("ip:" + normPage(card)))
                         } else markFailed(card)
                     }
