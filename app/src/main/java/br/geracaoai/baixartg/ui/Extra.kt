@@ -296,12 +296,13 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             val page = v.url ?: return
             if (!page.startsWith("http") || left <= 0) return
             left--
-            v.evaluateJavascript("(function(){try{var n=window.__bptNet||[];var i=window.__bptNetRd||0;window.__bptNetRd=n.length;var c=window.__bptNetCt||[];var j=window.__bptNetCtRd||0;window.__bptNetCtRd=c.length;return JSON.stringify({n:n.slice(i),c:c.slice(j),h:window.__bptMseHook?1:0,m:window.__bptMseActive?1:0})}catch(e){return '{}'}})()") { raw ->
+            v.evaluateJavascript("(function(){try{var n=window.__bptNet||[];var i=window.__bptNetRd||0;window.__bptNetRd=n.length;var c=window.__bptNetCt||[];var j=window.__bptNetCtRd||0;window.__bptNetCtRd=c.length;var vs=[],seen=window.__bptVsSeen=window.__bptVsSeen||{};var el=document.querySelectorAll('video,video source,audio source');for(var k=0;k<el.length&&k<40;k++){var s=el[k].currentSrc||el[k].src||'';if(/^https?:/i.test(s)&&!seen[s]){seen[s]=1;vs.push(s)}}return JSON.stringify({n:n.slice(i).concat(vs),c:c.slice(j),h:window.__bptMseHook?1:0,m:window.__bptMseActive?1:0,v:document.getElementsByTagName('video').length})}catch(e){return '{}'}})()") { raw ->
                 try {
                     val js = org.json.JSONTokener(raw ?: "").nextValue() as? String ?: "{}"
                     val o = org.json.JSONObject(js)
                     if (o.optInt("h") == 0) BrowserDiag.inc("gancho da página ausente")
                     if (o.optInt("m") == 1) BrowserDiag.inc("player usa MediaSource")
+                    BrowserDiag.videoTags = o.optInt("v", BrowserDiag.videoTags)
                     val arr = o.optJSONArray("n") ?: org.json.JSONArray()
                     for (i in 0 until arr.length()) {
                         val u = arr.optString(i)

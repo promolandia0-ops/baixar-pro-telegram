@@ -29,11 +29,12 @@ object BrowserDiag {
     private fun m() = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
     val photoRejects = m(); val counters = m()
     @Volatile var lastRaw = 0; @Volatile var lastCands = 0; @Volatile var lastKept = 0; @Volatile var photoCalls = 0; @Volatile var photoReplies = 0; @Volatile var photoErrs = 0; @Volatile var lastPhotoErr = ""
+    @Volatile var videoTags = -1
     @Volatile var lastImgs = -1; @Volatile var collectMs = 0L; @Volatile var collectMaxMs = 0L; @Volatile var collects = 0
     fun inc(k: String, n: Int = 1) { counters.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     /** Página nova: contagens recomeçam (antes somavam todas as páginas e confundiam). */
-    fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; lastRaw = 0; lastCands = 0; lastKept = 0; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
+    fun resetPage() { videoTags = -1; photoRejects.clear(); counters.clear(); lastImgs = -1; lastRaw = 0; lastCands = 0; lastKept = 0; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
     private val MEDIA_TYPE = Regex("""(?i)\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|ts|m4s|m4a|aac|key)(?:$|[?#/])""")
     /**
      * Pedido de mídia visto pelo navegador (sem link): de onde veio, o tipo e o que o app fez com ele.
@@ -61,6 +62,7 @@ object BrowserDiag {
         appendLine("modo: ${listOf("só vídeos", "só fotos", "vídeos e fotos").getOrElse(BrowserDetect.mode.intValue) { "?" }}  nome: ${if (BrowserDetect.term.value.isBlank()) "-" else "sim"}")
         appendLine("lista: ${BrowserDetect.list.size} vídeos${if (BrowserDetect.mode.intValue == 1) " (escondidos: Só fotos)" else ""}, ${BrowserDetect.photos.size} fotos, carregando=${BrowserDetect.pending.intValue}, já na fila/enviados nesta página=${BrowserDetect.alreadyHere.intValue}")
         appendLine("páginas ocultas vivas: ${br.geracaoai.baixartg.core.JsRender.alive.get()} (fila: ${br.geracaoai.baixartg.core.JsRender.aliveQueue.get()})")
+        appendLine("players <video> na página: ${if (videoTags < 0) "?" else videoTags}")
         appendLine("coleta: ${collects}× última=${collectMs}ms pior=${collectMaxMs}ms  <img> na página=$lastImgs")
         appendLine("fotos (coletor ${PhotoGrab.VERSION}): imagens brutas=$lastRaw candidatas=$lastCands na lista=$lastKept")
         appendLine("script de fotos: ${if (BrowserDetect.photosOn.value) "ligado" else "desligado"}  rodou=$photoCalls respondeu=$photoReplies erros=$photoErrs" + (if (lastPhotoErr.isNotBlank()) "  último erro: $lastPhotoErr" else ""))

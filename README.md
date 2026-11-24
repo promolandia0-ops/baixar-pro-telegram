@@ -4,6 +4,9 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.22
+- Navegador: além dos pedidos de rede, lê sozinho o endereço dos players <video>/<source> da página (quando é um arquivo de verdade, não blob). O diagnóstico mostra quantos players a página tem.
+
 ## 1.9.21
 - Navegador: os pedidos de vídeo da página são lidos por até 5 min (antes 40 s), para aulas e players que só carregam depois de um clique.
 - Reconhece listas HLS/DASH pelo tipo da resposta, mesmo sem ".m3u8"/".mpd" no endereço.
