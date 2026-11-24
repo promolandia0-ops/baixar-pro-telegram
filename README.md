@@ -4,6 +4,9 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.23
+- Botão **Procurar** do navegador agora dá play (sem som) nos players da página, como se você tocasse no play: o player pede o vídeo e ele aparece na lista. Toca só em botões de play do player, nunca em links; repete uma vez depois de 1,8 s e procura de novo em 4 s.
+
 ## 1.9.22
 - Navegador: além dos pedidos de rede, lê sozinho o endereço dos players <video>/<source> da página (quando é um arquivo de verdade, não blob). O diagnóstico mostra quantos players a página tem.
 

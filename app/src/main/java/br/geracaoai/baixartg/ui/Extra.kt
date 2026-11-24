@@ -83,6 +83,27 @@ object Handoff { val page = mutableStateOf<String?>(null); val site = mutableSta
  * WebView único do Navegador, vivo no nível do app (fora da recomposição).
  * Trocar de aba só esconde; não destroi, não recarrega, preserva página, scroll, login e histórico de voltar.
  */
+/** Play automático no navegador visível (botão Procurar): só players, nunca links; sem som. */
+object TapPlay {
+    const val JS = """(function(){try{
+  var n=0;
+  function q(s){try{return document.querySelectorAll(s)}catch(e){return []}}
+  q('video').forEach(function(v){try{v.muted=true;v.playsInline=true;var p=v.play();if(p&&p.catch)p.catch(function(){});n++}catch(e){}});
+  var sels=['.vjs-big-play-button','.jw-display-icon-display','.jw-icon-display','.plyr__control--overlaid','.ytp-large-play-button',
+    '.mejs__overlay-play','.fp-play','.vp-preview','[data-plyr=play]','.shaka-play-button','.bmpui-ui-hugeplaybacktogglebutton',
+    '.media-control-button[data-play]','.vds-play-button','media-play-button','[aria-label="Play"]','[aria-label="Reproduzir"]',
+    '[aria-label*="Play" i]','[aria-label*="Reproduzir" i]','[title="Play"]','[title="Reproduzir"]',
+    'button[class*="play-" i]','button[class*="-play" i]','button[class*="_play" i]','button[class*="playbutton" i]','[role=button][class*="play-" i]','[role=button][class*="-play" i]'];
+  sels.forEach(function(s){q(s).forEach(function(el){try{
+    if(el.closest&&el.closest('a[href]'))return;
+    var r=el.getBoundingClientRect(); if(r.width<8||r.height<8)return;
+    if(/pause|pausar/i.test((el.getAttribute('aria-label')||'')+' '+(el.className||'')))return;
+    el.click(); n++;
+  }catch(e){}})});
+  return n;
+}catch(e){return -1}})()"""
+}
+
 object BrowserRuntime {
     @Volatile var web: WebView? = null
         private set
@@ -452,6 +473,14 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                             // procura de novo na página inteira (e não só no que mudou desde a última vez)
                             BrowserDetect.fullCollect = true
                             scheduleCollect(0)
+                            // dá play (sem som) nos players da página, como se você tocasse no play: o player pede o vídeo
+                            // e ele entra na lista. Repete 2x porque alguns players só montam o <video> depois do 1º toque.
+                            web?.let { w ->
+                                w.evaluateJavascript(TapPlay.JS) { }
+                                handler.postDelayed({ try { w.evaluateJavascript(TapPlay.JS) { } } catch (_: Exception) {} }, 1_800)
+                            }
+                            startNetPoll()
+                            handler.postDelayed({ BrowserDetect.fullCollect = true; scheduleCollect(0) }, 4_000)
                         },
                         modifier = Modifier.weight(1f).height(38.dp),
                         enabled = current.startsWith("http"),
