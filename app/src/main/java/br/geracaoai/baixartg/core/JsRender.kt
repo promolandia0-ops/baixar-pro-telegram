@@ -333,6 +333,8 @@ object JsRender {
             return Extract.mediaKindOf(u) != null || Extract.isHls(u) || Extract.isDash(u)
         }
         wv.webViewClient = object : WebViewClient() {
+            override fun onRenderProcessGone(view: android.webkit.WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
+                CrashLog.rendererGone("renderizador", detail)
             override fun onPageStarted(view: WebView, u: String?, favicon: android.graphics.Bitmap?) {
                 try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}
             }

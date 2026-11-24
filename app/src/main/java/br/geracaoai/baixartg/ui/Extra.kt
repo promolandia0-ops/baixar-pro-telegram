@@ -410,6 +410,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                 try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
             }
             webViewClient = object : WebViewClient() {
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
+                    br.geracaoai.baixartg.core.CrashLog.rendererGone("navegador", detail)
                 override fun shouldOverrideUrlLoading(v: WebView, request: android.webkit.WebResourceRequest): Boolean {
                     if (!request.isForMainFrame) return false
                     return br.geracaoai.baixartg.web.AdBlock.blockNavigation(request.url.toString(), v.url ?: current, request.hasGesture(), request.isRedirect)
@@ -456,6 +458,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     val tr = resultMsg?.obj as? WebView.WebViewTransport ?: return false
                     val tmp = WebView(view.context)
                     tmp.webViewClient = object : WebViewClient() {
+                        override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
+                            br.geracaoai.baixartg.core.CrashLog.rendererGone("auxiliar", detail)
                         private var done = false
                         fun take(u: String?) {
                             if (done || u == null) return

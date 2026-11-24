@@ -267,6 +267,8 @@ object BrowserMseDownloader {
                 }
 
                 wv.webViewClient = object : WebViewClient() {
+                    override fun onRenderProcessGone(view: android.webkit.WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
+                        CrashLog.rendererGone("download", detail)
                     override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                         lastBeat.set(System.currentTimeMillis())
                         try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}
