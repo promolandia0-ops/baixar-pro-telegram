@@ -49,19 +49,6 @@ private val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.
  */
 @Composable
 private fun DetectFab(modifier: Modifier, show: Boolean, onOpen: () -> Unit) {
-    // detetive sozinho: página sem vídeo por 12 s → investiga em silêncio (sem clicar em nada nem sair da página)
-    LaunchedEffect(current) {
-        if (!current.startsWith("http")) return@LaunchedEffect
-        kotlinx.coroutines.delay(12_000)
-        val w = web ?: return@LaunchedEffect
-        if (BrowserDetect.mode.intValue == 1 && !BrowserDetect.photosOn.value) return@LaunchedEffect
-        if (doctor || (BrowserDetect.list.count { !it.sent } > 0 && !BrowserDetect.photosOn.value)) return@LaunchedEffect
-        try { Detective.runQuiet(w, Detective.Hooks(tapPlay = {}, collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) })) } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            br.geracaoai.baixartg.core.CrashLog.write("detetive automático", e)
-        }
-    }
-    val detStatus by Detective.quietStatus
     val mode by BrowserDetect.mode
     val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
     val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
@@ -211,6 +198,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     var ask by remember { mutableStateOf(false) }
     var analyze by remember { mutableStateOf(false) }
     var doctor by remember { mutableStateOf(false) }
+    var learnPick by remember { mutableStateOf(false) }
+    var doctorExample by remember { mutableStateOf<br.geracaoai.baixartg.core.HistEntry?>(null) }
     // depois de 10 s numa página sem vídeo, oferece o "Diagnosticar e corrigir"
     var offerDoctor by remember { mutableStateOf(false) }
     LaunchedEffect(current) { offerDoctor = false; if (current.startsWith("http")) { kotlinx.coroutines.delay(10_000); offerDoctor = true } }
@@ -367,6 +356,19 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     fun startNetPoll() { handler.removeCallbacks(netPoll); netPoll.left = 120; handler.postDelayed(netPoll, 1_500) }
     fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs)
         if (BrowserDetect.photosOn.value) { handler.removeCallbacks(photoRun); handler.postDelayed(photoRun, delayMs + 300) } }
+    // detetive sozinho: página sem vídeo por 12 s → investiga em silêncio (sem clicar em nada nem sair da página)
+    LaunchedEffect(current) {
+        if (!current.startsWith("http")) return@LaunchedEffect
+        kotlinx.coroutines.delay(12_000)
+        val w = web ?: return@LaunchedEffect
+        if (BrowserDetect.mode.intValue == 1 && !BrowserDetect.photosOn.value) return@LaunchedEffect
+        if (doctor || (BrowserDetect.list.count { !it.sent } > 0 && !BrowserDetect.photosOn.value)) return@LaunchedEffect
+        try { Detective.runQuiet(w, Detective.Hooks(tapPlay = {}, collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) })) } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            br.geracaoai.baixartg.core.CrashLog.write("detetive automático", e)
+        }
+    }
+    val detStatus by Detective.quietStatus
     val mode by BrowserDetect.mode
     val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
     val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
@@ -460,7 +462,13 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                                 text = { Text("Detetive: achar vídeos e fotos") },
                                 leadingIcon = { Icon(Icons.Rounded.Build, null) },
                                 enabled = current.startsWith("http"),
-                                onClick = { moreMenu = false; doctor = true },
+                                onClick = { moreMenu = false; doctorExample = null; doctor = true },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Detetive: aprender com um vídeo baixado") },
+                                leadingIcon = { Icon(Icons.Rounded.School, null) },
+                                enabled = current.startsWith("http"),
+                                onClick = { moreMenu = false; learnPick = true },
                             )
                             DropdownMenuItem(
                                 text = { Text("Analisar este site") },
@@ -680,9 +688,10 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
         dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
     if (analyze) SiteAnalyzeDialog(current, web) { analyze = false }
+    if (learnPick) LearnPickDialog(onPick = { e -> learnPick = false; doctorExample = e; doctor = true }) { learnPick = false }
     if (doctor) VideoDoctorDialog(web, current,
         tapPlay = { web?.evaluateJavascript(TapPlay.JS) { }; startNetPoll() },
-        collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) }) { doctor = false }
+        collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) }, example = doctorExample) { doctor = false; doctorExample = null }
 }
 
 // ---------------- Contas logadas (Configurações) ----------------

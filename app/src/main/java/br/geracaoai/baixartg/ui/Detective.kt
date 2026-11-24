@@ -29,7 +29,7 @@ object Detective {
     data class Step(val title: String, val st: St, val detail: String = "")
     enum class Mode { FULL, QUIET }
     enum class CK { MEDIA, JSON, PAGE, SERVER, BRIGHTCOVE }
-    data class Cand(val url: String, val ck: CK, val t: DetScan.T?, val via: String, val frame: String?, val ref: DetKnowledge.Ref?, val recipe: String = "", val depth: Int = 0)
+    data class Cand(val url: String, val ck: CK, val t: DetScan.T?, val via: String, val frame: String?, val ref: DetKnowledge.Ref?, val recipe: String = "", val depth: Int = 0, val page: String? = null, val title: String? = null)
     class Hooks(val tapPlay: () -> Unit, val collect: () -> Unit)
     interface Log { fun begin(t: String); fun done(st: St, d: String = ""); fun note(d: String) }
     private object NoLog : Log { override fun begin(t: String) {}; override fun done(st: St, d: String) {}; override fun note(d: String) {} }
@@ -50,15 +50,18 @@ object Detective {
         } catch (e: Exception) { if (e is CancellationException) throw e } finally { quietStatus.value = "" }
     }
 
-    suspend fun run(web: WebView, mode: Mode, hooks: Hooks, log: Log): Result {
+    suspend fun run(web: WebView, mode: Mode, hooks: Hooks, log: Log, example: HistEntry? = null): Result {
         if (busy && mode == Mode.QUIET) return Result(0, 0, "")
         busy = true
-        try { return Session(web, mode, hooks, log).go() } finally { busy = false }
+        try { return Session(web, mode, hooks, log, example).go() } finally { busy = false }
     }
 
     // =====================================================================================================
 
-    private class Session(val web: WebView, val mode: Mode, val hooks: Hooks, val log: Log) {
+    private class Session(val web: WebView, val mode: Mode, val hooks: Hooks, val log: Log, val example: HistEntry? = null) {
+        var lesson: DetLearn.Lesson? = null
+        val anchors = ArrayList<Pair<String, String>>()
+        fun learned(u: String) = lesson?.let { DetLearn.sameMedia(it, u) } == true
         val full = mode == Mode.FULL
         var page: String = web.url.orEmpty()
         var title: String = web.title.orEmpty()
@@ -181,8 +184,10 @@ object Detective {
         }
 
         suspend fun testMedia(c: Cand) {
-            val maybe = c.t == DetScan.T.MAYBE
-            val refs = DetKnowledge.refererOrder(c.ref, page, c.frame).take(if (maybe) 2 else 4)
+            val maybe = c.t == DetScan.T.MAYBE && !learned(c.url)
+            val l = lesson
+            val first: List<String?> = if (l != null && learned(c.url)) listOf(l.refFixed ?: DetKnowledge.refFor(l.ref, c.page ?: page, c.frame)) else emptyList()
+            val refs = (first + DetKnowledge.refererOrder(c.ref, c.page ?: page, c.frame)).distinct().take(if (maybe) 2 else 5)
             for (ref in refs) {
                 val g = get(c.url, ref, if (maybe) 600_000 else 96_000, range = true) ?: continue
                 if (g.code == 401 || g.code == 403 || g.code == 410) { blocked[Extract.host(c.url)] = g.code; continue }
@@ -212,11 +217,13 @@ object Detective {
         }
 
         suspend fun testServer(c: Cand) {
-            val ref = DetKnowledge.refFor(c.ref ?: DetKnowledge.Ref.PAGE, page, c.frame)
+            val pg = c.page ?: page
+            val ref = DetKnowledge.refFor(c.ref ?: DetKnowledge.Ref.PAGE, pg, c.frame)
             RefererHints.set(c.url, ref)
             val t = withTimeoutOrNull(if (full) 50_000 else 30_000) { Downloader.probe(Prefs.server, c.url) }
             if (t != null) {
-                withContext(Dispatchers.Main) { BrowserDetect.addFound(Found(c.url, page, TitleFix.pick(title, t).ifBlank { t }, Kind.SERVER, ref = page, extra = title)) }
+                val tt = TitleFix.pick(c.title, if (c.page == null) title else null, t).ifBlank { t }
+                withContext(Dispatchers.Main) { BrowserDetect.addFound(Found(c.url, pg, tt, Kind.SERVER, ref = pg, extra = tt)) }
                 verifiedV++; wins += "servidor"; if (c.recipe.isNotBlank()) recipesHit += c.recipe
             } else Downloader.lastProbeError?.let { lastServerErr = it }
         }
@@ -234,7 +241,8 @@ object Detective {
         suspend fun publish(c: Cand, kind: Kind, ref: String?, height: Int) {
             val r = ref ?: DetKnowledge.originOf(c.url)
             if (kind == Kind.SERVER) RefererHints.set(c.url, r)
-            val f = Found(c.url, page, title.ifBlank { Extract.mediaTitle(c.url, "") }, kind, ref = r, extra = title, quality = height)
+            val pg = c.page ?: page; val tt = c.title?.ifBlank { null } ?: title
+            val f = Found(c.url, pg, tt.ifBlank { Extract.mediaTitle(c.url, "") }, kind, ref = r, extra = tt, quality = height)
             withContext(Dispatchers.Main) { BrowserDetect.addFound(f) }
             verifiedV++
             wins += c.via.substringBefore(':').let { if (it == "receita") "receita" else it }
@@ -249,9 +257,9 @@ object Detective {
             var rounds = 0
             while (System.currentTimeMillis() < end && tests < maxTests && rounds < 4) {
                 rounds++
-                val sure = pending(CK.MEDIA).filter { it.t != DetScan.T.MAYBE }
+                val sure = pending(CK.MEDIA).filter { it.t != DetScan.T.MAYBE || learned(it.url) }.sortedBy { if (learned(it.url)) 0 else 1 }
                 val cfg = pending(CK.JSON, CK.PAGE, CK.BRIGHTCOVE)
-                val maybe = pending(CK.MEDIA).filter { it.t == DetScan.T.MAYBE }.take(30)
+                val maybe = pending(CK.MEDIA).filter { it.t == DetScan.T.MAYBE && !learned(it.url) }.take(30)
                 val batch = (sure + cfg + maybe).take(maxTests - tests)
                 if (batch.isEmpty()) break
                 batch.forEach { tested += it.ck.name + "|" + it.url }
@@ -306,6 +314,8 @@ object Detective {
                 n += addText(o.optString("txt"), f, via, f)
                 players += DetKnowledge.identify(o.optString("txt").take(400_000) + " " + f)
                 if (isTop) o.optJSONArray("a")?.let { a ->
+                    anchors.clear()
+                    for (i in 0 until a.length()) { val x = a.optJSONObject(i) ?: continue; anchors += x.optString("h") to x.optString("t") }
                     val ls = ArrayList<Triple<String, String, Int>>()
                     for (i in 0 until a.length()) { val x = a.optJSONObject(i) ?: continue; val h = x.optString("h"); val t = x.optString("t")
                         if (PageKey.norm(h) == PageKey.norm(page) || Extract.host(h) != host) continue
@@ -454,6 +464,10 @@ object Detective {
                 log.done(if (ub > 0) St.FIXED else St.OK, if (ub > 0) "Fechei $ub janela(s)." else "nenhuma")
             }
 
+            // aprender com o vídeo de exemplo + repetir o método aprendido neste site
+            learnLayer()
+            applyLesson()
+
             // memória: o que funcionou antes vem primeiro
             if (full && mem != null && "play" in mem.wins) { playAll(); waitFor(4_000) }
 
@@ -549,12 +563,77 @@ object Detective {
                 }
             }
 
+            // repetir nas outras aulas desta página
+            if (full && lesson != null) otherLessons()
+
             // 22) fotos
             if (full || BrowserDetect.photosOn.value) photoLayer()
 
             if (gotV() || gotP()) DetMemory.save(host, wins, recipesHit, players.filter { it.isNotBlank() }.take(4))
             CrashLog.mark("detetive: vídeos=${videos() - startV} fotos=${BrowserDetect.photos.size - startP} testes=$tests")
             return result(null, lessonUrl.takeIf { !full && !gotV() }, lessonTitle)
+        }
+
+        /** Você escolheu um vídeo já baixado: descobre o método (de onde veio, formato, Referer, servidor…). */
+        fun learnLayer() {
+            val ex = example
+            if (ex == null) { lesson = DetMemory.lesson(host); if (full && lesson != null) { log.begin("Método aprendido neste site"); log.done(St.INFO, lesson!!.method) }; return }
+            log.begin("Aprender com o vídeo baixado: ${ex.f.title.take(60)}")
+            val media = ex.f.url
+            val pg = ex.f.page.ifBlank { media }
+            val l = DetLearn.analyze(pg, media, ex.f.kind.name, ex.f.ref)
+            DetMemory.saveLesson(l)
+            if (l.site != host) DetMemory.lesson(host)?.let { lesson = it }
+            if (l.site == host || lesson == null) lesson = l
+            log.done(St.OK, l.method + if (l.site != host) " (O exemplo é de ${l.site}; abra uma aula desse site para repetir.)" else "")
+            wins += "exemplo"
+        }
+
+        /** Repete o método aprendido nesta página: monta o endereço direto, servidor ou gravação dos pedaços. */
+        suspend fun applyLesson() {
+            val l = lesson ?: return
+            if (l.site != host) return
+            if (full) log.begin("Repetir o método do vídeo de exemplo nesta página")
+            var did = ""
+            DetLearn.mediaFor(l, page)?.let { u ->
+                addCand(Cand(u, CK.MEDIA, DetScan.classify(u) ?: DetScan.T.MAYBE, "aprendido", l.refFixed, l.ref))
+                did = "montei o endereço do vídeo desta aula"
+            }
+            when (l.kind) {
+                "SERVER" -> { addCand(Cand(page, CK.SERVER, null, "aprendido", null, DetKnowledge.Ref.PAGE)); did = did.ifBlank { "vou pedir ao servidor como no exemplo" } }
+                "MSE" -> { playAll(); waitFor(10_000); did = did.ifBlank { "dei play para gravar os pedaços, como no exemplo" } }
+            }
+            val b = verifiedV
+            if (pending(CK.MEDIA).isNotEmpty()) verifyAll(20_000)
+            if (l.kind == "SERVER" && verifiedV == b) verifyAll(0, servers = true)
+            if (verifiedV > b) wins += "exemplo"
+            if (full) log.done(if (verifiedV > b || gotV()) St.FIXED else St.INFO,
+                if (verifiedV > b || gotV()) "Funcionou: ${did.ifBlank { "mesmo método" }}." else (did.ifBlank { "Vou procurar endereços com o mesmo formato do exemplo e usar a mesma origem." }) + (if (did.isNotBlank()) " Ainda não abriu; sigo procurando endereços com o mesmo formato." else ""))
+        }
+
+        /** As outras aulas listadas nesta página: monta o vídeo de cada uma (ou pergunta ao servidor) e põe na lista. */
+        suspend fun otherLessons() {
+            val l = lesson ?: return
+            if (l.site != host) return
+            val others = anchors.filter { (h, _) -> Extract.host(h) == host && PageKey.norm(h) != PageKey.norm(page) && (DetLearn.samePage(l, h) || DetKnowledge.lessonScore(h, "") >= 2) }
+                .distinctBy { PageKey.norm(it.first) }.take(60)
+            if (others.isEmpty()) return
+            log.begin("Repetir nas outras aulas desta página (${others.size})")
+            val b = verifiedV
+            var built = 0
+            for ((h, t) in others) DetLearn.mediaFor(l, h)?.let { u -> built++; addCand(Cand(u, CK.MEDIA, DetScan.classify(u) ?: DetScan.T.MAYBE, "aprendido", l.refFixed, l.ref, page = h, title = t)) }
+            if (built > 0) verifyAll(60_000)
+            else if (l.kind == "SERVER") {
+                others.take(20).forEach { (h, t) -> addCand(Cand(h, CK.SERVER, null, "aprendido", null, DetKnowledge.Ref.PAGE, page = h, title = t)) }
+                val gate = Semaphore(2)
+                coroutineScope { pending(CK.SERVER).filter { it.page != null }.map { c -> async { gate.withPermit { test(c) } } }.awaitAll() }
+            }
+            val got = verifiedV - b
+            log.done(if (got > 0) St.FIXED else St.INFO, when {
+                got > 0 -> "$got vídeo(s) das outras aulas na lista."
+                built > 0 -> "Montei $built endereço(s) pelo modelo, mas não abriram (o site muda o endereço a cada aula). Abra cada aula: o detetive repete o método sozinho."
+                else -> "O endereço do vídeo não tem o código da aula. Abra cada aula: o detetive repete o método sozinho em cada uma."
+            })
         }
 
         fun previousNonLogin(): String? = try {

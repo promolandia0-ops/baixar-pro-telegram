@@ -1,6 +1,7 @@
 package br.geracaoai.baixartg.ui
 
 import android.webkit.WebView
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -77,7 +78,7 @@ object VideoDoctor {
 }
 
 @Composable
-fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect: () -> Unit, onClose: () -> Unit) {
+fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect: () -> Unit, example: HistEntry? = null, onClose: () -> Unit) {
     val ctx = LocalContext.current
     val steps = remember { mutableStateListOf<Detective.Step>() }
     var running by remember { mutableStateOf(true) }
@@ -94,7 +95,7 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
             override fun note(d: String) { if (steps.isNotEmpty()) steps[steps.lastIndex] = steps.last().copy(detail = d) }
         }
         try {
-            val r = Detective.run(w, Detective.Mode.FULL, Detective.Hooks(tapPlay, collect), log)
+            val r = Detective.run(w, Detective.Mode.FULL, Detective.Hooks(tapPlay, collect), log, example)
             verdict = r.verdict
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -159,6 +160,39 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
                 copy(ctx, rep, "Diagnóstico copiado (sem links). Cole no chat.")
             }) { Text("Copiar") }
         },
+    )
+}
+
+/**
+ * "Aprender com um vídeo baixado": os últimos 30 vídeos do histórico (só no celular). Você escolhe um que deu certo e o
+ * detetive descobre o método e repete nesta página e nas outras aulas.
+ */
+@Composable
+fun LearnPickDialog(onPick: (HistEntry) -> Unit, onClose: () -> Unit) {
+    val all by History.list.collectAsState()
+    val items = remember(all) { all.filter { it.f.kind != Kind.PHOTO }.take(30) }
+    AlertDialog(
+        onDismissRequest = onClose,
+        icon = { Icon(Icons.Rounded.School, null) },
+        title = { Text("Aprender com um vídeo baixado") },
+        text = {
+            Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("Escolha um vídeo que deu certo. O detetive descobre como ele foi achado e baixado e repete o mesmo caminho nas outras aulas do site.",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Spacer(Modifier.height(6.dp))
+                if (items.isEmpty()) Text("Nenhum vídeo baixado ainda.", style = MaterialTheme.typography.bodyMedium)
+                items.forEach { e ->
+                    Column(Modifier.fillMaxWidth().clickable { onPick(e) }.padding(horizontal = 8.dp, vertical = 8.dp)) {
+                        run {
+                            Text(e.f.title.ifBlank { Extract.fileName(e.f.url) }, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                            val whenTxt = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(e.time))
+                            Text("${Extract.host(e.f.page.ifBlank { e.f.url })} • $whenTxt", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = { TextButton(onClose) { Text("Fechar") } },
     )
 }
 

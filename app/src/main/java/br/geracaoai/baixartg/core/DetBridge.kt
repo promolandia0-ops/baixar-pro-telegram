@@ -155,7 +155,23 @@ object DetMemory {
         p?.edit()?.putString("s:$host", o.toString())?.apply()
     }
 
-    fun forget(host: String) { p?.edit()?.remove("s:$host")?.apply() }
+    fun forget(host: String) { p?.edit()?.remove("s:$host")?.remove("l:$host")?.apply() }
+
+    /** Método aprendido com um vídeo baixado (por site). */
+    fun saveLesson(l: DetLearn.Lesson) {
+        val o = JSONObject().put("site", l.site).put("pe", l.pageExample).put("me", l.mediaExample).put("k", l.kind).put("r", l.ref.name)
+            .put("rf", l.refFixed ?: "").put("mp", l.mediaPattern).put("pp", l.pagePattern).put("pi", l.pageIdRegex).put("mt", l.mediaTemplate)
+            .put("rc", l.recipe).put("m", l.method)
+        p?.edit()?.putString("l:" + l.site, o.toString())?.apply()
+    }
+    fun lesson(host: String): DetLearn.Lesson? = try {
+        p?.getString("l:$host", null)?.let { s ->
+            val o = JSONObject(s)
+            DetLearn.Lesson(o.getString("site"), o.optString("pe"), o.optString("me"), o.optString("k"),
+                runCatching { DetKnowledge.Ref.valueOf(o.optString("r")) }.getOrDefault(DetKnowledge.Ref.PAGE), o.optString("rf").ifBlank { null },
+                o.optString("mp"), o.optString("pp"), o.optString("pi"), o.optString("mt"), o.optString("rc"), o.optString("m"))
+        }
+    } catch (_: Exception) { null }
 
     fun saveHint(url: String, ref: String) {
         val pp = p ?: return

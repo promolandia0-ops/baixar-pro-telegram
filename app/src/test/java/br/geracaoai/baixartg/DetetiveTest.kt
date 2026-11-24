@@ -32,3 +32,13 @@ class DetetiveTest {
         assertTrue(DetKnowledge.isLoginUrl("https://curso.com/users/sign_in"))
     }
 }
+
+class DetLearnTest {
+    @Test fun aprendeEMontaOutraAula() {
+        val l = br.geracaoai.baixartg.core.DetLearn.analyze("https://aulas.guitarra.com/curso/12/aula/4587",
+            "https://cdn.guitarra.com/videos/4587/hls/master.m3u8?token=abc", "HLS", "https://aulas.guitarra.com/curso/12/aula/4587")
+        assertEquals("https://cdn.guitarra.com/videos/4601/hls/master.m3u8?token=abc",
+            br.geracaoai.baixartg.core.DetLearn.mediaFor(l, "https://aulas.guitarra.com/curso/12/aula/4601"))
+        assertTrue(br.geracaoai.baixartg.core.DetLearn.sameMedia(l, "https://cdn.guitarra.com/videos/777/hls/master.m3u8"))
+    }
+}

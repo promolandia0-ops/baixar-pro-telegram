@@ -16,6 +16,7 @@ Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
   - **Memória por site**: o que funcionou fica guardado e é tentado primeiro da próxima vez.
   - **Receitas pela internet**: `detetive/receitas.json` neste repositório; o app baixa sozinho a cada 6 h (site novo = nova receita, sem reinstalar).
 - Sozinho: numa página sem vídeo por 12 s o detetive investiga em silêncio (sem clicar em nada nem sair da página).
+- **Aprender com um vídeo baixado** (menu ⋮): escolha um dos últimos 30 vídeos baixados (a lista fica só no celular). O detetive descobre o método — servidor/CDN do vídeo, formato do endereço, Referer que abriu, se foi pelo servidor yt-dlp ou gravando os pedaços, e se o código da aula aparece no endereço do vídeo — guarda para o site e repete: monta o vídeo desta aula e das outras aulas listadas na página, procura primeiro endereços com o mesmo formato e usa a mesma origem.
 
 ## 1.9.24
 - Novo **Diagnosticar e corrigir** no navegador (menu ⋮, ou o aviso "Nenhum vídeo?" que aparece depois de 10 s numa página sem vídeo). Ele testa e corrige sozinho, passo a passo, e para assim que o vídeo aparece:
