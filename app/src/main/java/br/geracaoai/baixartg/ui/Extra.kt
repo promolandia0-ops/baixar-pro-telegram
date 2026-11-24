@@ -198,7 +198,6 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     var ask by remember { mutableStateOf(false) }
     var analyze by remember { mutableStateOf(false) }
     var doctor by remember { mutableStateOf(false) }
-    var learnPick by remember { mutableStateOf(false) }
     var doctorExample by remember { mutableStateOf<br.geracaoai.baixartg.core.HistEntry?>(null) }
     // depois de 10 s numa página sem vídeo, oferece o "Diagnosticar e corrigir"
     var offerDoctor by remember { mutableStateOf(false) }
@@ -464,12 +463,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                                 enabled = current.startsWith("http"),
                                 onClick = { moreMenu = false; doctorExample = null; doctor = true },
                             )
-                            DropdownMenuItem(
-                                text = { Text("Detetive: aprender com um vídeo baixado") },
-                                leadingIcon = { Icon(Icons.Rounded.School, null) },
-                                enabled = current.startsWith("http"),
-                                onClick = { moreMenu = false; learnPick = true },
-                            )
+
                             DropdownMenuItem(
                                 text = { Text("Analisar este site") },
                                 leadingIcon = { Icon(Icons.Rounded.BugReport, null) },
@@ -688,7 +682,6 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
         dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
     if (analyze) SiteAnalyzeDialog(current, web) { analyze = false }
-    if (learnPick) LearnPickDialog(onPick = { e -> learnPick = false; doctorExample = e; doctor = true }) { learnPick = false }
     if (doctor) VideoDoctorDialog(web, current,
         tapPlay = { web?.evaluateJavascript(TapPlay.JS) { }; startNetPoll() },
         collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) }, example = doctorExample) { doctor = false; doctorExample = null }

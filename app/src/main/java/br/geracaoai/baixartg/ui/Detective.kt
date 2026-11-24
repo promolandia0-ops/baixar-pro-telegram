@@ -35,6 +35,25 @@ object Detective {
     private object NoLog : Log { override fun begin(t: String) {}; override fun done(st: St, d: String) {}; override fun note(d: String) {} }
     data class Result(val videos: Int, val photos: Int, val verdict: String, val lessonUrl: String? = null, val lessonTitle: String = "")
 
+    /**
+     * Vídeos já baixados para servir de exemplo (os 30 mais recentes). Junta o histórico com a fila de envio (concluídos e
+     * "repetidos") e os "já enviados" da página aberta: mesmo com a lista do histórico apagada, os vídeos continuam aqui.
+     * Os do site aberto vêm primeiro. Tudo fica no celular.
+     */
+    fun examples(currentHost: String): List<Pair<HistEntry, String>> {
+        val out = LinkedHashMap<String, Pair<HistEntry, String>>()
+        fun add(f: Found?, time: Long, size: Long, src: String) {
+            if (f == null || f.kind == Kind.PHOTO || !f.url.startsWith("http")) return
+            val k = f.url.substringBefore('#')
+            if (!out.containsKey(k)) out[k] = HistEntry(f, time, size) to src
+        }
+        History.list.value.forEach { add(it.f, it.time, it.size, "histórico") }
+        Pipeline.items.value.filter { it.st == Pipeline.PS.DONE }.forEach { add(it.f, if (it.id > 1_000_000_000_000L) it.id else 0L, -1, "fila: enviado") }
+        Pipeline.items.value.filter { it.st == Pipeline.PS.SKIP }.forEach { add(it.f, if (it.id > 1_000_000_000_000L) it.id else 0L, -1, "fila: repetido") }
+        BrowserDetect.suppressed.toList().forEach { add(it.f, it.addedAt, -1, "já enviado nesta página") }
+        return out.values.sortedWith(compareBy<Pair<HistEntry, String>> { if (Extract.host(it.first.f.page.ifBlank { it.first.f.url }) == currentHost) 0 else 1 }.thenByDescending { it.first.time }).take(30)
+    }
+
     /** Texto curto na barra do navegador quando o detetive roda sozinho. */
     val quietStatus = mutableStateOf("")
     @Volatile private var busy = false
@@ -221,6 +240,7 @@ object Detective {
             val ref = DetKnowledge.refFor(c.ref ?: DetKnowledge.Ref.PAGE, pg, c.frame)
             RefererHints.set(c.url, ref)
             val t = withTimeoutOrNull(if (full) 50_000 else 30_000) { Downloader.probe(Prefs.server, c.url) }
+            if (t != null && tracing != null) { traceVia = traceVia ?: "servidor"; return }
             if (t != null) {
                 val tt = TitleFix.pick(c.title, if (c.page == null) title else null, t).ifBlank { t }
                 withContext(Dispatchers.Main) { BrowserDetect.addFound(Found(c.url, pg, tt, Kind.SERVER, ref = pg, extra = tt)) }
@@ -239,6 +259,8 @@ object Detective {
         }
 
         suspend fun publish(c: Cand, kind: Kind, ref: String?, height: Int) {
+            // estudando o exemplo: só anota por onde achou, não põe nada na lista
+            tracing?.let { m -> if (DetLearn.sameVideo(c.url, m) || (lesson ?: DetLearn.analyze(page, m, kind.name, ref)).let { DetLearn.sameMedia(it, c.url) }) traceVia = traceVia ?: c.via; return }
             val r = ref ?: DetKnowledge.originOf(c.url)
             if (kind == Kind.SERVER) RefererHints.set(c.url, r)
             val pg = c.page ?: page; val tt = c.title?.ifBlank { null } ?: title
@@ -522,7 +544,7 @@ object Detective {
             if (!gotV()) {
                 if (pending(CK.SERVER).isEmpty() && full) addCand(Cand(page, CK.SERVER, null, "servidor", null, DetKnowledge.Ref.PAGE))
                 if (pending(CK.SERVER).isNotEmpty()) {
-                    if (full) log.begin("Perguntar ao servidor yt-dlp (com a página da aula como origem)")
+                    if (full) log.begin("Perguntar ao servidor yt-dlp (com a página do vídeo como origem)")
                     val b = verifiedV
                     verifyAll(0, servers = true)
                     if (full) log.done(if (verifiedV > b) St.FIXED else St.FAIL, if (verifiedV > b) "O servidor reconheceu ${verifiedV - b} vídeo(s)." else lastServerErr.take(160).ifBlank { "não reconheceu" })
@@ -551,15 +573,15 @@ object Detective {
                 val (u, t) = lessons.first()
                 lessonUrl = u; lessonTitle = t
                 if (full) {
-                    log.begin("Abrir uma aula")
-                    log.done(St.FIXED, "Esta página parece a lista do curso (${lessons.size} aula(s), sem player). Abri: ${t.ifBlank { "primeira aula" }.take(80)}")
+                    log.begin("Abrir uma página de vídeo")
+                    log.done(St.FIXED, "Esta página parece uma lista (${lessons.size} link(s) de vídeo, sem player). Abri: ${t.ifBlank { "o primeiro" }.take(80)}")
                     web.loadUrl(u); waitLoad()
-                    log.begin("Procurar na aula")
+                    log.begin("Procurar na página aberta")
                     DetBridge.ensureTop(web); playAll(); waitFor(5_000)
                     discover(quiet = true); verifyAll(40_000)
                     if (!gotV()) { addCand(Cand(page, CK.SERVER, null, "servidor", null, DetKnowledge.Ref.PAGE)); verifyAll(0, servers = true) }
-                    log.done(if (gotV()) St.FIXED else St.FAIL, if (gotV()) "Achei o vídeo da aula. Nas outras aulas use \"Carregar tudo\" ou abra cada uma." else "Também não achei na aula.")
-                    if (gotV()) wins += "aula"
+                    log.done(if (gotV()) St.FIXED else St.FAIL, if (gotV()) "Achei o vídeo. Para os outros da lista use \"Carregar tudo\" ou abra cada um." else "Também não achei nessa página.")
+                    if (gotV()) wins += "lista"
                 }
             }
 
@@ -574,19 +596,135 @@ object Detective {
             return result(null, lessonUrl.takeIf { !full && !gotV() }, lessonTitle)
         }
 
-        /** Você escolheu um vídeo já baixado: descobre o método (de onde veio, formato, Referer, servidor…). */
-        fun learnLayer() {
+        /**
+         * Você escolheu um vídeo já baixado deste site: testa o link de novo (e um pedaço de dentro dele), descobre como
+         * o link é feito, abre a aula de onde ele veio para ver por qual caminho o app acha esse vídeo, volta e guarda o método.
+         */
+        suspend fun learnLayer() {
             val ex = example
-            if (ex == null) { lesson = DetMemory.lesson(host); if (full && lesson != null) { log.begin("Método aprendido neste site"); log.done(St.INFO, lesson!!.method) }; return }
-            log.begin("Aprender com o vídeo baixado: ${ex.f.title.take(60)}")
+            if (ex == null) { lesson = DetMemory.lesson(host); if (full && lesson != null) { log.begin("Método aprendido neste site"); log.done(St.INFO, lesson!!.method + viaText(lesson!!.via)) }; return }
             val media = ex.f.url
             val pg = ex.f.page.ifBlank { media }
-            val l = DetLearn.analyze(pg, media, ex.f.kind.name, ex.f.ref)
+            val quando = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(ex.time))
+            log.begin("Vídeo de exemplo")
+            log.done(St.INFO, "${ex.f.title.take(80)} • ${Extract.host(pg)} • baixado em $quando${if (ex.size > 0) " • " + (ex.size / 1_048_576) + " MB" else ""}")
+            var l = DetLearn.analyze(pg, media, ex.f.kind.name, ex.f.ref)
+
+            log.begin("Baixar o começo do vídeo de novo (mesmo link, mesma origem)")
+            val (ok, det) = retest(ex.f)
+            log.done(if (ok) St.OK else St.INFO, det)
+
+            log.begin("Como o link do vídeo é feito")
+            log.done(St.INFO, l.method + if (l.signed) " O link é TEMPORÁRIO (tem token/validade): não dá para guardar o link, o vídeo precisa ser achado de novo em cada página." else "")
+
+            if (full && pg.startsWith("http") && pg != media) {
+                val back = page
+                log.begin("Abrir a página desse vídeo e ver por onde o app acha ele")
+                if (PageKey.norm(pg) != PageKey.norm(page)) { web.loadUrl(pg); waitLoad() }
+                val via = traceExample(media, l)
+                log.done(if (via != null) St.FIXED else St.INFO, if (via != null) "Achei o mesmo vídeo de novo ${viaText(via).trim()}. Vou usar esse caminho nos outros vídeos." else "Não achei o mesmo vídeo de novo por nenhum caminho automático (talvez tenha sido achado depois de você dar play ou navegar). Uso o formato do link e a origem.")
+                if (via != null) l = l.copy(via = via)
+                resetPage()
+                if (PageKey.norm(back) != PageKey.norm(page) && back.startsWith("http")) {
+                    log.begin("Voltar para a página em que você estava")
+                    web.loadUrl(back); waitLoad(); log.done(St.OK)
+                }
+            }
             DetMemory.saveLesson(l)
-            if (l.site != host) DetMemory.lesson(host)?.let { lesson = it }
-            if (l.site == host || lesson == null) lesson = l
-            log.done(St.OK, l.method + if (l.site != host) " (O exemplo é de ${l.site}; abra uma aula desse site para repetir.)" else "")
+            lesson = if (l.site == host) l else DetMemory.lesson(host)
+            if (l.site != host) { log.begin("Site diferente"); log.done(St.INFO, "O vídeo escolhido é de ${l.site}, e esta página é de $host. O método ficou guardado para ${l.site}.") }
             wins += "exemplo"
+        }
+
+        fun viaText(v: String): String = when {
+            v.isBlank() -> ""
+            v.startsWith("receita:") -> " pela receita do player ${DetKnowledge.all().firstOrNull { it.id == v.substringAfter(':') }?.name ?: v.substringAfter(':')}"
+            v == "varredura" -> " lendo a página e os players de dentro dela"
+            v == "recursos" -> " nos arquivos que a página já tinha carregado"
+            v == "rede" -> " nas respostas de rede do site"
+            v == "iframe" -> " abrindo o player embutido pela rede"
+            v == "código" || v == "html" -> " no código da página"
+            v == "play" -> " quando o player começou a tocar"
+            v == "servidor" -> " pelo servidor yt-dlp"
+            else -> " ($v)"
+        }
+
+        fun resetPage() {
+            cands.clear(); tested.clear(); photoUrls.clear(); anchors.clear(); lessons = emptyList()
+            videoTags = 0; blobTags = 0; bigFrames = 0; frames = 0; tests = 0
+        }
+
+        /** Testa o link que foi baixado: ainda abre? com qual origem? o que tem dentro (qualidades, criptografia, pedaço)? */
+        suspend fun retest(f: Found): Pair<Boolean, String> {
+            if (f.kind == Kind.MSE) return false to "Esse vídeo foi gravado enquanto o player tocava (não tem link fixo)."
+            if (f.kind == Kind.SERVER) {
+                RefererHints.set(f.url, f.ref ?: f.page)
+                val t = withTimeoutOrNull(50_000) { Downloader.probe(Prefs.server, f.url) }
+                return if (t != null) true to "O servidor yt-dlp ainda reconhece o vídeo (\"${t.take(60)}\")." else false to "O servidor não reconheceu mais: ${Downloader.lastProbeError?.take(120) ?: "sem resposta"}."
+            }
+            val refs = (listOf(f.ref) + DetKnowledge.refererOrder(null, f.page.ifBlank { f.url }, f.ref)).distinct().take(5)
+            val codes = ArrayList<Int>()
+            for (ref in refs) {
+                val g = get(f.url, ref, 200_000, range = true) ?: continue
+                codes += g.code
+                if (g.code !in 200..299) continue
+                val sn = DetScan.sniff(g.bytes, g.ct)
+                val origem = when (ref) { null -> "sem origem"; f.page -> "com a página do vídeo como origem"; else -> "com a origem " + Extract.host(ref) }
+                val inside = when (sn) {
+                    "hls" -> {
+                        val txt = String(g.bytes, Charsets.UTF_8); val info = DetScan.hlsInfo(txt)
+                        val seg = firstSegment(f.url, txt, ref)
+                        listOfNotNull("lista HLS", if (info.master) "${info.variants} qualidade(s)" + (if (info.maxHeight > 0) " até ${info.maxHeight}p" else "") else null,
+                            if (info.aes) "criptografia AES-128 (o app resolve)" else null, if (info.drm) "DRM" else null, seg).joinToString(" • ")
+                    }
+                    "dash" -> "lista DASH"
+                    null -> "tipo desconhecido"
+                    else -> if (DetScan.isVideoSniff(sn)) "arquivo $sn de verdade" else "veio $sn (não é vídeo)"
+                }
+                return DetScan.isVideoSniff(sn) to "Abriu de novo $origem: $inside."
+            }
+            val c = codes.distinct()
+            return false to (if (c.any { it == 401 || it == 403 || it == 410 }) "O link não abre mais (HTTP ${c.joinToString("/")}). É um link temporário: o método é achar o vídeo na página de novo, não guardar o link."
+                else if (c.isEmpty()) "Sem resposta do servidor do vídeo." else "Não abriu (HTTP ${c.joinToString("/")}).")
+        }
+
+        /** Primeiro pedaço do vídeo HLS (entra na qualidade e baixa o comecinho de um pedaço). */
+        suspend fun firstSegment(base: String, m3u8: String, ref: String?): String? {
+            fun firstUri(t: String) = t.lineSequence().map { it.trim() }.firstOrNull { it.isNotEmpty() && !it.startsWith("#") }
+            var pl = m3u8; var plUrl = base
+            if (pl.contains("#EXT-X-STREAM-INF")) {
+                val v = firstUri(pl)?.let { DetScan.resolve(plUrl, it) } ?: return null
+                val g = get(v, ref, 300_000, range = false) ?: return null
+                if (g.code !in 200..299) return "a qualidade não abriu (HTTP ${g.code})"
+                pl = String(g.bytes, Charsets.UTF_8); plUrl = g.url
+            }
+            val sg = firstUri(pl)?.let { DetScan.resolve(plUrl, it) } ?: return null
+            val g = get(sg, ref, 4_096, range = true) ?: return "pedaço sem resposta"
+            if (g.code !in 200..299) return "o pedaço não abriu (HTTP ${g.code})"
+            val sn = DetScan.sniff(g.bytes, g.ct)
+            return "pedaço do vídeo abre (${sn ?: "?"}) em ${Extract.host(sg)}"
+        }
+
+        var tracing: String? = null
+        var traceVia: String? = null
+
+        /** Na aula do exemplo: procura o mesmo vídeo por cada caminho (sem pôr nada na lista) e diz qual achou. */
+        suspend fun traceExample(media: String, l: DetLearn.Lesson): String? {
+            tracing = media; traceVia = null
+            try {
+                DetBridge.ensureTop(web)
+                fun found(): String? = cands.values.firstOrNull { DetLearn.sameVideo(it.url, media) }?.via
+                deepScan("varredura"); netScan()
+                found()?.let { return it }
+                verifyAll(30_000); traceVia?.let { return it }
+                playAll(); delay(5_000)
+                deepScan("play"); netScan()
+                found()?.let { return "play" }
+                if (BrowserDetect.list.any { DetLearn.sameVideo(it.f.url, media) }) return "play"
+                verifyAll(30_000); traceVia?.let { return it }
+                if (l.kind == "SERVER") return "servidor"
+                return null
+            } finally { tracing = null }
         }
 
         /** Repete o método aprendido nesta página: monta o endereço direto, servidor ou gravação dos pedaços. */
@@ -597,8 +735,10 @@ object Detective {
             var did = ""
             DetLearn.mediaFor(l, page)?.let { u ->
                 addCand(Cand(u, CK.MEDIA, DetScan.classify(u) ?: DetScan.T.MAYBE, "aprendido", l.refFixed, l.ref))
-                did = "montei o endereço do vídeo desta aula"
+                did = "montei o endereço do vídeo desta página"
             }
+            if (l.via == "play" && l.kind != "MSE") { playAll(); waitFor(6_000) }
+            if (l.via == "servidor" && l.kind != "SERVER") addCand(Cand(page, CK.SERVER, null, "aprendido", null, DetKnowledge.Ref.PAGE))
             when (l.kind) {
                 "SERVER" -> { addCand(Cand(page, CK.SERVER, null, "aprendido", null, DetKnowledge.Ref.PAGE)); did = did.ifBlank { "vou pedir ao servidor como no exemplo" } }
                 "MSE" -> { playAll(); waitFor(10_000); did = did.ifBlank { "dei play para gravar os pedaços, como no exemplo" } }
@@ -618,7 +758,7 @@ object Detective {
             val others = anchors.filter { (h, _) -> Extract.host(h) == host && PageKey.norm(h) != PageKey.norm(page) && (DetLearn.samePage(l, h) || DetKnowledge.lessonScore(h, "") >= 2) }
                 .distinctBy { PageKey.norm(it.first) }.take(60)
             if (others.isEmpty()) return
-            log.begin("Repetir nas outras aulas desta página (${others.size})")
+            log.begin("Repetir nos outros vídeos listados nesta página (${others.size})")
             val b = verifiedV
             var built = 0
             for ((h, t) in others) DetLearn.mediaFor(l, h)?.let { u -> built++; addCand(Cand(u, CK.MEDIA, DetScan.classify(u) ?: DetScan.T.MAYBE, "aprendido", l.refFixed, l.ref, page = h, title = t)) }
@@ -630,9 +770,9 @@ object Detective {
             }
             val got = verifiedV - b
             log.done(if (got > 0) St.FIXED else St.INFO, when {
-                got > 0 -> "$got vídeo(s) das outras aulas na lista."
-                built > 0 -> "Montei $built endereço(s) pelo modelo, mas não abriram (o site muda o endereço a cada aula). Abra cada aula: o detetive repete o método sozinho."
-                else -> "O endereço do vídeo não tem o código da aula. Abra cada aula: o detetive repete o método sozinho em cada uma."
+                got > 0 -> "$got vídeo(s) das outras páginas na lista."
+                built > 0 -> "Montei $built endereço(s) pelo modelo, mas não abriram (o site muda o endereço a cada vídeo). Abra cada página: o detetive repete o método sozinho."
+                else -> "O endereço do vídeo não tem o código da página. Abra cada página: o detetive repete o método sozinho em cada uma."
             })
         }
 
@@ -682,9 +822,9 @@ object Detective {
             val verdict = fixed ?: when {
                 v > 0 || p > 0 -> "Pronto: " + listOfNotNull(if (v > 0) "$v vídeo(s)" else null, if (p > 0) "$p foto(s)" else null).joinToString(" e ") + " na lista."
                 drmMaybe -> "Não achei o vídeo e a página tem sinais de DRM. Copie o diagnóstico e mande no chat."
-                pw > 0 -> "Não achei vídeo. A página pede login: entre na conta e abra a página da aula."
-                blocked.isNotEmpty() -> "O site recusou os pedidos (${blocked.values.distinct().joinToString { "HTTP $it" }}). Abra a aula, dê play uma vez e toque em Diagnosticar de novo."
-                videoTags == 0 && bigFrames == 0 -> "Não há player nesta página. Abra a página da aula (onde o vídeo toca)."
+                pw > 0 -> "Não achei vídeo. A página pede login: entre na conta e abra a página do vídeo."
+                blocked.isNotEmpty() -> "O site recusou os pedidos (${blocked.values.distinct().joinToString { "HTTP $it" }}). Abra a página do vídeo, dê play uma vez e toque em Diagnosticar de novo."
+                videoTags == 0 && bigFrames == 0 -> "Não há player nesta página. Abra a página onde o vídeo toca."
                 else -> "Não consegui achar o vídeo nesta página. Copie o diagnóstico e mande no chat."
             }
             return Result(v, p, verdict, lessonUrl, lessonTitle)

@@ -161,7 +161,7 @@ object DetMemory {
     fun saveLesson(l: DetLearn.Lesson) {
         val o = JSONObject().put("site", l.site).put("pe", l.pageExample).put("me", l.mediaExample).put("k", l.kind).put("r", l.ref.name)
             .put("rf", l.refFixed ?: "").put("mp", l.mediaPattern).put("pp", l.pagePattern).put("pi", l.pageIdRegex).put("mt", l.mediaTemplate)
-            .put("rc", l.recipe).put("m", l.method)
+            .put("rc", l.recipe).put("m", l.method).put("via", l.via).put("sg", l.signed)
         p?.edit()?.putString("l:" + l.site, o.toString())?.apply()
     }
     fun lesson(host: String): DetLearn.Lesson? = try {
@@ -169,7 +169,7 @@ object DetMemory {
             val o = JSONObject(s)
             DetLearn.Lesson(o.getString("site"), o.optString("pe"), o.optString("me"), o.optString("k"),
                 runCatching { DetKnowledge.Ref.valueOf(o.optString("r")) }.getOrDefault(DetKnowledge.Ref.PAGE), o.optString("rf").ifBlank { null },
-                o.optString("mp"), o.optString("pp"), o.optString("pi"), o.optString("mt"), o.optString("rc"), o.optString("m"))
+                o.optString("mp"), o.optString("pp"), o.optString("pi"), o.optString("mt"), o.optString("rc"), o.optString("m"), o.optString("via"), o.optBoolean("sg"))
         }
     } catch (_: Exception) { null }
 

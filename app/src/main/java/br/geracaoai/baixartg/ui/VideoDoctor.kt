@@ -85,6 +85,39 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
     var verdict by remember { mutableStateOf("") }
     // esperando o login: a janela vira uma faixa pequena para você poder digitar na página
     var waitingLogin by remember { mutableStateOf(false) }
+    // 1º passo: escolher um vídeo já baixado deste site como exemplo (ou pular)
+    val choices = remember { try { Detective.examples(Extract.host(page)) } catch (_: Exception) { emptyList() } }
+    var chosen by remember { mutableStateOf(example) }
+    var started by remember { mutableStateOf(example != null || choices.isEmpty()) }
+
+    if (!started) {
+        AlertDialog(
+            onDismissRequest = onClose,
+            icon = { Icon(Icons.Rounded.TravelExplore, null) },
+            title = { Text("Detetive: vídeo de exemplo") },
+            text = {
+                Column(Modifier.heightIn(max = 480.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text("Escolha um vídeo deste site que já foi baixado. O detetive testa o link de novo, olha dentro do vídeo, descobre por onde ele foi achado e repete o mesmo caminho aqui. Ou pule para procurar sem exemplo.",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.height(6.dp))
+                    val here = Extract.host(page)
+                    choices.forEach { (e, src) ->
+                        val h = Extract.host(e.f.page.ifBlank { e.f.url })
+                        Column(Modifier.fillMaxWidth().clickable { chosen = e; started = true }.padding(horizontal = 8.dp, vertical = 8.dp)) {
+                            Text(e.f.title.ifBlank { Extract.fileName(e.f.url) }, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                                fontWeight = if (h == here) FontWeight.SemiBold else FontWeight.Normal)
+                            val quando = if (e.time > 0) java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(e.time)) else ""
+                            Text(listOf(if (h == here) "este site" else h, quando, src).filter { it.isNotBlank() }.joinToString(" • "),
+                                style = MaterialTheme.typography.bodySmall, color = if (h == here) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                        }
+                    }
+                }
+            },
+            confirmButton = { TextButton({ chosen = null; started = true }) { Text("Pular") } },
+            dismissButton = { TextButton(onClose) { Text("Fechar") } },
+        )
+        return
+    }
 
     LaunchedEffect(page) {
         val w = web
@@ -95,7 +128,7 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
             override fun note(d: String) { if (steps.isNotEmpty()) steps[steps.lastIndex] = steps.last().copy(detail = d) }
         }
         try {
-            val r = Detective.run(w, Detective.Mode.FULL, Detective.Hooks(tapPlay, collect), log, example)
+            val r = Detective.run(w, Detective.Mode.FULL, Detective.Hooks(tapPlay, collect), log, chosen)
             verdict = r.verdict
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
@@ -160,39 +193,6 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
                 copy(ctx, rep, "Diagnóstico copiado (sem links). Cole no chat.")
             }) { Text("Copiar") }
         },
-    )
-}
-
-/**
- * "Aprender com um vídeo baixado": os últimos 30 vídeos do histórico (só no celular). Você escolhe um que deu certo e o
- * detetive descobre o método e repete nesta página e nas outras aulas.
- */
-@Composable
-fun LearnPickDialog(onPick: (HistEntry) -> Unit, onClose: () -> Unit) {
-    val all by History.list.collectAsState()
-    val items = remember(all) { all.filter { it.f.kind != Kind.PHOTO }.take(30) }
-    AlertDialog(
-        onDismissRequest = onClose,
-        icon = { Icon(Icons.Rounded.School, null) },
-        title = { Text("Aprender com um vídeo baixado") },
-        text = {
-            Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                Text("Escolha um vídeo que deu certo. O detetive descobre como ele foi achado e baixado e repete o mesmo caminho nas outras aulas do site.",
-                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(6.dp))
-                if (items.isEmpty()) Text("Nenhum vídeo baixado ainda.", style = MaterialTheme.typography.bodyMedium)
-                items.forEach { e ->
-                    Column(Modifier.fillMaxWidth().clickable { onPick(e) }.padding(horizontal = 8.dp, vertical = 8.dp)) {
-                        run {
-                            Text(e.f.title.ifBlank { Extract.fileName(e.f.url) }, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                            val whenTxt = java.text.SimpleDateFormat("dd/MM HH:mm", java.util.Locale("pt", "BR")).format(java.util.Date(e.time))
-                            Text("${Extract.host(e.f.page.ifBlank { e.f.url })} • $whenTxt", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClose) { Text("Fechar") } },
     )
 }
 

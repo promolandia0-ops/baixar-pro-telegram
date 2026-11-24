@@ -22,7 +22,20 @@ object DetLearn {
         val mediaTemplate: String,      // endereço do vídeo com {id} no lugar do código da aula
         val recipe: String,
         val method: String,             // explicação em português
+        val via: String = "",           // como o vídeo foi achado na página (varredura, rede, receita, play, servidor…)
+        val signed: Boolean = false,    // link temporário (token/expira): precisa pegar um novo em cada aula
     )
+
+    private val SIGNED = Regex("""(?i)[?&/~](?:exp|expires?|e|token|tkn|sig|signature|hmac|hash|policy|key-pair-id|acl|st|md5|auth|validfrom|validto|hdnts|hdntl|x-amz-signature|x-goog-signature)=|~hmac=|/exp=\d""")
+    fun isSigned(u: String) = SIGNED.containsMatchIn(u)
+
+    /** Mesmo vídeo (outro link do mesmo arquivo): mesmo caminho sem a query, ou mesmo formato com o mesmo código. */
+    fun sameVideo(a: String, b: String): Boolean {
+        fun core(u: String) = u.substringBefore('#').substringBefore('?').lowercase().replace(Regex("""/(?:exp|acl|hmac)=[^/]*"""), "")
+        if (core(a) == core(b)) return true
+        val ia = ids(a).filter { it.length >= 6 }.toSet(); val ib = ids(b).filter { it.length >= 6 }.toSet()
+        return host(a) == host(b) && ia.intersect(ib).isNotEmpty()
+    }
 
     private val UUID = Regex("""^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$""", RegexOption.IGNORE_CASE)
     private val HEX = Regex("""^[0-9a-f]{8,}$""", RegexOption.IGNORE_CASE)
@@ -97,14 +110,14 @@ object DetLearn {
             append(" em ").append(host(media).ifBlank { "?" })
             if (rc != null) append(" (player ${rc.name})")
             append(". Origem (Referer): ").append(when (r) {
-                DetKnowledge.Ref.PAGE -> "a página da aula"
+                DetKnowledge.Ref.PAGE -> "a página do vídeo"
                 DetKnowledge.Ref.ORIGIN -> "o endereço do site"
                 DetKnowledge.Ref.FRAME -> "o player (${host(fixed ?: "")})"
                 DetKnowledge.Ref.NONE -> "nenhuma"
             }).append('.')
-            if (tpl.isNotBlank()) append(" O código da aula aparece no endereço do vídeo: dá para montar o vídeo das outras aulas direto.")
+            if (tpl.isNotBlank()) append(" O código da página aparece no endereço do vídeo: dá para montar o vídeo das outras páginas direto.")
         }
-        return Lesson(site, page, media, kind, r, fixed, pattern(media), pattern(page), pageId, tpl, rc?.id.orEmpty(), how)
+        return Lesson(site, page, media, kind, r, fixed, pattern(media), pattern(page), pageId, tpl, rc?.id.orEmpty(), how, signed = isSigned(media))
     }
 
     /** Endereço do vídeo de outra aula montado pelo modelo aprendido (null se a aula não tem o mesmo formato). */
