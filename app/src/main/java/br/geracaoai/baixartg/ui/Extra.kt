@@ -49,6 +49,19 @@ private val collectScope = kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.
  */
 @Composable
 private fun DetectFab(modifier: Modifier, show: Boolean, onOpen: () -> Unit) {
+    // detetive sozinho: página sem vídeo por 12 s → investiga em silêncio (sem clicar em nada nem sair da página)
+    LaunchedEffect(current) {
+        if (!current.startsWith("http")) return@LaunchedEffect
+        kotlinx.coroutines.delay(12_000)
+        val w = web ?: return@LaunchedEffect
+        if (BrowserDetect.mode.intValue == 1 && !BrowserDetect.photosOn.value) return@LaunchedEffect
+        if (doctor || (BrowserDetect.list.count { !it.sent } > 0 && !BrowserDetect.photosOn.value)) return@LaunchedEffect
+        try { Detective.runQuiet(w, Detective.Hooks(tapPlay = {}, collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) })) } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            br.geracaoai.baixartg.core.CrashLog.write("detetive automático", e)
+        }
+    }
+    val detStatus by Detective.quietStatus
     val mode by BrowserDetect.mode
     val detected by remember { derivedStateOf { if (BrowserDetect.mode.intValue == 1) 0 else BrowserDetect.list.count { !it.sent } } }
     val marked by remember { derivedStateOf { BrowserDetect.list.count { it.sel && !it.sent } } }
@@ -421,6 +434,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     detected > 0 -> "$detected vídeo${if (detected == 1) "" else "s"}" + (if (pendingN > 0) " (+$pendingN)" else "")
                     mode == 2 && phN > 0 -> "$phN fotos"
                     searching -> "Procurando…"
+                    detStatus.isNotBlank() -> detStatus
                     else -> "0 vídeos"
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -429,7 +443,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         modifier = Modifier.weight(1f).height(38.dp),
                         contentPadding = PaddingValues(horizontal = 10.dp, vertical = 0.dp),
                     ) {
-                        if (searching || loadAllOn || pendingN > 0) {
+                        if (searching || loadAllOn || pendingN > 0 || detStatus.isNotBlank()) {
                             CircularProgressIndicator(Modifier.size(13.dp), strokeWidth = 2.dp)
                         } else {
                             Icon(Icons.Rounded.VideoLibrary, null, Modifier.size(16.dp))
@@ -443,7 +457,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         }
                         DropdownMenu(moreMenu, { moreMenu = false }) {
                             DropdownMenuItem(
-                                text = { Text("Diagnosticar e corrigir (vídeo)") },
+                                text = { Text("Detetive: achar vídeos e fotos") },
                                 leadingIcon = { Icon(Icons.Rounded.Build, null) },
                                 enabled = current.startsWith("http"),
                                 onClick = { moreMenu = false; doctor = true },
@@ -480,7 +494,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                 if (offerDoctor && detected == 0 && !searching && mode != 1 && !doctor) {
                     TextButton({ doctor = true }, Modifier.fillMaxWidth().height(30.dp), contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
                         Icon(Icons.Rounded.Build, null, Modifier.size(14.dp)); Spacer(Modifier.width(6.dp))
-                        Text("Nenhum vídeo? Diagnosticar e corrigir", style = MaterialTheme.typography.labelMedium)
+                        Text("Nenhum vídeo? Chamar o detetive", style = MaterialTheme.typography.labelMedium)
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -566,7 +580,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     BrowserRuntime.pageUrl = url
                     startNetPoll()
                     br.geracaoai.baixartg.core.CrashLog.mark("navegador: abrindo ${br.geracaoai.baixartg.core.CrashLog.siteTag(url)}")
-                    if (url != current) BrowserDetect.newPage()
+                    if (url != current) { BrowserDetect.newPage(); br.geracaoai.baixartg.core.DetBridge.newPage() }
                     v.evaluateJavascript(MseHookScript.SCRIPT) { }
                     if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
                     current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward()
@@ -627,6 +641,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             web = this
             BrowserRuntime.adopt(this)
             BrowserRuntime.installServiceWorkerHook()
+            // detetive: agente em todos os quadros (inclusive players de outro site) + canal de volta para o app
+            br.geracaoai.baixartg.core.DetBridge.install(this)
             val start = BrowserRuntime.reloadUrl.also { BrowserRuntime.reloadUrl = null } ?: initialAddr.takeIf { gen == 0 }
             if (start != null && start.length > 8) loadUrl(start)
         }

@@ -470,7 +470,8 @@ object Downloader {
         val cookies = urls.mapNotNull { u -> try { Net.cookies?.cookieFor(u)?.trim()?.ifBlank { null } } catch (_: Exception) { null } }.distinct()
         if (cookies.isNotEmpty()) j.put("cookies", cookies.joinToString("; "))
         if (Prefs.quality == 0) j.put("quality", "best")
-        return j.put("user_agent", Net.userAgent).put("referer", Net.originOf(pageUrl) ?: pageUrl)
+        // detetive: alguns players (Vimeo privado, Panda…) só abrem com a página da aula como origem
+        return j.put("user_agent", Net.userAgent).put("referer", RefererHints.get(pageUrl) ?: Net.originOf(pageUrl) ?: pageUrl)
     }
 
     @Volatile private var warmedAt = 0L

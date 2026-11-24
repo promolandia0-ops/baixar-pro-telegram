@@ -20,6 +20,7 @@ class App : Application() {
         br.geracaoai.baixartg.core.CrashLog.install(this)
         try { br.geracaoai.baixartg.core.SiteHash.init(this) } catch (_: Exception) {}
         Prefs.init(this); Jobs.init(this)
+        try { br.geracaoai.baixartg.core.DetMemory.init(this) } catch (_: Exception) {}
         try { br.geracaoai.baixartg.core.Net.userAgent = android.webkit.WebSettings.getDefaultUserAgent(this) } catch (_: Exception) {}
         try { br.geracaoai.baixartg.web.WebCookies.init(this); br.geracaoai.baixartg.core.Net.cookies = br.geracaoai.baixartg.web.WebCookies } catch (_: Exception) {}
         br.geracaoai.baixartg.web.AdBlock.enabled = Prefs.strongBlock; br.geracaoai.baixartg.web.AdBlock.init(this)

@@ -592,6 +592,12 @@ object BrowserDetect {
         publish(Found(url, page, t, kind, ref = page, extra = extra), xk)
     }
 
+    /** Detetive: vídeo já conferido (baixou o começo e é vídeo de verdade), com o Referer que funcionou. Só thread principal. */
+    fun addFound(f: Found) {
+        if (mode.intValue == 1) return   // "Só fotos"
+        publish(f)
+    }
+
     /** Cards coletados do DOM (JsScripts.COLLECT). */
     fun totalDetectedCount(): Int = list.count { !it.sent }
     fun seenItemsCount(): Int = synchronized(seenCards) { seenCards.size } + list.count { !it.sent }

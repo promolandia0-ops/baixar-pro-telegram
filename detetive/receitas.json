@@ -1,0 +1,26 @@
+{
+  "v": 1,
+  "sobre": "Receitas extras do Detetive. O app baixa este arquivo sozinho (a cada 6 h). Cada receita: match = expressão que reconhece o player no endereço/código; leads = endereços a testar ($1, $2… = partes do match; $0 = tudo). kind: MEDIA (vídeo direto), JSON (config com vídeos dentro), PAGE (abrir a página do player), SERVER (servidor yt-dlp). ref: PAGE (página da aula), FRAME (o próprio player), ORIGIN, NONE.",
+  "recipes": [
+    {
+      "id": "gumlet",
+      "name": "Gumlet",
+      "match": "https?://play\\.gumlet\\.io/embed/[a-z0-9]+",
+      "leads": [ { "to": "$0", "kind": "PAGE", "ref": "PAGE" }, { "to": "$0", "kind": "SERVER", "ref": "PAGE" } ]
+    },
+    {
+      "id": "tella",
+      "name": "Tella",
+      "match": "https?://(?:www\\.)?tella\\.tv/video/[a-z0-9\\-]+",
+      "leads": [ { "to": "$0", "kind": "PAGE", "ref": "PAGE" } ]
+    },
+    {
+      "id": "vimeo-showcase",
+      "name": "Vimeo Showcase",
+      "match": "https?://vimeo\\.com/showcase/\\d+(?:/embed)?",
+      "leads": [ { "to": "$0", "kind": "SERVER", "ref": "PAGE" } ]
+    }
+  ],
+  "mediaHosts": [ "gumlet\\.io", "tella\\.tv/.+\\.m3u8" ],
+  "globals": [ "__TELLA__", "gumletPlayer" ]
+}

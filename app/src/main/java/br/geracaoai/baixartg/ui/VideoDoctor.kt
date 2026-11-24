@@ -79,129 +79,57 @@ object VideoDoctor {
 @Composable
 fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect: () -> Unit, onClose: () -> Unit) {
     val ctx = LocalContext.current
-    val steps = remember { mutableStateListOf<VideoDoctor.Step>() }
+    val steps = remember { mutableStateListOf<Detective.Step>() }
     var running by remember { mutableStateOf(true) }
     var verdict by remember { mutableStateOf("") }
+    // esperando o login: a janela vira uma faixa pequena para você poder digitar na página
+    var waitingLogin by remember { mutableStateOf(false) }
 
     LaunchedEffect(page) {
-        val start = VideoDoctor.found()
-        CrashLog.mark("diagnóstico de vídeo iniciado")
-        fun begin(t: String) { steps.add(VideoDoctor.Step(t, VideoDoctor.St.RUNNING)) }
-        fun done(st: VideoDoctor.St, d: String = "") { if (steps.isNotEmpty()) steps[steps.lastIndex] = steps.last().copy(st = st, detail = d) }
-        fun gotIt() = VideoDoctor.found() > start
-        suspend fun waitFor(ms: Long): Boolean { var t = 0L; while (t < ms) { if (gotIt()) return true; delay(400); t += 400 }; return gotIt() }
-        val title = web?.title ?: ""
-
+        val w = web
+        if (w == null) { verdict = "O navegador não está aberto."; running = false; return@LaunchedEffect }
+        val log = object : Detective.Log {
+            override fun begin(t: String) { waitingLogin = t.startsWith("Esperando você entrar"); steps.add(Detective.Step(t, Detective.St.RUNNING)) }
+            override fun done(st: Detective.St, d: String) { waitingLogin = false; if (steps.isNotEmpty()) steps[steps.lastIndex] = steps.last().copy(st = st, detail = d) }
+            override fun note(d: String) { if (steps.isNotEmpty()) steps[steps.lastIndex] = steps.last().copy(detail = d) }
+        }
         try {
-            // 1) página
-            begin("Página carregada")
-            val snap = try { JSONObject(VideoDoctor.unq(VideoDoctor.eval(web, VideoDoctor.SNAP_JS))) } catch (_: Exception) { JSONObject() }
-            if (!page.startsWith("http") || snap.length() == 0) { done(VideoDoctor.St.FAIL, "A página não respondeu. Recarregue e tente de novo."); verdict = "A página não respondeu."; return@LaunchedEffect }
-            done(VideoDoctor.St.OK, if (snap.optString("ready") == "complete") "pronta" else "ainda carregando (${snap.optString("ready")})")
-
-            // 2) login
-            if (snap.optInt("login") > 0) {
-                begin("Login"); done(VideoDoctor.St.INFO, "Há um campo de senha nesta página. Se o vídeo é só para quem entra na conta, entre primeiro e abra o vídeo de novo.")
-            }
-
-            // 3) gancho de detecção
-            begin("Detecção de vídeo ativa na página")
-            if (snap.optInt("hook") == 1) done(VideoDoctor.St.OK)
-            else { VideoDoctor.eval(web, MseHookScript.SCRIPT); done(VideoDoctor.St.FIXED, "Estava desligada; liguei de novo. Vídeos que o player pedir agora entram na lista.") }
-
-            // 4) o que tem na página
-            val iframes = snap.optJSONArray("iframes")
-            val nIfr = iframes?.length() ?: 0
-            begin("Players na página")
-            done(VideoDoctor.St.INFO, "vídeo: ${snap.optInt("videos")} (arquivo: ${snap.optInt("src")}, em pedaços/blob: ${snap.optInt("blob")}) • player em iframe: $nIfr • caixas de player: ${snap.optInt("players")}")
-
-            // 5) vídeos vistos e descartados
-            val disc = synchronized(BrowserDiag.discarded) { BrowserDiag.discarded.toList() }
-            if (disc.isNotEmpty()) {
-                begin("Vídeos vistos mas descartados")
-                disc.forEach { (u, why) -> BrowserDetect.intercepted(u, page, title, kindHint = if (Extract.isHls(u)) Kind.HLS else if (Extract.isDash(u)) Kind.SERVER else Kind.DIRECT, force = true) }
-                if (waitFor(1_500)) { done(VideoDoctor.St.FIXED, "O app tinha descartado ${disc.size} (${disc.map { it.second }.distinct().joinToString()}). Coloquei de volta na lista."); }
-                else done(VideoDoctor.St.FAIL, "${disc.size} descartado(s) (${disc.map { it.second }.distinct().joinToString()}), mas não eram vídeos válidos.")
-            }
-            if (gotIt()) return@LaunchedEffect
-
-            // 6) aviso de cookies
-            if (snap.optInt("consent") == 1) {
-                begin("Aviso de cookies")
-                val n = VideoDoctor.unq(VideoDoctor.eval(web, VideoDoctor.CONSENT_JS)).toIntOrNull() ?: 0
-                if (n > 0) { if (waitFor(4_000)) { done(VideoDoctor.St.FIXED, "Aceitei o aviso e o player liberou o vídeo."); return@LaunchedEffect } else done(VideoDoctor.St.FIXED, "Aceitei o aviso ($n botão).") }
-                else done(VideoDoctor.St.INFO, "Não achei o botão de aceitar. Se houver um aviso na tela, toque em aceitar.")
-            }
-
-            // 7) confirmação de idade
-            if (snap.optInt("age") == 1) {
-                begin("Confirmação de idade")
-                VideoDoctor.eval(web, AgeGate.BYPASS_JS)
-                if (waitFor(4_000)) { done(VideoDoctor.St.FIXED, "Confirmei e o vídeo apareceu."); return@LaunchedEffect } else done(VideoDoctor.St.INFO, "Tentei confirmar. Se a tela ainda pedir, confirme você.")
-            }
-
-            // 8) play
-            begin("Dar play no player (sem som)")
-            tapPlay()
-            if (waitFor(5_000)) { done(VideoDoctor.St.FIXED, "O player pediu o vídeo depois do play."); return@LaunchedEffect }
-            done(VideoDoctor.St.FAIL, "O play não fez o player pedir um vídeo.")
-
-            // 9) rolar até o player
-            begin("Mostrar o player na tela")
-            VideoDoctor.eval(web, VideoDoctor.SCROLL_JS); tapPlay(); collect()
-            if (waitFor(4_000)) { done(VideoDoctor.St.FIXED, "O player carregou quando apareceu na tela."); return@LaunchedEffect }
-            done(VideoDoctor.St.FAIL)
-
-            // 10) endereços no código da página
-            begin("Procurar endereços de vídeo no código da página")
-            val html = VideoDoctor.unq(VideoDoctor.eval(web, "(function(){try{return document.documentElement.outerHTML}catch(e){return ''}})()", 10_000))
-            val urls = try { SiteAnalyzer.mediaUrlsInHtml(page, html).distinct().take(20) } catch (_: Exception) { emptyList() }
-            urls.forEach { BrowserDetect.intercepted(it, page, title) }
-            if (waitFor(1_500)) { done(VideoDoctor.St.FIXED, "Achei ${urls.size} endereço(s) no código."); return@LaunchedEffect }
-            done(if (urls.isEmpty()) VideoDoctor.St.FAIL else VideoDoctor.St.INFO, if (urls.isEmpty()) "Nenhum." else "${urls.size} endereço(s), mas não eram vídeos válidos.")
-
-            // 11) players em iframe e a própria página no servidor yt-dlp
-            val targets = buildList { for (i in 0 until nIfr) iframes?.optString(i)?.takeIf { it.startsWith("http") }?.let { add(it) }; add(page) }.distinct().take(4)
-            begin("Perguntar ao servidor yt-dlp (${targets.size} endereço(s))")
-            var ok = 0; var lastErr = ""
-            for (u in targets) {
-                val t = withTimeoutOrNull(45_000) { Downloader.probe(Prefs.server, u) }
-                if (t != null) { ok++; BrowserDetect.intercepted(u, page, t.ifBlank { title }, kindHint = Kind.SERVER, force = true) }
-                else lastErr = Downloader.lastProbeError ?: "não reconheceu"
-            }
-            if (ok > 0 && waitFor(1_500)) { done(VideoDoctor.St.FIXED, "O servidor reconheceu $ok vídeo(s)${if (nIfr > 0) " (o player estava num iframe)" else ""}."); return@LaunchedEffect }
-            done(VideoDoctor.St.FAIL, lastErr.take(160))
-
-            // 12) última leitura completa
-            begin("Procurar de novo na página inteira")
-            collect()
-            if (waitFor(5_000)) { done(VideoDoctor.St.FIXED); return@LaunchedEffect }
-            done(VideoDoctor.St.FAIL)
+            val r = Detective.run(w, Detective.Mode.FULL, Detective.Hooks(tapPlay, collect), log)
+            verdict = r.verdict
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            CrashLog.write("detetive", e)
+            verdict = "O detetive parou por um erro (${e.javaClass.simpleName}). Copie o diagnóstico e mande no chat."
         } finally {
-            val got = VideoDoctor.found() - start
-            if (verdict.isBlank()) verdict = if (got > 0) "Pronto: $got vídeo(s) na lista." else {
-                val s2 = try { JSONObject(VideoDoctor.unq(VideoDoctor.eval(web, VideoDoctor.SNAP_JS))) } catch (_: Exception) { JSONObject() }
-                when {
-                    s2.optInt("login") > 0 -> "Não achei vídeo. A página pede login: entre na conta e abra a página do vídeo."
-                    s2.optInt("blob") > 0 || s2.optInt("mse") == 1 -> "O player monta o vídeo em pedaços e não mostrou a lista. Deixe o vídeo tocando alguns segundos e toque em Procurar."
-                    s2.optInt("videos") == 0 && (s2.optJSONArray("iframes")?.length() ?: 0) == 0 -> "Não há player nesta página. Abra a página do vídeo (onde ele toca)."
-                    else -> "Não consegui achar o vídeo nesta página. Copie o diagnóstico e mande no chat."
+            // passo que ficou rodando (janela fechada/erro) não fica girando no relatório
+            for (i in steps.indices) if (steps[i].st == Detective.St.RUNNING) steps[i] = steps[i].copy(st = Detective.St.SKIP)
+            running = false
+        }
+    }
+
+    if (waitingLogin && running) {
+        androidx.compose.ui.window.Popup(alignment = Alignment.TopCenter, properties = androidx.compose.ui.window.PopupProperties(focusable = false)) {
+            Surface(Modifier.padding(top = 56.dp, start = 12.dp, end = 12.dp), shape = MaterialTheme.shapes.large, tonalElevation = 6.dp, shadowElevation = 6.dp) {
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Detetive esperando você entrar na conta…", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f, fill = false))
+                    TextButton({ onClose() }) { Text("Parar") }
                 }
             }
-            running = false
-            CrashLog.mark("diagnóstico de vídeo: ${if (got > 0) "achou $got" else "nada"}")
         }
+        return
     }
 
     AlertDialog(
         onDismissRequest = { if (!running) onClose() },
-        icon = { Icon(Icons.Rounded.BugReport, null) },
-        title = { Text("Diagnosticar e corrigir") },
+        icon = { Icon(Icons.Rounded.TravelExplore, null) },
+        title = { Text("Detetive: vídeos e fotos") },
         text = {
             Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 steps.forEach { s ->
                     Row(verticalAlignment = Alignment.Top) {
-                        if (s.st == VideoDoctor.St.RUNNING) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                        if (s.st == Detective.St.RUNNING) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
                         else Icon(iconOf(s.st), null, Modifier.size(18.dp), tint = colorOf(s.st))
                         Spacer(Modifier.width(8.dp))
                         Column {
@@ -217,12 +145,13 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
             }
         },
         confirmButton = {
-            TextButton({ onClose() }, enabled = !running) { Text(if (running) "Analisando…" else "Fechar") }
+            // dá para fechar a qualquer momento (ex.: para entrar na conta); o detetive para junto
+            TextButton({ onClose() }) { Text(if (running) "Parar" else "Fechar") }
         },
         dismissButton = {
             if (!running) TextButton({
                 val rep = buildString {
-                    appendLine("— diagnosticar e corrigir — app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME}")
+                    appendLine("— detetive — app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME}")
                     steps.forEach { appendLine("[${it.st}] ${it.title}${if (it.detail.isNotBlank()) ": " + it.detail else ""}") }
                     appendLine("resultado: $verdict")
                     append(BrowserDiag.report())
@@ -233,18 +162,18 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
     )
 }
 
-private fun iconOf(s: VideoDoctor.St): ImageVector = when (s) {
-    VideoDoctor.St.OK -> Icons.Rounded.CheckCircle
-    VideoDoctor.St.FIXED -> Icons.Rounded.Build
-    VideoDoctor.St.FAIL -> Icons.Rounded.Cancel
-    VideoDoctor.St.INFO -> Icons.Rounded.Info
+private fun iconOf(s: Detective.St): ImageVector = when (s) {
+    Detective.St.OK -> Icons.Rounded.CheckCircle
+    Detective.St.FIXED -> Icons.Rounded.Build
+    Detective.St.FAIL -> Icons.Rounded.Cancel
+    Detective.St.INFO -> Icons.Rounded.Info
     else -> Icons.Rounded.RemoveCircleOutline
 }
 
 @Composable
-private fun colorOf(s: VideoDoctor.St) = when (s) {
-    VideoDoctor.St.OK -> MaterialTheme.colorScheme.primary
-    VideoDoctor.St.FIXED -> MaterialTheme.colorScheme.tertiary
-    VideoDoctor.St.FAIL -> MaterialTheme.colorScheme.error
+private fun colorOf(s: Detective.St) = when (s) {
+    Detective.St.OK -> MaterialTheme.colorScheme.primary
+    Detective.St.FIXED -> MaterialTheme.colorScheme.tertiary
+    Detective.St.FAIL -> MaterialTheme.colorScheme.error
     else -> MaterialTheme.colorScheme.onSurfaceVariant
 }
