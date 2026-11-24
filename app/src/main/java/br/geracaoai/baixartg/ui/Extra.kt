@@ -105,6 +105,39 @@ object BrowserRuntime {
         try { web?.destroy() } catch (_: Exception) {}
         web = null; started = false
     }
+    /** Página aberta agora no navegador visível (lida por threads de rede). */
+    @Volatile var pageUrl: String = ""
+    @Volatile private var swInstalled = false
+    /**
+     * Pedidos feitos pelo service worker do site não passam pelo WebViewClient: sites que buscam a lista .m3u8
+     * por ele não mostravam vídeo nenhum até o play. Aqui eles entram na mesma detecção do navegador.
+     */
+    fun installServiceWorkerHook() {
+        if (swInstalled) return
+        swInstalled = true
+        try {
+            if (!androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.SERVICE_WORKER_BASIC_USAGE) ||
+                !androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.SERVICE_WORKER_SHOULD_INTERCEPT_REQUEST)) return
+            androidx.webkit.ServiceWorkerControllerCompat.getInstance().setServiceWorkerClient(object : androidx.webkit.ServiceWorkerClientCompat() {
+                override fun shouldInterceptRequest(request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
+                    try {
+                        val pg = pageUrl
+                        // só atribui à página visível quando não há páginas ocultas abertas (elas também usam service worker)
+                        if (!pg.startsWith("http") || !br.geracaoai.baixartg.core.JsRender.browserVisible || br.geracaoai.baixartg.core.JsRender.alive.get() > 0) return null
+                        val u = request.url?.toString().orEmpty()
+                        if (!u.startsWith("http")) return null
+                        val hdrs = request.requestHeaders ?: emptyMap()
+                        if (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u)) MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-sw")
+                        if (Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u)) && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
+                            BrowserDetect.intercepted(u, pg, "")
+                            br.geracaoai.baixartg.core.PlayCapture.record(u, pg, hdrs["Referer"] ?: pg)
+                        }
+                    } catch (_: Throwable) {}
+                    return null
+                }
+            })
+        } catch (e: Throwable) { br.geracaoai.baixartg.core.CrashLog.write("service worker: gancho não instalado", e) }
+    }
     /** Muda quando o WebView precisa ser recriado (o renderizador caiu). */
     val gen = androidx.compose.runtime.mutableIntStateOf(0)
     /** Página para abrir no WebView recriado. */
@@ -252,6 +285,30 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             }
         }
     } }
+    // Lista de vídeos que o player pede por fetch/XHR (anotada pelo gancho na página, inclusive quando quem responde é o
+    // service worker). Antes só era lida no "Procurar": a página mostrava 0 vídeos até o play. Agora é lida sozinha,
+    // a cada 2 s, por 40 s depois de abrir a página. Barato: só devolve o que é novo.
+    val netPoll = remember { object : Runnable {
+        var left = 0
+        override fun run() {
+            val v = web ?: return
+            val page = v.url ?: return
+            if (!page.startsWith("http") || left <= 0) return
+            left--
+            v.evaluateJavascript("(function(){try{var n=window.__bptNet||[];var i=window.__bptNetRd||0;window.__bptNetRd=n.length;return JSON.stringify(n.slice(i))}catch(e){return '[]'}})()") { raw ->
+                try {
+                    val js = org.json.JSONTokener(raw ?: "").nextValue() as? String ?: "[]"
+                    val arr = org.json.JSONArray(js)
+                    for (i in 0 until arr.length()) {
+                        val u = arr.optString(i)
+                        if (u.startsWith("http") && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "")
+                    }
+                } catch (_: Exception) {}
+            }
+            if (left > 0) handler.postDelayed(this, 2_000)
+        }
+    } }
+    fun startNetPoll() { handler.removeCallbacks(netPoll); netPoll.left = 20; handler.postDelayed(netPoll, 1_500) }
     fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs)
         if (BrowserDetect.photosOn.value) { handler.removeCallbacks(photoRun); handler.postDelayed(photoRun, delayMs + 300) } }
     val mode by BrowserDetect.mode
@@ -443,6 +500,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     return br.geracaoai.baixartg.web.AdBlock.blockNavigation(request.url.toString(), v.url ?: current, request.hasGesture(), request.isRedirect)
                 }
                 override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
+                    BrowserRuntime.pageUrl = url
+                    startNetPoll()
                     br.geracaoai.baixartg.core.CrashLog.mark("navegador: abrindo ${br.geracaoai.baixartg.core.CrashLog.siteTag(url)}")
                     if (url != current) BrowserDetect.newPage()
                     v.evaluateJavascript(MseHookScript.SCRIPT) { }
@@ -473,7 +532,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     }
                     return super.shouldInterceptRequest(v, request)
                 }
-                override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward() }
+                override fun doUpdateVisitedHistory(v: WebView, url: String, isReload: Boolean) { if (url != BrowserRuntime.pageUrl) { BrowserRuntime.pageUrl = url; startNetPoll() }; current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward() }
             }
             settings.setSupportMultipleWindows(true); settings.javaScriptCanOpenWindowsAutomatically = false
             webChromeClient = object : WebChromeClient() {
@@ -503,6 +562,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             }
             web = this
             BrowserRuntime.adopt(this)
+            BrowserRuntime.installServiceWorkerHook()
             val start = BrowserRuntime.reloadUrl.also { BrowserRuntime.reloadUrl = null } ?: initialAddr.takeIf { gen == 0 }
             if (start != null && start.length > 8) loadUrl(start)
         }

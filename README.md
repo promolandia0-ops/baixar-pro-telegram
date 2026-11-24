@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.20
+- Navegador acha o vídeo sem precisar dar play em sites que carregam a lista HLS (.m3u8) sozinhos: os pedidos de vídeo que a página faz são lidos automaticamente por 40 s depois de abrir (antes só no "Procurar").
+- Pedidos feitos pelo service worker do site agora também entram na detecção (antes ficavam invisíveis para o app).
+
 ## 1.9.19
 - Corrige o app fechando sozinho por falta de memória (OutOfMemoryError): downloads em pedaços (HLS/DASH) agora têm um limite global de pedaços na memória e esperam quando a memória aperta; os downloads usam HTTP/1.1 (no HTTP/2 a rede enchia a memória antes de o app ler); o app pode usar mais memória (largeHeap).
 - Corrige o fechamento "ForegroundServiceDidNotStopInTimeException": os serviços da fila, da varredura e de limpar repetidos usam o tipo "uso especial" (sem o limite de 6 h do dataSync) e, se o Android pedir para parar, param na hora.
