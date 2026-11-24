@@ -127,6 +127,7 @@ object BrowserRuntime {
                         val u = request.url?.toString().orEmpty()
                         if (!u.startsWith("http")) return null
                         val hdrs = request.requestHeaders ?: emptyMap()
+                        BrowserDiag.media("sw", u)
                         if (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u)) MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-sw")
                         if (Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u)) && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
                             BrowserDetect.intercepted(u, pg, "")
@@ -287,7 +288,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     } }
     // Lista de vídeos que o player pede por fetch/XHR (anotada pelo gancho na página, inclusive quando quem responde é o
     // service worker). Antes só era lida no "Procurar": a página mostrava 0 vídeos até o play. Agora é lida sozinha,
-    // a cada 2 s, por 40 s depois de abrir a página. Barato: só devolve o que é novo.
+    // a cada 2,5 s, por até 5 min depois de abrir a página. Barato: só devolve o que é novo.
     val netPoll = remember { object : Runnable {
         var left = 0
         override fun run() {
@@ -295,20 +296,36 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             val page = v.url ?: return
             if (!page.startsWith("http") || left <= 0) return
             left--
-            v.evaluateJavascript("(function(){try{var n=window.__bptNet||[];var i=window.__bptNetRd||0;window.__bptNetRd=n.length;return JSON.stringify(n.slice(i))}catch(e){return '[]'}})()") { raw ->
+            v.evaluateJavascript("(function(){try{var n=window.__bptNet||[];var i=window.__bptNetRd||0;window.__bptNetRd=n.length;var c=window.__bptNetCt||[];var j=window.__bptNetCtRd||0;window.__bptNetCtRd=c.length;return JSON.stringify({n:n.slice(i),c:c.slice(j),h:window.__bptMseHook?1:0,m:window.__bptMseActive?1:0})}catch(e){return '{}'}})()") { raw ->
                 try {
-                    val js = org.json.JSONTokener(raw ?: "").nextValue() as? String ?: "[]"
-                    val arr = org.json.JSONArray(js)
+                    val js = org.json.JSONTokener(raw ?: "").nextValue() as? String ?: "{}"
+                    val o = org.json.JSONObject(js)
+                    if (o.optInt("h") == 0) BrowserDiag.inc("gancho da página ausente")
+                    if (o.optInt("m") == 1) BrowserDiag.inc("player usa MediaSource")
+                    val arr = o.optJSONArray("n") ?: org.json.JSONArray()
                     for (i in 0 until arr.length()) {
                         val u = arr.optString(i)
-                        if (u.startsWith("http") && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "")
+                        if (!u.startsWith("http")) continue
+                        BrowserDiag.media("página", u)
+                        if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "")
+                    }
+                    // listas sem ".m3u8"/".mpd" no endereço, reconhecidas pelo Content-Type da resposta
+                    val ct = o.optJSONArray("c") ?: org.json.JSONArray()
+                    for (i in 0 until ct.length()) {
+                        val e = ct.optJSONObject(i) ?: continue
+                        val u = e.optString("u"); val t = e.optString("t")
+                        if (!u.startsWith("http")) continue
+                        BrowserDiag.media("página", u, t)
+                        val k = if (t.contains("mpegurl", true)) Kind.HLS else if (t.contains("dash", true)) Kind.SERVER else null
+                        if (k != null && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) BrowserDetect.intercepted(u, page, v.title ?: "", k)
                     }
                 } catch (_: Exception) {}
             }
-            if (left > 0) handler.postDelayed(this, 2_000)
+            if (left > 0) handler.postDelayed(this, 2_500)
         }
     } }
-    fun startNetPoll() { handler.removeCallbacks(netPoll); netPoll.left = 20; handler.postDelayed(netPoll, 1_500) }
+    // a cada 2,5 s por até 5 min na mesma página (aulas e players que só carregam depois de um clique)
+    fun startNetPoll() { handler.removeCallbacks(netPoll); netPoll.left = 120; handler.postDelayed(netPoll, 1_500) }
     fun scheduleCollect(delayMs: Long = 1_200) { handler.removeCallbacks(collect); handler.postDelayed(collect, delayMs)
         if (BrowserDetect.photosOn.value) { handler.removeCallbacks(photoRun); handler.postDelayed(photoRun, delayMs + 300) } }
     val mode by BrowserDetect.mode
@@ -520,6 +537,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, current, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                     val hdrs = request.requestHeaders ?: emptyMap()
                     val pg = current
+                    if (u.startsWith("http")) BrowserDiag.media("webview", u)
                     if (u.startsWith("http") && pg.startsWith("http") && (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u) || Extract.isSegmentUrl(u) || hdrs.keys.any { it.equals("Range", true) })) {
                         MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-tab")
                     }

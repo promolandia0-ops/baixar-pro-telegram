@@ -56,6 +56,10 @@ function logReq(u,m,h,ct,cr,src){
     if(/\.(m3u8|mpd|mp4|m4v|webm)(\?|$)/i.test(u)||/mpegurl|dash\+xml/i.test(ct||'')){
       if(window.__bptNet.length<120)window.__bptNet.push(u);
     }
+    if(ct&&/mpegurl|dash\+xml/i.test(ct)&&!/\.(m3u8|mpd)(\?|$)/i.test(u)){
+      window.__bptNetCt=window.__bptNetCt||[];
+      if(window.__bptNetCt.length<60)window.__bptNetCt.push({u:u,t:String(ct)});
+    }
     if(window.__bptMse&&window.__bptMse.onReq){
       try{window.__bptMse.onReq(JSON.stringify(rec))}catch(e){}
     }

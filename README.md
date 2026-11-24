@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.21
+- Navegador: os pedidos de vídeo da página são lidos por até 5 min (antes 40 s), para aulas e players que só carregam depois de um clique.
+- Reconhece listas HLS/DASH pelo tipo da resposta, mesmo sem ".m3u8"/".mpd" no endereço.
+- "Copiar diagnóstico" mostra cada pedido de mídia visto (navegador, service worker ou página), o tipo e se foi aceito ou descartado (e por quê). Sem links.
+
 ## 1.9.20
 - Navegador acha o vídeo sem precisar dar play em sites que carregam a lista HLS (.m3u8) sozinhos: os pedidos de vídeo que a página faz são lidos automaticamente por 40 s depois de abrir (antes só no "Procurar").
 - Pedidos feitos pelo service worker do site agora também entram na detecção (antes ficavam invisíveis para o app).

@@ -34,6 +34,27 @@ object BrowserDiag {
     fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     /** Página nova: contagens recomeçam (antes somavam todas as páginas e confundiam). */
     fun resetPage() { photoRejects.clear(); counters.clear(); lastImgs = -1; lastRaw = 0; lastCands = 0; lastKept = 0; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
+    private val MEDIA_TYPE = Regex("""(?i)\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|ts|m4s|m4a|aac|key)(?:$|[?#/])""")
+    /**
+     * Pedido de mídia visto pelo navegador (sem link): de onde veio, o tipo e o que o app fez com ele.
+     * Mostra se o vídeo nunca chegou ao app ou se chegou e foi descartado (e por quê).
+     */
+    fun media(src: String, u: String, ct: String = "") {
+        try {
+            val ext = MEDIA_TYPE.find(u.substringBefore('#'))?.groupValues?.get(1)?.lowercase()
+                ?: when { ct.contains("mpegurl", true) -> "m3u8(tipo)"; ct.contains("dash", true) -> "mpd(tipo)"; ct.startsWith("video/", true) -> "vídeo(tipo)"; else -> return }
+            val verdict = when {
+                Extract.isSegmentUrl(u) -> "pedaço"
+                ext == "key" -> "chave"
+                Extract.isPreviewVideo(u) -> "DESCARTADO prévia"
+                Extract.isVideoThumb(u) -> "DESCARTADO miniatura"
+                br.geracaoai.baixartg.core.MediaPick.isAdUrl(u) -> "DESCARTADO anúncio"
+                Extract.mediaKindOf(u) == null && !ext.contains("(tipo)") -> "não reconhecido"
+                else -> "aceito"
+            }
+            inc("mídia[$src] $ext → $verdict")
+        } catch (_: Throwable) {}
+    }
     fun timed(ms: Long) { collects++; collectMs = ms; if (ms > collectMaxMs) collectMaxMs = ms }
     fun report(): String = buildString {
         appendLine("— navegador (página atual) — app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME}")
@@ -551,11 +572,11 @@ object BrowserDetect {
     fun setAll(v: Boolean) { for (i in list.indices) { val d = list[i]; val nv = v && !d.sent; if (d.sel != nv) list[i] = d.copy(sel = nv) } }
 
     /** Mídia interceptada pelo navegador (pedido de rede de vídeo). */
-    fun intercepted(url: String, page: String, title: String) {
+    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null) {
         if (page.isNotBlank()) browsing = page
         if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
         if (BrowserGrouping.isFilteredOutVideoUrl(url)) return
-        val kind = Extract.mediaKindOf(url) ?: return
+        val kind = Extract.mediaKindOf(url) ?: kindHint ?: return
         val info = pageInfo[normPage(page)]
         val t = TitleFix.pick(info?.first, title).ifBlank { Extract.mediaTitle(url, "") }
         val extra = listOfNotNull(info?.first, info?.second, TitleFix.clean(title)).filter { it.isNotBlank() }.distinct().joinToString(" ")
