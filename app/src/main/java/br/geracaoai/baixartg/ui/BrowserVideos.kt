@@ -399,10 +399,22 @@ object BrowserDetect {
      * As conferências de "já enviado/na fila" (histórico inteiro + fila) rodam FORA da tela; só o resultado vai
      * para a thread principal (antes travava a tela a cada vídeo detectado). Mesmas regras de antes.
      */
+    private val boosted = java.util.Collections.synchronizedSet(HashSet<String>())
     private fun publish(f0: Found, extraKeys: List<String> = emptyList()) {
         val f = MediaIdentity.withQuality(f0)
         if (!isRealVideo(f) || TitleFix.isSubtitleUrl(f.url)) return
         val ks = (extraKeys + dedupeKeys(f)).distinct()
+        // qualidade máxima: o player começa baixo (360p); procura a lista principal / versão 1080 e troca este item por ela
+        if ((f.kind == Kind.HLS || f.kind == Kind.DIRECT) && boosted.add(MediaIdentity.canonicalMedia(f.url))) scope.launch {
+            try {
+                val nf = kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f) }
+                if (nf != null && nf.url != f.url) {
+                    boosted.add(MediaIdentity.canonicalMedia(nf.url))
+                    Trail.add(listOf(f.url, nf.url, f.page), "qualidade máxima", "o player pediu ${if (f.quality > 0) "${f.quality}p" else "uma qualidade só"}; achei ${if (nf.kind == Kind.HLS && Extract.isHls(nf.url) && nf.quality > 0) "a lista principal (até ${nf.quality}p)" else "${nf.quality}p"} e troquei")
+                    withContext(Dispatchers.Main) { publish(nf.copy(title = f.title, extra = f.extra), ks) }
+                }
+            } catch (e: Exception) { if (e is CancellationException) throw e }
+        }
         val ksPage = ks.filter { it.startsWith("ip:") || it.startsWith("p:") }
         scope.launch {
             var preKey: String? = null; var preSent = false; var preBlocked = false
@@ -419,7 +431,35 @@ object BrowserDetect {
             withContext(Dispatchers.Main) { publishMain(f, ks, ksPage, preKey, preSent, preBlocked) }
         }
     }
+    private fun isPageKey(k: String) = k.startsWith("ip:") || k.startsWith("p:") || k.startsWith("t:")
+    /** Dois links que são vídeos DIFERENTES (não outra qualidade/link do mesmo vídeo). Card ainda carregando não conta. */
+    private fun otherVideo(a: Found, b: Found): Boolean {
+        if (a.kind == Kind.PHOTO || b.kind == Kind.PHOTO || a.url == b.url) return false
+        if (a.url == a.page || b.url == b.page) return false
+        if (DetLearn.sameVideo(a.url, b.url)) return false
+        return mediaIds(a.url).intersect(mediaIds(b.url)).isEmpty()
+    }
+
     private fun publishMain(f: Found, ks: List<String>, ksPage: List<String>, preKey: String?, preSent: Boolean, preBlocked: Boolean) {
+        // Sites com vários vídeos no MESMO endereço de página (ou mesmo título): antes o vídeo novo entrava no item do
+        // anterior e ficava com o link antigo (baixava o mesmo de novo). Se só a página/título bate e o vídeo é outro,
+        // vira um item próprio.
+        val hit0 = synchronized(seenCards) { ks.firstNotNullOfOrNull { keys[it] } }
+        if (hit0 != null) {
+            val matched = synchronized(seenCards) { ks.filter { keys[it] != null } }
+            if (matched.isNotEmpty() && matched.all { isPageKey(it) }) {
+                val ex = list.firstOrNull { it.key == hit0 }?.f ?: hidden[hit0]?.f
+                if ((ex != null && otherVideo(ex, f)) || (ex == null && hit0.startsWith("x:"))) {
+                    val own = ks.filterNot { isPageKey(it) }
+                    if (own.isNotEmpty()) {
+                        Trail.addOnce(listOf(f.url, f.page), "item separado", "mesma página/título de outro vídeo, mas é outro vídeo: entrou como item próprio")
+                        val free = synchronized(seenCards) { own.none { keys[it] != null } }
+                        publishMain(f, own, emptyList(), null, false, if (free) blocked(f, own) else false)
+                        return
+                    }
+                }
+            }
+        }
         val hitKey = synchronized(seenCards) { ks.firstNotNullOfOrNull { keys[it] } }
         if (hitKey != null) {
             // item que o usuário já mandou baixar enquanto ainda carregava: guarda o vídeo resolvido para enviar

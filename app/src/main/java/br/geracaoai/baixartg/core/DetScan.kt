@@ -158,3 +158,59 @@ object DetScan {
     /** DASH com proteção (ContentProtection Widevine/PlayReady). */
     fun dashDrm(mpd: String): Boolean = Regex("""(?i)<ContentProtection[^>]*(?:edef8ba9|9a04f079|widevine|playready)""").containsMatchIn(mpd)
 }
+
+/**
+ * Qualidade máxima: o player costuma começar numa qualidade baixa (ex.: 360p) e o app via só o link dessa qualidade.
+ * Aqui saem os endereços prováveis da versão maior: a lista principal HLS (master/playlist/index… na mesma pasta ou
+ * na pasta de cima) e o mesmo arquivo com 2160/1440/1080/720 no lugar do número da qualidade. Tudo é conferido antes.
+ */
+object QualityUp {
+    val HEIGHTS = listOf(2160, 1440, 1080, 720)
+    private val MASTER_NAMES = listOf("master.m3u8", "playlist.m3u8", "index.m3u8", "manifest.m3u8", "main.m3u8", "video.m3u8", "hls.m3u8", "stream.m3u8")
+    private val QDIR = Regex("""(?i)^(?:\d{3,4}p?\d{0,2}|[a-z_\-]*\d{3,4}p?|hd|sd|fhd|uhd|low|mid|medium|high|mobile|v\d+|stream_?\d+|rendition_?\d+|quality_?\d+|[0-9a-f]{0,4}_?\d{3,4})$""")
+    private val QTOK = Regex("""(?i)(?<=[/_\-.=])(\d{3,4})(p\d{0,2})?(?=[/_\-.?&]|$)""")
+    private val NAMED = listOf("sd" to "hd", "low" to "high", "lq" to "hq", "mobile" to "hd", "small" to "large", "medium" to "high")
+
+    private fun split(u: String): Pair<String, String> { val b = u.substringBefore('#'); return b.substringBefore('?') to (if ('?' in b) "?" + b.substringAfter('?') else "") }
+
+    /** Alturas no endereço que parecem qualidade (144…1080). */
+    private val COMMON = setOf(144, 180, 234, 240, 270, 288, 360, 384, 404, 406, 432, 480, 540, 544, 576, 640, 720, 768, 960, 1024, 1080, 1152, 1280, 1440, 2160)
+    fun heightIn(u: String): Int = QTOK.findAll(split(u).first.substringAfter("://").substringAfter('/')).mapNotNull { it.groupValues[1].toIntOrNull() }.filter { it in COMMON }.maxOrNull() ?: 0
+
+    fun hlsCandidates(u: String): List<String> {
+        val (base, q) = split(u)
+        val out = LinkedHashSet<String>()
+        val dir = base.substringBeforeLast('/')
+        val last = dir.substringAfterLast('/')
+        // 1º: lista principal na pasta de cima quando a pasta é a da qualidade (…/ID/360p/video.m3u8 → …/ID/playlist.m3u8)
+        if (QDIR.matches(last)) { val parent = dir.substringBeforeLast('/'); for (n in MASTER_NAMES) out += "$parent/$n$q"; out += "$parent.m3u8$q" }
+        // 2º: o mesmo endereço com a qualidade maior
+        out += sameWithHeight(u)
+        // 3º: arquivo com a qualidade no nome: video_360p.m3u8 → video.m3u8
+        val file = base.substringAfterLast('/')
+        val noQ = file.replace(Regex("""(?i)[_\-.](\d{3,4}p?|sd|hd|low|high)(?=\.m3u8$)"""), "")
+        if (noQ != file) out += "$dir/$noQ$q"
+        // 4º: lista principal na mesma pasta
+        for (n in MASTER_NAMES) out += "$dir/$n$q"
+        out.remove(u); out.remove(base + q)
+        return out.toList().take(24)
+    }
+
+    /** O mesmo endereço trocando o número da qualidade (e sd→hd, low→high…). Maior primeiro. */
+    fun sameWithHeight(u: String): List<String> {
+        val (base, q) = split(u)
+        val host = base.substringBefore("://") + "://" + base.substringAfter("://").substringBefore('/')
+        val path = base.substringAfter("://").substringAfter('/', "")
+        val cur = heightIn(u)
+        val out = ArrayList<String>()
+        if (cur in 144..1440) for (h in HEIGHTS) if (h > cur) {
+            val p2 = QTOK.replace(path) { m -> val n = m.groupValues[1].toInt(); if (n == cur) h.toString() + m.groupValues[2] else m.value }
+            if (p2 != path) out += "$host/$p2$q"
+        }
+        for ((a, b) in NAMED) {
+            val rx = Regex("""(?i)(?<=[/_\-.])$a(?=[/_\-.])""")
+            if (rx.containsMatchIn(path)) out += "$host/" + rx.replace(path, b) + q
+        }
+        return out.distinct()
+    }
+}

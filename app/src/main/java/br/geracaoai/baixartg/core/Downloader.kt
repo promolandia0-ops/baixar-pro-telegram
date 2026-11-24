@@ -381,6 +381,13 @@ object Downloader {
     /** HLS: maior qualidade, segmentos em paralelo (ordem preservada), AES-128 e EXT-X-MAP. Sem recodificar. */
     suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8, maxHeight: Int = 0, headers: Map<String, String> = emptyMap()): File {
         var plUrl = url; var pl = text(plUrl, referer, headers)
+        // link de uma qualidade só (o player começou em 360p): procura a lista principal e baixa a maior
+        if (maxHeight == 0 && headers.isEmpty() && !pl.contains("#EXT-X-STREAM-INF")) try {
+            QualityBoost.masterFor(url, referer, pl)?.let { (m, h) ->
+                Trail.here("qualidade máxima", "o link era de uma qualidade só (${QualityUp.heightIn(url).takeIf { it > 0 }?.let { "${it}p" } ?: "?"}); achei a lista principal até ${h}p")
+                plUrl = m; pl = text(plUrl, referer, headers)
+            }
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e }
         var audioUrl: String? = null
         if (pl.contains("#EXT-X-STREAM-INF")) {
             val v = pickVariant(plUrl, pl, maxHeight) ?: throw DlException("Playlist sem variantes")

@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.28
+- **Qualidade máxima sempre**: o player costuma começar em 360p e o app via só o link dessa qualidade. Agora, assim que um vídeo aparece, o app procura a lista principal HLS (com todas as qualidades) ou o mesmo arquivo em 2160/1440/1080/720, confere de verdade e troca o item da lista por ela. Na hora de baixar, se o link ainda for de uma qualidade só, procura a lista principal de novo e baixa a maior. Fica no rastro ("qualidade máxima").
+- **Não baixa mais o vídeo anterior de novo**: em sites com vários vídeos no mesmo endereço de página (ou com o mesmo título), o vídeo novo entrava no item do anterior e ficava com o link antigo. Agora, se só a página/título bate e o vídeo é outro, ele vira um item próprio.
+
 ## 1.9.27
 - **Rastro de cada vídeo, de ponta a ponta** (fica só no celular): por onde foi achado (o player pediu pela rede do navegador, service worker, lista de pedidos lida da página, tipo da resposta, card da listagem → HTML / página oculta com play / servidor, gravação em pedaços, detetive), se foi escondido e por quê, quando você mandou baixar, cada tentativa de download (link direto, lista HLS com qualidade escolhida e número de pedaços, AES, servidor yt-dlp, gravação pelo navegador; erro ou sucesso, tamanho e tipo do arquivo) e o envio ao Telegram.
 - **Detetive com vídeo de exemplo** mostra esse rastro completo, diz como o vídeo foi achado e repete exatamente o mesmo caminho (ex.: dar play e ouvir os pedidos do player; abrir os cards da lista; servidor).
