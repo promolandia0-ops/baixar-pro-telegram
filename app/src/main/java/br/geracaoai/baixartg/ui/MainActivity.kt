@@ -98,6 +98,7 @@ fun Root(shared: MutableState<String?>) {
     val auth by Td.auth.collectAsState()
     var hasApi by remember { mutableStateOf(Prefs.apiId != 0) }
     val stage = when { !hasApi -> 0; auth !is TdApi.AuthorizationStateReady -> 1; else -> 2 }
+    CrashNotice()
     AnimatedContent(stage, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { s ->
         when (s) {
             0 -> SetupScreen { hasApi = true }
@@ -105,6 +106,21 @@ fun Root(shared: MutableState<String?>) {
             else -> MainShell(shared)
         }
     }
+}
+
+/** Se o app fechou sozinho da última vez, avisa e deixa copiar o motivo (gerado mesmo com o app fechado). */
+@Composable
+fun CrashNotice() {
+    val rep by CrashLog.pending.collectAsState()
+    val ctx = LocalContext.current
+    val r = rep ?: return
+    AlertDialog(onDismissRequest = { CrashLog.pending.value = null },
+        icon = { Icon(Icons.Rounded.BugReport, null) },
+        title = { Text("O app fechou da última vez") },
+        text = { Text("O motivo foi registrado. Toque em Copiar e cole no chat para a gente corrigir.\n\n" + r.lines().filter { it.contains("FECHOU") || it.contains("QUEDA") || it.contains("WEBVIEW") }.takeLast(3).joinToString("\n").take(400),
+            style = MaterialTheme.typography.bodySmall) },
+        confirmButton = { TextButton({ copy(ctx, r, "Motivo da queda copiado. Cole no chat."); CrashLog.pending.value = null }) { Text("Copiar") } },
+        dismissButton = { TextButton({ CrashLog.pending.value = null }) { Text("Fechar") } })
 }
 
 fun fmtBytes(b: Long): String {

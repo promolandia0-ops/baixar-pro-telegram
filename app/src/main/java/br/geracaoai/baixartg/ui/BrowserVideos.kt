@@ -1045,7 +1045,7 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onLoadAl
             HorizontalDivider()
             val ctx = androidx.compose.ui.platform.LocalContext.current
             TextButton({
-                val rep = listOf(Jobs.diagReport.value, BrowserDiag.report()).filter { it.isNotBlank() }.joinToString("\n")
+                val rep = listOf(Jobs.diagReport.value, BrowserDiag.report(), br.geracaoai.baixartg.core.CrashLog.report()).filter { it.isNotBlank() }.joinToString("\n")
                 ctx.getSystemService(android.content.ClipboardManager::class.java)?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", rep))
                 android.widget.Toast.makeText(ctx, "Diagnóstico copiado (sem links). Cole no chat.", android.widget.Toast.LENGTH_SHORT).show()
             }, Modifier.align(Alignment.CenterHorizontally), contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp)) {

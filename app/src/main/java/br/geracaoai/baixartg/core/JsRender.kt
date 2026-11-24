@@ -316,7 +316,6 @@ object JsRender {
         s.mediaPlaybackRequiresUserGesture = false
         s.loadsImagesAutomatically = true
         s.blockNetworkImage = false
-        try { s.offscreenPreRaster = true } catch (_: Exception) {}
         try { wv.resumeTimers() } catch (_: Exception) {}
         try { s.javaScriptCanOpenWindowsAutomatically = false } catch (_: Exception) {}
         try { s.userAgentString = Net.userAgent } catch (_: Exception) {}
@@ -334,7 +333,7 @@ object JsRender {
         }
         wv.webViewClient = object : WebViewClient() {
             override fun onRenderProcessGone(view: android.webkit.WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
-                CrashLog.rendererGone("renderizador", detail)
+                CrashLog.rendererGone("renderizador", view, detail)
             override fun onPageStarted(view: WebView, u: String?, favicon: android.graphics.Bitmap?) {
                 try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}
             }

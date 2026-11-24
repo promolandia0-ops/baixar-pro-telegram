@@ -4,6 +4,12 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.18
+- Caixa-preta: quando o app fecha sozinho, o motivo fica gravado mesmo com o app fechado (queda no código, queda nativa, travamento/ANR, falta de memória ou WebView). Na próxima vez que abrir, aparece o aviso com botão **Copiar**; o motivo também vai no "Copiar diagnóstico", junto com os últimos passos (sem links).
+- Navegador: se a página derrubar o renderizador, o app não fecha mais e o navegador é recriado e recarrega a página. Se a mesma página cair 3 vezes seguidas, ela não é recarregada de novo.
+- Mais leve: removida a pré-renderização fora da tela (offscreenPreRaster), que gastava muita memória no navegador e nas páginas ocultas.
+- Removida a conta MEGA (login). Links públicos do MEGA continuam funcionando no Início.
+
 ## 1.7.4
 - **Só vídeos**, em todas as abas. O interruptor “Incluir fotos” foi removido: o app não coleta nem envia imagens (capas, miniaturas ou fotos de conteúdo).
 - Se o link colado for uma **listagem** (vários cards com capa + título + duração), o app abre cada card e resolve o stream real (mp4/m3u8/mpd, player, iframe, yt-dlp), na maior qualidade, sem repetir o mesmo vídeo.

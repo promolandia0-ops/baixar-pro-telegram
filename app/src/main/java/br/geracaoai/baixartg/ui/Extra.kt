@@ -36,7 +36,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import br.geracaoai.baixartg.core.*
-import br.geracaoai.baixartg.web.MegaStore
 import br.geracaoai.baixartg.web.WebCookies
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -106,6 +105,23 @@ object BrowserRuntime {
         try { web?.destroy() } catch (_: Exception) {}
         web = null; started = false
     }
+    /** Muda quando o WebView precisa ser recriado (o renderizador caiu). */
+    val gen = androidx.compose.runtime.mutableIntStateOf(0)
+    /** Página para abrir no WebView recriado. */
+    @Volatile var reloadUrl: String? = null
+    private val falls = ArrayDeque<Long>()
+    /** O renderizador do navegador caiu: descarta o WebView morto e pede um novo. Retorna o aviso para a tela. */
+    fun onRendererGone(dead: WebView?, url: String): String {
+        if (web === dead || dead == null) web = null
+        val now = System.currentTimeMillis()
+        falls.addLast(now); while (falls.isNotEmpty() && now - falls.first() > 90_000) falls.removeFirst()
+        val again = falls.size < 3 && url.startsWith("http")
+        reloadUrl = if (again) url else null
+        br.geracaoai.baixartg.core.CrashLog.mark("navegador recriado (${if (again) "recarregando" else "sem recarregar: caiu ${falls.size}x"})")
+        gen.intValue++
+        return if (again) "A página travou o navegador. Recarreguei sem fechar o app."
+        else "Esta página derrubou o navegador ${falls.size} vezes seguidas. Não recarreguei para não travar de novo."
+    }
 }
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -164,6 +180,10 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             if (n != sig) { sig = n; savePanel() }
         }
     }
+    // trilha: teclado abrindo/fechando no navegador (ajuda a achar quedas ao digitar em formulários)
+    val imeIns = WindowInsets.ime; val dens = androidx.compose.ui.platform.LocalDensity.current
+    val imeOpen by remember(imeIns, dens) { derivedStateOf { imeIns.getBottom(dens) > 0 } }
+    LaunchedEffect(imeOpen) { if (visible) br.geracaoai.baixartg.core.CrashLog.mark(if (imeOpen) "navegador: teclado aberto" else "navegador: teclado fechado") }
     var showSites by remember { mutableStateOf(false) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
     var sheet by remember { mutableStateOf(false) }
@@ -390,7 +410,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             }
         }
     }) { pad ->
-        AndroidView(factory = { c ->
+        val gen by BrowserRuntime.gen
+        key(gen) { AndroidView(factory = { c ->
             val existing = BrowserRuntime.web
             if (existing != null) {
                 (existing.parent as? ViewGroup)?.removeView(existing)
@@ -401,8 +422,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             settings.javaScriptEnabled = true; settings.domStorageEnabled = true; settings.databaseEnabled = true
             settings.loadWithOverviewMode = true; settings.useWideViewPort = true; settings.setSupportMultipleWindows(true)
             settings.userAgentString = Net.userAgent
-            // rolagem mais lisa: pré-rasteriza fora da tela e reaproveita o cache
-            try { settings.offscreenPreRaster = true } catch (_: Exception) {}
+            // sem offscreenPreRaster: rasterizar a página inteira fora da tela gastava muita memória e derrubava o renderizador
             settings.cacheMode = android.webkit.WebSettings.LOAD_DEFAULT
             try { settings.setNeedInitialFocus(false) } catch (_: Exception) {}
             CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
@@ -410,19 +430,27 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                 try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
             }
             webViewClient = object : WebViewClient() {
-                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
-                    br.geracaoai.baixartg.core.CrashLog.rendererGone("navegador", detail)
+                override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
+                    if (web === view) web = null
+                    val pg = current
+                    return br.geracaoai.baixartg.core.CrashLog.rendererGone("navegador", view, detail) {
+                        val msg = BrowserRuntime.onRendererGone(view, pg)
+                        android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }
                 override fun shouldOverrideUrlLoading(v: WebView, request: android.webkit.WebResourceRequest): Boolean {
                     if (!request.isForMainFrame) return false
                     return br.geracaoai.baixartg.web.AdBlock.blockNavigation(request.url.toString(), v.url ?: current, request.hasGesture(), request.isRedirect)
                 }
                 override fun onPageStarted(v: WebView, url: String, favicon: Bitmap?) {
+                    br.geracaoai.baixartg.core.CrashLog.mark("navegador: abrindo ${br.geracaoai.baixartg.core.CrashLog.siteTag(url)}")
                     if (url != current) BrowserDetect.newPage()
                     v.evaluateJavascript(MseHookScript.SCRIPT) { }
                     if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
                     current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward()
                 }
                 override fun onPageFinished(v: WebView, url: String) {
+                    br.geracaoai.baixartg.core.CrashLog.mark("navegador: carregou ${br.geracaoai.baixartg.core.CrashLog.siteTag(url)}")
                     if (url.startsWith("http")) { br.geracaoai.baixartg.Prefs.browserUrl = url; BrowserStore.visit(url, v.title ?: ""); BrowserDetect.restore(Extract.host(url)) }
                     current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url)
                     if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
@@ -459,7 +487,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     val tmp = WebView(view.context)
                     tmp.webViewClient = object : WebViewClient() {
                         override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
-                            br.geracaoai.baixartg.core.CrashLog.rendererGone("auxiliar", detail)
+                            br.geracaoai.baixartg.core.CrashLog.rendererGone("auxiliar", view, detail)
                         private var done = false
                         fun take(u: String?) {
                             if (done || u == null) return
@@ -475,7 +503,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             }
             web = this
             BrowserRuntime.adopt(this)
-            if (initialAddr.length > 8) loadUrl(initialAddr)
+            val start = BrowserRuntime.reloadUrl.also { BrowserRuntime.reloadUrl = null } ?: initialAddr.takeIf { gen == 0 }
+            if (start != null && start.length > 8) loadUrl(start)
         }
         }, update = { w ->
             web = w
@@ -483,7 +512,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             val u = w.url.orEmpty()
             if (u.isNotBlank()) { current = u; syncAddress(u) }
             canBack = w.canGoBack(); canFwd = w.canGoForward()
-        }, onRelease = { BrowserRuntime.detach() }, modifier = Modifier.fillMaxSize().padding(pad))
+        }, onRelease = { BrowserRuntime.detach() }, modifier = Modifier.fillMaxSize().padding(pad)) }
     }
     if (sheet) BrowserVideosSheet({ sheet = false }, { msg -> android.widget.Toast.makeText(ctx, msg, android.widget.Toast.LENGTH_SHORT).show() }, onLoadAll = { BrowserLoadMore.start(web) }) { term ->
         val v = web; val page = v?.url
@@ -529,101 +558,6 @@ fun LoggedAccountsGroup() {
         OutlinedButton({ WebCookies.clearAll { list = emptyList() }; list = emptyList() }, Modifier.fillMaxWidth(), enabled = list.isNotEmpty(), shape = MaterialTheme.shapes.medium,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Icon(Icons.Rounded.DeleteSweep, null); Spacer(Modifier.width(8.dp)); Text("Sair de todas") }
     }
-}
-
-// ---------------- MEGA ----------------
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MegaScreen(onClose: () -> Unit, goQueue: () -> Unit) {
-    val scope = rememberCoroutineScope()
-    var session by remember { mutableStateOf(Mega.session) }
-    var nodes by remember { mutableStateOf<List<Mega.Node>>(emptyList()) }
-    var folder by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(false) }
-    var msg by remember { mutableStateOf("") }
-    var sel by remember { mutableStateOf(setOf<String>()) }
-    var link by remember { mutableStateOf("") }
-    val stack = remember { mutableStateListOf<String>() }
-    fun load() { val s = session ?: return; loading = true; msg = ""
-        scope.launch { try { nodes = withContext(Dispatchers.IO) { Mega.accountNodes(s) }; if (folder == null) folder = nodes.firstOrNull { it.type == 2 }?.h }
-            catch (e: MegaException) { msg = e.message ?: "Erro"; if (e.code == -15) { MegaStore.clear(); Mega.session = null; session = null } }
-            catch (e: Exception) { msg = "Erro: ${e.message}" }
-            loading = false } }
-    LaunchedEffect(session) { if (session != null && nodes.isEmpty()) load() }
-    BackHandler { if (stack.isNotEmpty()) { folder = stack.removeAt(stack.lastIndex); sel = emptySet() } else onClose() }
-    Scaffold(topBar = { TopAppBar(title = { Column { Text("MEGA", fontWeight = FontWeight.SemiBold); session?.let { Text(it.email, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } } },
-        navigationIcon = { IconButton({ if (stack.isNotEmpty()) { folder = stack.removeAt(stack.lastIndex); sel = emptySet() } else onClose() }) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
-        actions = { if (session != null) { IconButton({ load() }) { Icon(Icons.Rounded.Refresh, "Atualizar") }
-            IconButton({ val s = session; scope.launch { withContext(Dispatchers.IO) { Mega.logout() }; MegaStore.clear() }; session = null; nodes = emptyList(); folder = null; stack.clear(); sel = emptySet(); if (s == null) Unit }) { Icon(Icons.AutoMirrored.Rounded.Logout, "Sair do MEGA") } } },
-        colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)) },
-        bottomBar = { if (sel.isNotEmpty()) Surface(tonalElevation = 3.dp) { Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(12.dp)) {
-            val chosen = nodes.filter { it.h in sel }
-            Button({ val s = session ?: return@Button
-                if (Jobs.addExternal(chosen.map { Mega.toFound(it, 'a', page = "https://mega.nz/fm/${it.h}") to it.size }, start = true)) { sel = emptySet(); goQueue() } else msg = "Há uma tarefa em andamento. Espere terminar." },
-                Modifier.fillMaxWidth().height(52.dp), shape = MaterialTheme.shapes.medium) {
-                Icon(Icons.Rounded.Send, null); Spacer(Modifier.width(8.dp)); Text("Baixar e enviar ${chosen.size} (${fmtBytes(chosen.sumOf { it.size })})") }
-        } } }) { pad ->
-        LazyColumn(Modifier.fillMaxSize().padding(pad).imePadding(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            item {
-                OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("Link público do MEGA", style = MaterialTheme.typography.titleSmall)
-                    OutlinedTextField(link, { link = it }, Modifier.fillMaxWidth(), singleLine = true, shape = MaterialTheme.shapes.medium, label = { Text("https://mega.nz/file/…#chave ou /folder/…#chave") })
-                    FilledTonalButton({ loading = true; msg = ""
-                        scope.launch { try { val l = withContext(Dispatchers.IO) { Mega.resolvePublic(link) }
-                            if (l.isEmpty()) msg = "Nenhum vídeo nesse link." else if (Jobs.addExternal(l, start = false)) goQueue() else msg = "Há uma tarefa em andamento." }
-                            catch (e: Exception) { msg = e.message ?: "Erro" }; loading = false } },
-                        Modifier.fillMaxWidth(), enabled = !loading && (Mega.isMegaLink(link) || Mega.looksLikeMega(link)), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Search, null); Spacer(Modifier.width(8.dp)); Text("Listar vídeos do link") }
-                } }
-            }
-            if (msg.isNotBlank()) item { InfoCard(msg, Icons.Rounded.ErrorOutline, 1) }
-            if (loading) item { LinearProgressIndicator(Modifier.fillMaxWidth()) }
-            if (session == null) item { MegaLogin { s -> session = s; nodes = emptyList(); folder = null } }
-            else {
-                val here = nodes.filter { it.parent == folder }
-                val subfolders = here.filter { it.isFolder }.sortedBy { it.name.lowercase() }
-                val vids = here.filter { it.isVideo }.sortedBy { it.name.lowercase() }
-                val roots = nodes.filter { it.type >= 2 }
-                item { Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { roots.forEach { r -> FilterChip(folder == r.h && stack.isEmpty(), { stack.clear(); folder = r.h; sel = emptySet() }, { Text(r.name) }) } } }
-                if (stack.isNotEmpty()) item { Text(nodes.firstOrNull { it.h == folder }?.name ?: "", style = MaterialTheme.typography.titleMedium) }
-                items(subfolders, key = { "d" + it.h }) { d -> ListItem(headlineContent = { Text(d.name) }, leadingContent = { Icon(Icons.Rounded.Folder, null, tint = MaterialTheme.colorScheme.primary) },
-                    supportingContent = { val c = nodes.count { it.parent == d.h && it.isVideo }; Text(if (c > 0) "$c vídeo(s)" else "Pasta") },
-                    modifier = Modifier.clickable { folder?.let { stack.add(it) }; folder = d.h; sel = emptySet() }) }
-                if (vids.isNotEmpty()) item { Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("${vids.size} vídeo(s) • ${fmtBytes(vids.sumOf { it.size })}", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge)
-                    val all = vids.all { it.h in sel }
-                    TextButton({ sel = if (all) sel - vids.map { it.h }.toSet() else sel + vids.map { it.h } }) { Text(if (all) "Desmarcar todos" else "Marcar todos") } } }
-                items(vids, key = { "v" + it.h }) { v -> ListItem(headlineContent = { Text(v.name, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                    supportingContent = { Text(fmtBytes(v.size) + if (Sent.isSent(Mega.toFound(v, 'a', page = "https://mega.nz/fm/${v.h}"))) " • Já enviado" else "") },
-                    leadingContent = { Checkbox(v.h in sel, { c -> sel = if (c) sel + v.h else sel - v.h }) },
-                    modifier = Modifier.clickable { sel = if (v.h in sel) sel - v.h else sel + v.h }) }
-                if (!loading && subfolders.isEmpty() && vids.isEmpty()) item { EmptyState(Icons.Rounded.VideoLibrary, "Nenhum vídeo aqui", "Abra outra pasta.") }
-            }
-        }
-    }
-}
-
-@Composable
-fun MegaLogin(onDone: (Mega.Session) -> Unit) {
-    val scope = rememberCoroutineScope()
-    var email by remember { mutableStateOf("") }; var pass by remember { mutableStateOf("") }; var mfa by remember { mutableStateOf("") }
-    var needMfa by remember { mutableStateOf(false) }; var busy by remember { mutableStateOf(false) }; var err by remember { mutableStateOf("") }
-    ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.large) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) { Icon(Icons.Rounded.Cloud, null, tint = MaterialTheme.colorScheme.primary); Spacer(Modifier.width(10.dp)); Text("Entrar na sua conta MEGA", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
-        OutlinedTextField(email, { email = it.trim() }, Modifier.fillMaxWidth(), label = { Text("E-mail") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email))
-        OutlinedTextField(pass, { pass = it }, Modifier.fillMaxWidth(), label = { Text("Senha") }, singleLine = true, shape = MaterialTheme.shapes.medium,
-            visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password))
-        if (needMfa) OutlinedTextField(mfa, { mfa = it.filter(Char::isDigit).take(6) }, Modifier.fillMaxWidth(), label = { Text("Código de verificação (2FA)") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword))
-        if (err.isNotBlank()) Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
-        Button({ busy = true; err = ""
-            scope.launch { try { val s = withContext(Dispatchers.Default) { Mega.login(email, pass, mfa.ifBlank { null }) }; MegaStore.save(s); pass = ""; onDone(s) }
-                catch (e: MegaException) { if (e.code == -26) { needMfa = true; err = "Digite o código do app autenticador." } else err = e.message ?: "Erro" }
-                catch (e: Exception) { err = "Erro: ${e.message}" }; busy = false } },
-            Modifier.fillMaxWidth().height(50.dp), enabled = !busy && email.contains('@') && pass.isNotEmpty() && (!needMfa || mfa.length == 6), shape = MaterialTheme.shapes.medium) {
-            if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.Login, null); Spacer(Modifier.width(8.dp)); Text("Entrar") }
-        Text("Login direto com a API oficial do MEGA. A senha só é usada para gerar a chave na hora e não é guardada; o app guarda só a sessão, criptografada no aparelho. Os arquivos são descriptografados no celular, em qualidade original.",
-            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    } }
 }
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)

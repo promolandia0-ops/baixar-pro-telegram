@@ -257,7 +257,6 @@ object BrowserMseDownloader {
                 s.mediaPlaybackRequiresUserGesture = false
                 s.loadsImagesAutomatically = true
                 s.blockNetworkImage = false
-                try { s.offscreenPreRaster = true } catch (_: Exception) {}
                 try { s.userAgentString = Net.userAgent } catch (_: Exception) {}
                 try { CookieManager.getInstance().setAcceptCookie(true); CookieManager.getInstance().setAcceptThirdPartyCookies(wv, true) } catch (_: Exception) {}
 
@@ -268,7 +267,7 @@ object BrowserMseDownloader {
 
                 wv.webViewClient = object : WebViewClient() {
                     override fun onRenderProcessGone(view: android.webkit.WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean =
-                        CrashLog.rendererGone("download", detail)
+                        CrashLog.rendererGone("download", view, detail)
                     override fun onPageStarted(view: WebView, url: String?, favicon: android.graphics.Bitmap?) {
                         lastBeat.set(System.currentTimeMillis())
                         try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}

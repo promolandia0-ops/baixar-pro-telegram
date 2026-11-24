@@ -57,7 +57,6 @@ fun MainShell(shared: MutableState<String?>) {
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var prevTab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var settings by rememberSaveable { mutableStateOf(false) }
-    var mega by rememberSaveable { mutableStateOf(false) }
     fun goTab(t: Tab) { if (t != tab) { prevTab = tab; tab = t } }
     val homeText = rememberSaveable { mutableStateOf("") }
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
@@ -71,14 +70,12 @@ fun MainShell(shared: MutableState<String?>) {
     var dedupe by rememberSaveable { mutableStateOf(false) }
     if (dedupe) { BackHandler { dedupe = false }; DedupeScreen { dedupe = false }; return }
     if (settings) { BackHandler { settings = false }; SettingsScreen({ settings = false }) { settings = false; dedupe = true }; return }
-    if (mega) { MegaScreen({ mega = false }) { mega = false; goTab(Tab.QUEUE) }; return }
     Scaffold(
         topBar = {
             if (tab != Tab.BROWSER) TopAppBar(title = {
                 Column { Text(tab.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text("Baixar pro Telegram", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-                actions = { IconButton({ mega = true }) { Icon(Icons.Rounded.Cloud, "MEGA") }
-                    IconButton({ dedupe = true }) { Icon(Icons.Rounded.DeleteSweep, "Limpar repetidos") }
+                actions = { IconButton({ dedupe = true }) { Icon(Icons.Rounded.DeleteSweep, "Limpar repetidos") }
                     IconButton({ settings = true }) { Icon(Icons.Rounded.Settings, "Configurações") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
         },
@@ -173,7 +170,7 @@ fun DiagButton(always: Boolean = false) {
     if (rep.isBlank() && !always) return
     OutlinedButton(onClick = {
         val cm = ctx.getSystemService(ClipboardManager::class.java)
-        val full = listOf(rep, BrowserDiag.report()).filter { it.isNotBlank() }.joinToString("\n")
+        val full = listOf(rep, BrowserDiag.report(), br.geracaoai.baixartg.core.CrashLog.report()).filter { it.isNotBlank() }.joinToString("\n")
         cm?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", full))
         Toast.makeText(ctx, "Diagnóstico copiado (sem links). Cole no chat.", Toast.LENGTH_SHORT).show()
     }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.ContentCopy, null); Spacer(Modifier.width(8.dp)); Text("Copiar diagnóstico") }
@@ -250,7 +247,7 @@ fun HowTo() {
         Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "com um nome tenta a busca do site, senão varre o domínio; mostra só os vídeos que batem no título para você confirmar.")
         Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega os vídeos desta página; se for uma listagem, abre cada vídeo e baixa o vídeo (não a miniatura).")
         Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta do site; os downloads usam essa sessão.")
-        Tip(Icons.Rounded.Cloud, "MEGA", "entre na sua conta MEGA ou cole um link público e envie os vídeos.")
+        Tip(Icons.Rounded.Cloud, "MEGA", "cole um link público do MEGA no Início e os vídeos vão para o Telegram.")
         Tip(Icons.Rounded.Lock, "Segundo plano", "pode bloquear a tela; “Parar” interrompe na hora.")
     } }
 }
