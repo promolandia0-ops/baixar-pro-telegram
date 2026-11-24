@@ -197,6 +197,10 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     var canBack by remember { mutableStateOf(BrowserRuntime.web?.canGoBack() == true) }; var canFwd by remember { mutableStateOf(BrowserRuntime.web?.canGoForward() == true) }
     var ask by remember { mutableStateOf(false) }
     var analyze by remember { mutableStateOf(false) }
+    var doctor by remember { mutableStateOf(false) }
+    // depois de 10 s numa página sem vídeo, oferece o "Diagnosticar e corrigir"
+    var offerDoctor by remember { mutableStateOf(false) }
+    LaunchedEffect(current) { offerDoctor = false; if (current.startsWith("http")) { kotlinx.coroutines.delay(10_000); offerDoctor = true } }
     BackHandler(enabled = visible) {
         when (BrowserNav.onBack(web?.canGoBack() == true)) {
             BrowserNav.BackAction.WEBVIEW -> web?.goBack()
@@ -439,6 +443,12 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         }
                         DropdownMenu(moreMenu, { moreMenu = false }) {
                             DropdownMenuItem(
+                                text = { Text("Diagnosticar e corrigir (vídeo)") },
+                                leadingIcon = { Icon(Icons.Rounded.Build, null) },
+                                enabled = current.startsWith("http"),
+                                onClick = { moreMenu = false; doctor = true },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Analisar este site") },
                                 leadingIcon = { Icon(Icons.Rounded.BugReport, null) },
                                 enabled = current.startsWith("http"),
@@ -465,6 +475,12 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                                 },
                             )
                         }
+                    }
+                }
+                if (offerDoctor && detected == 0 && !searching && mode != 1 && !doctor) {
+                    TextButton({ doctor = true }, Modifier.fillMaxWidth().height(30.dp), contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                        Icon(Icons.Rounded.Build, null, Modifier.size(14.dp)); Spacer(Modifier.width(6.dp))
+                        Text("Nenhum vídeo? Diagnosticar e corrigir", style = MaterialTheme.typography.labelMedium)
                     }
                 }
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -648,6 +664,9 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
         dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
     if (analyze) SiteAnalyzeDialog(current, web) { analyze = false }
+    if (doctor) VideoDoctorDialog(web, current,
+        tapPlay = { web?.evaluateJavascript(TapPlay.JS) { }; startNetPoll() },
+        collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) }) { doctor = false }
 }
 
 // ---------------- Contas logadas (Configurações) ----------------

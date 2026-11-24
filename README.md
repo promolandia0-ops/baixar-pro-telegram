@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.24
+- Novo **Diagnosticar e corrigir** no navegador (menu ⋮, ou o aviso "Nenhum vídeo?" que aparece depois de 10 s numa página sem vídeo). Ele testa e corrige sozinho, passo a passo, e para assim que o vídeo aparece:
+  página carregada → login → detecção ligada na página → players na página → vídeos vistos mas descartados (volta com eles) → aviso de cookies (aceita) → confirmação de idade → play sem som → rolar até o player → endereços no código da página → servidor yt-dlp (página e players em iframe) → procura completa.
+  No fim diz o motivo mais provável e tem **Copiar** (sem links).
+
 ## 1.9.23
 - Botão **Procurar** do navegador agora dá play (sem som) nos players da página, como se você tocasse no play: o player pede o vídeo e ele aparece na lista. Toca só em botões de play do player, nunca em links; repete uma vez depois de 1,8 s e procura de novo em 4 s.
 

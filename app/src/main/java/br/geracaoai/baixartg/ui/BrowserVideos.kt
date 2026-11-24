@@ -34,12 +34,14 @@ object BrowserDiag {
     fun inc(k: String, n: Int = 1) { counters.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     fun rej(k: String, n: Int = 1) { photoRejects.getOrPut(k) { java.util.concurrent.atomic.AtomicInteger() }.addAndGet(n) }
     /** Página nova: contagens recomeçam (antes somavam todas as páginas e confundiam). */
-    fun resetPage() { videoTags = -1; photoRejects.clear(); counters.clear(); lastImgs = -1; lastRaw = 0; lastCands = 0; lastKept = 0; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
+    fun resetPage() { videoTags = -1; synchronized(discarded) { discarded.clear() }; photoRejects.clear(); counters.clear(); lastImgs = -1; lastRaw = 0; lastCands = 0; lastKept = 0; photoCalls = 0; photoReplies = 0; photoErrs = 0; lastPhotoErr = ""; br.geracaoai.baixartg.core.BrowserProbeStats.fails.clear() }
     private val MEDIA_TYPE = Regex("""(?i)\.(m3u8|mpd|mp4|m4v|webm|mov|mkv|ts|m4s|m4a|aac|key)(?:$|[?#/])""")
     /**
      * Pedido de mídia visto pelo navegador (sem link): de onde veio, o tipo e o que o app fez com ele.
      * Mostra se o vídeo nunca chegou ao app ou se chegou e foi descartado (e por quê).
      */
+    /** Últimos endereços de mídia descartados nesta página (só na memória; o diagnóstico nunca mostra o link). */
+    val discarded = ArrayDeque<Pair<String, String>>()
     fun media(src: String, u: String, ct: String = "") {
         try {
             val ext = MEDIA_TYPE.find(u.substringBefore('#'))?.groupValues?.get(1)?.lowercase()
@@ -54,6 +56,9 @@ object BrowserDiag {
                 else -> "aceito"
             }
             inc("mídia[$src] $ext → $verdict")
+            if (verdict.startsWith("DESCARTADO") || verdict == "não reconhecido") synchronized(discarded) {
+                if (discarded.none { it.first == u }) { discarded.addLast(u to verdict); while (discarded.size > 30) discarded.removeFirst() }
+            }
         } catch (_: Throwable) {}
     }
     fun timed(ms: Long) { collects++; collectMs = ms; if (ms > collectMaxMs) collectMaxMs = ms }
@@ -574,10 +579,10 @@ object BrowserDetect {
     fun setAll(v: Boolean) { for (i in list.indices) { val d = list[i]; val nv = v && !d.sent; if (d.sel != nv) list[i] = d.copy(sel = nv) } }
 
     /** Mídia interceptada pelo navegador (pedido de rede de vídeo). */
-    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null) {
+    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null, force: Boolean = false) {
         if (page.isNotBlank()) browsing = page
         if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
-        if (BrowserGrouping.isFilteredOutVideoUrl(url)) return
+        if (!force && BrowserGrouping.isFilteredOutVideoUrl(url)) return
         val kind = Extract.mediaKindOf(url) ?: kindHint ?: return
         val info = pageInfo[normPage(page)]
         val t = TitleFix.pick(info?.first, title).ifBlank { Extract.mediaTitle(url, "") }
