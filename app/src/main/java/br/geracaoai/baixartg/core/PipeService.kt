@@ -26,9 +26,14 @@ class PipeService : Service() {
     override fun onBind(i: Intent?): IBinder? = null
 
     private fun goForeground(special: Boolean) {
-        val type = if (special && Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        // Android 14+: sempre "uso especial". O tipo dataSync tem limite de 6 h por dia (Android 15+) e, ao estourar,
+        // o sistema derrubava o app (ForegroundServiceDidNotStopInTimeException).
+        val type = if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
         try { startForeground(ID, notif("Fila de envio…", 0, 0, false), type) }
-        catch (e: Exception) { if (!special) try { startForeground(ID, notif("Fila de envio…", 0, 0, false), ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) } catch (_: Exception) {} }
+        catch (e: Exception) {
+            CrashLog.write("fila: startForeground recusado", e)
+            try { startForeground(ID, notif("Fila de envio…", 0, 0, false), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) } catch (_: Exception) {}
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -73,9 +78,14 @@ class PipeService : Service() {
         return START_STICKY
     }
 
-    override fun onTimeout(startId: Int) {
-        // limite de tempo do tipo dataSync (Android 15): continua como serviço de uso especial
-        goForeground(true)
+    // Limite de tempo do serviço: o Android exige parar em poucos segundos, senão fecha o app.
+    // A fila continua rodando no processo; só a notificação de primeiro plano sai.
+    override fun onTimeout(startId: Int) = timedOut()
+    override fun onTimeout(startId: Int, fgsType: Int) = timedOut()
+    private fun timedOut() {
+        CrashLog.mark("fila: limite de tempo do serviço; parando o serviço (a fila segue)")
+        try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
+        stopSelf()
     }
 
     private fun openIntent() = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java).putExtra("tab", "queue"), PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)

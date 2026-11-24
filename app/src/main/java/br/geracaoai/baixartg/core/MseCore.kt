@@ -855,22 +855,30 @@ object MseDownloader {
                 var hasInit = false
                 val window = ArrayDeque<kotlinx.coroutines.Deferred<ByteArray>>()
                 val it = all.iterator()
-                fun launchNext() {
+                var held = 0
+                suspend fun launchNext() {
                     if (it.hasNext()) {
+                        br.geracaoai.baixartg.core.MemGate.acquire(held); held++
                         val s = it.next()
                         window += async(Dispatchers.IO) { retry { fetchBytes(s.url, mpdReq.headers, referer, s.byteRange) } }
                     }
                 }
-                repeat(parallel.coerceIn(1, 8)) { launchNext() }
-                while (window.isNotEmpty()) {
-                    coroutineContext.ensureActive()
-                    val data = window.removeFirst().await()
-                    launchNext()
-                    hasInit = Mp4Boxes.appendFmp4Clean(hasInit, data, os)
-                    doneCount++
-                    totalBytes += data.size
-                    val est = if (doneCount > 0) totalBytes / doneCount * totalCount.coerceAtLeast(doneCount) else -1L
-                    progress(totalBytes, est)
+                try {
+                    repeat(parallel.coerceIn(1, 8)) { launchNext() }
+                    while (window.isNotEmpty()) {
+                        coroutineContext.ensureActive()
+                        val data = window.removeFirst().await()
+                        hasInit = Mp4Boxes.appendFmp4Clean(hasInit, data, os)
+                        br.geracaoai.baixartg.core.MemGate.release(); held--
+                        launchNext()
+                        doneCount++
+                        totalBytes += data.size
+                        val est = if (doneCount > 0) totalBytes / doneCount * totalCount.coerceAtLeast(doneCount) else -1L
+                        progress(totalBytes, est)
+                    }
+                } finally {
+                    window.forEach { d -> d.cancel() }
+                    repeat(held) { br.geracaoai.baixartg.core.MemGate.release() }; held = 0
                 }
             }
             if (dst.length() < 64) throw DlException("Faixa DASH vazia")

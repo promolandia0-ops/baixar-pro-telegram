@@ -19,7 +19,8 @@ class WorkService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) { Jobs.stop(); return START_NOT_STICKY }
-        startForeground(ID, notif("Iniciando…", 0, 0), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+        try { startForeground(ID, notif("Iniciando…", 0, 0), if (android.os.Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) }
+        catch (e: Exception) { try { startForeground(ID, notif("Iniciando…", 0, 0), ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) } catch (e2: Exception) { CrashLog.write("varredura: startForeground recusado", e2); stopSelf(); return START_NOT_STICKY } }
         if (wl == null) wl = (getSystemService(POWER_SERVICE) as PowerManager).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "baixartg:work").apply { acquire(6 * 60 * 60 * 1000L) }
         scope.coroutineContext.cancelChildren()
         scope.launch {
@@ -45,6 +46,10 @@ class WorkService : Service() {
             .setOngoing(true).setOnlyAlertOnce(true).setContentIntent(open).setProgress(max, p, max == 0)
             .addAction(Notification.Action.Builder(null, "Parar", stop).build()).build()
     }
+
+    override fun onTimeout(startId: Int) = timedOut()
+    override fun onTimeout(startId: Int, fgsType: Int) = timedOut()
+    private fun timedOut() { try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}; stopSelf() }
 
     override fun onDestroy() { scope.cancel(); wl?.let { if (it.isHeld) it.release() }; super.onDestroy() }
 

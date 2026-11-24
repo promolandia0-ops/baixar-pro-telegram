@@ -419,17 +419,24 @@ object Downloader {
             out.outputStream().buffered(1 shl 20).use { os ->
                 mapUrl?.let { os.write(retry { bytes(it, referer, headers) }) }
                 var total = 0L; var n = 0
-                // janela deslizante: até `parallel` segmentos em voo, gravados na ordem
+                // janela deslizante: até `parallel` segmentos em voo, gravados na ordem (com freio de memória global)
                 val window = ArrayDeque<kotlinx.coroutines.Deferred<ByteArray>>()
                 val it = segs.iterator()
-                fun launchNext() { if (it.hasNext()) { val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer, headers) } } }
-                repeat(parallel.coerceAtLeast(1)) { launchNext() }
-                while (window.isNotEmpty()) {
-                    coroutineContext.ensureActive()
-                    val data = window.removeFirst().await()
-                    launchNext()
-                    os.write(data); total += data.size; n++
-                    progress(total, total / n * segs.size)
+                var held = 0
+                suspend fun launchNext() { if (it.hasNext()) { MemGate.acquire(held); held++; val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer, headers) } } }
+                try {
+                    repeat(parallel.coerceAtLeast(1)) { launchNext() }
+                    while (window.isNotEmpty()) {
+                        coroutineContext.ensureActive()
+                        var data: ByteArray? = window.removeFirst().await()
+                        os.write(data!!); total += data.size; n++
+                        data = null; MemGate.release(); held--
+                        launchNext()
+                        progress(total, total / n * segs.size)
+                    }
+                } finally {
+                    window.forEach { d -> d.cancel() }
+                    repeat(held) { MemGate.release() }; held = 0
                 }
             }
         } catch (e: Throwable) { out.delete(); throw e }

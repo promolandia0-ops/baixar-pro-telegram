@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.19
+- Corrige o app fechando sozinho por falta de memória (OutOfMemoryError): downloads em pedaços (HLS/DASH) agora têm um limite global de pedaços na memória e esperam quando a memória aperta; os downloads usam HTTP/1.1 (no HTTP/2 a rede enchia a memória antes de o app ler); o app pode usar mais memória (largeHeap).
+- Corrige o fechamento "ForegroundServiceDidNotStopInTimeException": os serviços da fila, da varredura e de limpar repetidos usam o tipo "uso especial" (sem o limite de 6 h do dataSync) e, se o Android pedir para parar, param na hora.
+
 ## 1.9.18
 - Caixa-preta: quando o app fecha sozinho, o motivo fica gravado mesmo com o app fechado (queda no código, queda nativa, travamento/ANR, falta de memória ou WebView). Na próxima vez que abrir, aparece o aviso com botão **Copiar**; o motivo também vai no "Copiar diagnóstico", junto com os últimos passos (sem links).
 - Navegador: se a página derrubar o renderizador, o app não fecha mais e o navegador é recriado e recarrega a página. Se a mesma página cair 3 vezes seguidas, ela não é recarregada de novo.

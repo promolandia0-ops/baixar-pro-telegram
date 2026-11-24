@@ -69,7 +69,10 @@ object Net {
     }
 
     /** Downloads, tamanhos, Telegram — timeouts folgados. */
-    val http: OkHttpClient = newClient(30, 90, 90, 0, 96, 24, 32)
+    // HTTP/1.1 nos downloads: no HTTP/2 o OkHttp recebe e guarda na memória até 16 MB por download, mesmo que o app
+    // ainda não tenha lido (com vários downloads, OutOfMemoryError na thread "OkHttp TaskRunner"). No HTTP/1.1 a rede
+    // espera o app ler.
+    val http: OkHttpClient = newClient(30, 90, 90, 0, 96, 24, 32).newBuilder().protocols(listOf(okhttp3.Protocol.HTTP_1_1)).build()
     /** Varredura e busca do site: timeouts curtos, muita paralelismo, HTTP/2 quando o site oferece. */
     val fast: OkHttpClient = newClient(5, 8, 8, 12, 128, 32, 64)
     /** Cliente com timeout longo para o servidor (Render pode demorar para acordar / yt-dlp). */
@@ -86,4 +89,28 @@ suspend fun Call.await(): Response = suspendCancellableCoroutine { cont ->
         override fun onFailure(call: Call, e: IOException) { if (cont.isActive) cont.resumeWithException(e) }
         override fun onResponse(call: Call, response: Response) { if (cont.isActive) cont.resume(response) else response.close() }
     })
+}
+
+/**
+ * Freio de memória para downloads em pedaços (HLS/DASH). Cada pedaço fica inteiro na memória até ser gravado;
+ * com vários downloads ao mesmo tempo isso estourava os 256 MB do app (OutOfMemoryError).
+ * Agora: no máximo [SLOTS] pedaços na memória no app inteiro e, com a memória apertada, novos pedaços esperam.
+ * Sem risco de travar: cada download sempre pode ter pelo menos 1 pedaço em andamento.
+ */
+object MemGate {
+    private const val SLOTS = 16
+    private val slots = kotlinx.coroutines.sync.Semaphore(SLOTS)
+    fun tight(): Boolean {
+        val rt = Runtime.getRuntime()
+        return rt.totalMemory() - rt.freeMemory() > rt.maxMemory() * 6 / 10
+    }
+    /** [heldByMe] = quantos pedaços este download já tem em andamento. */
+    suspend fun acquire(heldByMe: Int) {
+        if (heldByMe > 0) {
+            var waited = 0
+            while (tight() && waited < 20_000) { kotlinx.coroutines.delay(150); waited += 150 }
+        }
+        slots.acquire()
+    }
+    fun release() = slots.release()
 }

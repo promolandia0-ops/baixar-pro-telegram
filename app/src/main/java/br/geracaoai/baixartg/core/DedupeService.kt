@@ -21,8 +21,8 @@ class DedupeService : Service() {
 
     private fun fg(special: Boolean) {
         val n = notif("Apagando repetidos…", 0, 0)
-        try { startForeground(ID, n, if (special && Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) }
-        catch (_: Exception) { try { startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE) } catch (_: Exception) {} }
+        try { startForeground(ID, n, if (Build.VERSION.SDK_INT >= 34) ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) }
+        catch (_: Exception) { try { startForeground(ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC) } catch (_: Exception) {} }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -48,7 +48,9 @@ class DedupeService : Service() {
         return START_STICKY
     }
 
-    override fun onTimeout(startId: Int) { fg(true) }
+    override fun onTimeout(startId: Int) = timedOut()
+    override fun onTimeout(startId: Int, fgsType: Int) = timedOut()
+    private fun timedOut() { try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}; stopSelf() }
 
     private fun notif(text: String, max: Int, p: Int): Notification {
         val open = PendingIntent.getActivity(this, 5, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
