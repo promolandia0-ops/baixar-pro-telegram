@@ -465,7 +465,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                             )
 
                             DropdownMenuItem(
-                                text = { Text("Analisar este site") },
+                                text = { Text("Raio-X: analisar este site") },
                                 leadingIcon = { Icon(Icons.Rounded.BugReport, null) },
                                 enabled = current.startsWith("http"),
                                 onClick = { moreMenu = false; analyze = true },
@@ -533,6 +533,16 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         Text(if (loadAllOn) "Parar" else "Carregar tudo", maxLines = 1, style = MaterialTheme.typography.labelMedium)
                     }
                     FilledTonalButton(
+                        onClick = { analyze = true },
+                        modifier = Modifier.weight(1f).height(38.dp),
+                        enabled = current.startsWith("http"),
+                        contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp),
+                    ) {
+                        Icon(Icons.Rounded.BugReport, null, Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Analisar", maxLines = 1, style = MaterialTheme.typography.labelMedium)
+                    }
+                    FilledTonalButton(
                         onClick = { ask = true },
                         modifier = Modifier.weight(1f).height(38.dp),
                         enabled = current.startsWith("http"),
@@ -565,6 +575,9 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(this, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
             }
+            // Login salvo: a página avisa quando você entra; o app pergunta se quer salvar (criptografado, só neste aparelho)
+            br.geracaoai.baixartg.core.CredStore.init(c)
+            try { addJavascriptInterface(br.geracaoai.baixartg.core.CredStore.Bridge { BrowserRuntime.pageUrl }, "BaixarCred") } catch (_: Exception) {}
             webViewClient = object : WebViewClient() {
                 override fun onRenderProcessGone(view: WebView?, detail: android.webkit.RenderProcessGoneDetail?): Boolean {
                     if (web === view) web = null
@@ -593,12 +606,21 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     current = url; syncAddress(url); canBack = v.canGoBack(); canFwd = v.canGoForward(); WebCookies.remember(url)
                     if (br.geracaoai.baixartg.web.AdBlock.enabled) v.evaluateJavascript(br.geracaoai.baixartg.web.AdBlock.COSMETIC_JS) { }
                     v.evaluateJavascript(MseHookScript.SCRIPT) { }
+                    if (url.startsWith("http")) {
+                        v.evaluateJavascript(br.geracaoai.baixartg.core.CredStore.CAPTURE_JS) { }
+                        br.geracaoai.baixartg.core.CredStore.get(url)?.let { cred ->
+                            val js = br.geracaoai.baixartg.core.CredStore.fillJs(cred)
+                            // páginas que montam o formulário depois: tenta de novo
+                            for (d in longArrayOf(0L, 1_500L, 4_000L)) v.postDelayed({ try { if (br.geracaoai.baixartg.core.CredStore.site(v.url ?: "") == br.geracaoai.baixartg.core.CredStore.site(url)) v.evaluateJavascript(js) { } } catch (_: Exception) {} }, d)
+                        }
+                    }
                 }
                 override fun shouldInterceptRequest(v: WebView, request: android.webkit.WebResourceRequest): android.webkit.WebResourceResponse? {
                     val u = request.url?.toString().orEmpty()
                     if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, current, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                     val hdrs = request.requestHeaders ?: emptyMap()
                     val pg = current
+                    br.geracaoai.baixartg.core.RaioX.onRequest(u, request.method, hdrs, request.isForMainFrame)
                     if (u.startsWith("http")) BrowserDiag.media("webview", u)
                     if (u.startsWith("http") && pg.startsWith("http") && (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u) || Extract.isSegmentUrl(u) || hdrs.keys.any { it.equals("Range", true) })) {
                         MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-tab")
@@ -684,6 +706,17 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
         dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
     if (analyze) SiteAnalyzeDialog(current, web) { analyze = false }
+    val credOffer by br.geracaoai.baixartg.core.CredStore.offer.collectAsState()
+    credOffer?.let { o ->
+        AlertDialog(onDismissRequest = { br.geracaoai.baixartg.core.CredStore.offer.value = null }, icon = { Icon(Icons.Rounded.Lock, null) },
+            title = { Text("Salvar login deste site?") },
+            text = { Text("${o.user.ifBlank { "(sem usuário)" }} • senha ${"•".repeat(o.pass.length.coerceAtMost(10))}\nFica só neste aparelho, criptografado. Da próxima vez o app preenche sozinho. Nunca vai para relatório ou diagnóstico.") },
+            confirmButton = { TextButton({ br.geracaoai.baixartg.core.CredStore.save(o.site, o.user, o.pass); br.geracaoai.baixartg.core.CredStore.offer.value = null }) { Text("Salvar") } },
+            dismissButton = { Row {
+                TextButton({ br.geracaoai.baixartg.core.CredStore.never(o.site); br.geracaoai.baixartg.core.CredStore.offer.value = null }) { Text("Nunca neste site") }
+                TextButton({ br.geracaoai.baixartg.core.CredStore.offer.value = null }) { Text("Agora não") }
+            } })
+    }
     if (doctor) VideoDoctorDialog(web, current,
         tapPlay = { web?.evaluateJavascript(TapPlay.JS) { }; startNetPoll() },
         collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) }, example = doctorExample) { doctor = false; doctorExample = null }
@@ -704,6 +737,17 @@ fun LoggedAccountsGroup() {
         } }
         OutlinedButton({ WebCookies.clearAll { list = emptyList() }; list = emptyList() }, Modifier.fillMaxWidth(), enabled = list.isNotEmpty(), shape = MaterialTheme.shapes.medium,
             colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Icon(Icons.Rounded.DeleteSweep, null); Spacer(Modifier.width(8.dp)); Text("Sair de todas") }
+        // Logins salvos (e-mail/senha): criptografados com o Keystore, só neste aparelho
+        val ctx = androidx.compose.ui.platform.LocalContext.current
+        var saved by remember { br.geracaoai.baixartg.core.CredStore.init(ctx); mutableStateOf(br.geracaoai.baixartg.core.CredStore.sites()) }
+        Spacer(Modifier.height(8.dp))
+        Text("Logins salvos (preenchidos sozinhos no Navegador; criptografados, só neste aparelho)", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (saved.isEmpty()) Text("Nenhum login salvo.", style = MaterialTheme.typography.bodyMedium)
+        saved.forEach { d -> Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Key, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp))
+            Text(d, Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+            TextButton({ br.geracaoai.baixartg.core.CredStore.remove(d); saved = br.geracaoai.baixartg.core.CredStore.sites() }) { Text("Apagar") }
+        } }
     }
 }
 

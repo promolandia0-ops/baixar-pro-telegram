@@ -48,7 +48,21 @@ fun SiteAnalyzeDialog(pageUrl: String, web: WebView?, onClose: () -> Unit) {
         SiteHash.init(ctx)
         job = scope.launch {
             try {
-                // instala o coletor de erros JS no WebView visível (só leitura)
+                // 1) Raio-X: a investigação completa (player, rede no play, teste peça por peça, validade, app, fotos)
+                val raio = try {
+                    br.geracaoai.baixartg.core.RaioX.analyze(
+                        page = pageUrl,
+                        eval = { js -> withContext(Dispatchers.Main) { evalJs(web, js) }?.let { raw ->
+                            if (raw == "null") null else try { (org.json.JSONTokener(raw).nextValue() as? String) ?: raw } catch (_: Exception) { raw } } },
+                        tapPlay = { withContext(Dispatchers.Main) { try { web?.evaluateJavascript(TapPlay.JS) { } } catch (_: Exception) {} } },
+                        progress = br.geracaoai.baixartg.core.RaioX.Progress { s -> main.post { step = s } },
+                    )
+                } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                    "=== RAIO-X === não terminou (${e.javaClass.simpleName})"
+                }
+                // 2) análise anterior (continua valendo) — instala o coletor de erros JS no WebView visível (só leitura)
+                step = "Completando com a análise do site…"
                 withContext(Dispatchers.Main) { web?.evaluateJavascript(SiteAnalyzer.HOOK_ERR_JS) { } }
                 step = "Lendo o player…"
                 val snapRaw = withContext(Dispatchers.Main) { evalJs(web, SiteAnalyzer.ANALYZE_JS) }
@@ -69,7 +83,7 @@ fun SiteAnalyzeDialog(pageUrl: String, web: WebView?, onClose: () -> Unit) {
                         progress = SiteAnalyzer.Progress { s -> main.post { step = s } },
                     )
                 }
-                report = out.report
+                report = raio + "\n\n" + out.report
             } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) return@launch
                 // falha do analisador: relatório mínimo, sem mensagem crua
@@ -85,7 +99,7 @@ fun SiteAnalyzeDialog(pageUrl: String, web: WebView?, onClose: () -> Unit) {
     Dialog(onDismissRequest = { if (running) cancel() else onClose() }, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Surface(shape = MaterialTheme.shapes.large, tonalElevation = 3.dp, modifier = Modifier.fillMaxWidth().padding(12.dp)) {
             Column(Modifier.fillMaxWidth().padding(20.dp)) {
-                Text("Analisar este site", style = MaterialTheme.typography.titleLarge)
+                Text("Raio-X do site", style = MaterialTheme.typography.titleLarge)
                 Text("Relatório anônimo: confira tudo antes de copiar. Não leva endereço, nome do site nem título.",
                     style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
@@ -95,7 +109,7 @@ fun SiteAnalyzeDialog(pageUrl: String, web: WebView?, onClose: () -> Unit) {
                         Spacer(Modifier.width(12.dp))
                         Text(step, style = MaterialTheme.typography.bodyMedium)
                     }
-                    Text("Isso leva no máximo cerca de 1 minuto.", style = MaterialTheme.typography.bodySmall,
+                    Text("Dá play sozinho, grava o que o player pede e testa peça por peça. Leva uns 2 minutos — deixe a página aberta.", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
                     OutlinedButton({ cancel() }, Modifier.fillMaxWidth().padding(top = 16.dp)) { Text("Cancelar") }
                 } else {
