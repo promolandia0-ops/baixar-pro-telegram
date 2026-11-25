@@ -26,11 +26,13 @@ object QualityBoost {
     private fun noQ(u: String) = u.substringBefore('#').substringBefore('?')
 
     /** Lista principal (master) de um link de qualidade única. null se já é a principal ou não achou. */
-    suspend fun masterFor(url: String, ref: String?, playlist: String? = null): Pair<String, Int>? {
+    suspend fun masterFor(url: String, ref: String?, playlist: String? = null, seen: List<String> = emptyList()): Pair<String, Int>? {
         val pl = playlist ?: fetch(url, ref)?.takeIf { it.first in 200..299 }?.second?.let { String(it, Charsets.UTF_8) } ?: return null
         if (!pl.trimStart().startsWith("#EXTM3U") || pl.contains("#EXT-X-STREAM-INF")) return null
         val cur = QualityUp.heightIn(url)
-        for (c in QualityUp.hlsCandidates(url)) {
+        // 1º as listas que o próprio player pediu nesta página (a principal ou a de 1080 costuma estar ali); depois os palpites
+        val seenFirst = seen.filter { Trail.host(it) == Trail.host(url) } + seen.filter { Trail.host(it) != Trail.host(url) }
+        for (c in (seenFirst + QualityUp.hlsCandidates(url)).distinct().take(40)) {
             val (code, b) = fetch(c, ref) ?: continue
             if (code !in 200..299) continue
             val t = String(b, Charsets.UTF_8)
@@ -41,16 +43,16 @@ object QualityBoost {
                 val lines = t.lineSequence().map { it.trim() }.filter { it.isNotEmpty() && !it.startsWith("#") }.mapNotNull { DetScan.resolve(c, it) }.map { noQ(it) }.toList()
                 val belongs = noQ(url) in lines
                 if (belongs || info.maxHeight > cur) return c to info.maxHeight
-            } else if (t.contains("#EXTINF") && QualityUp.heightIn(c) > cur && c in QualityUp.sameWithHeight(url)) return c to QualityUp.heightIn(c)
+            } else if (t.contains("#EXTINF") && QualityUp.heightIn(c) > cur && (c in QualityUp.sameWithHeight(url) || (c in seen && cur > 0))) return c to QualityUp.heightIn(c)
         }
         return null
     }
 
     /** Versão maior do mesmo vídeo (HLS principal ou arquivo em resolução maior), conferida. */
-    suspend fun better(f: Found): Found? {
+    suspend fun better(f: Found, seen: List<String> = emptyList()): Found? {
         val ref = f.ref ?: f.page.ifBlank { null }
         if (f.kind == Kind.HLS || Extract.isHls(f.url)) {
-            val (u, h) = masterFor(f.url, ref) ?: return null
+            val (u, h) = masterFor(f.url, ref, null, seen) ?: return null
             return f.copy(url = u, kind = Kind.HLS, quality = h)
         }
         if (f.kind == Kind.DIRECT) {

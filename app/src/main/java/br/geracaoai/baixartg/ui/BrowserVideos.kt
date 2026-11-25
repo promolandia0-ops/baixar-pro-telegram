@@ -329,6 +329,14 @@ object BrowserDetect {
         return back.size
     }
 
+    /** Botão Limpar: tira tudo dos Escondidos (e da lista os que vieram de lá marcados como repetido). Não voltam nesta página. */
+    fun clearHidden(): Int {
+        val n = suppressed.size
+        suppressed.clear(); alreadyHere.intValue = 0
+        list.removeAll { it.badge.startsWith("REPETIDO") || it.badge.startsWith("qualidade baixa") || it.badge.startsWith("na fila") }
+        return n
+    }
+
     fun showHidden(): Int {
         val bring = synchronized(this) { suppressed.toList().also { suppressed.clear() } }
         alreadyHere.intValue = 0
@@ -401,6 +409,9 @@ object BrowserDetect {
      * para a thread principal (antes travava a tela a cada vídeo detectado). Mesmas regras de antes.
      */
     private val boosted = java.util.Collections.synchronizedSet(HashSet<String>())
+    /** Todas as listas HLS que o player pediu em cada página (a principal costuma estar entre elas). */
+    private val seenHls = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
+    private fun seenFor(f: Found) = seenHls[normPage(f.page)]?.toList().orEmpty().filter { it != f.url }
     private fun publish(f0: Found, extraKeys: List<String> = emptyList()) {
         val f = MediaIdentity.withQuality(f0)
         if (!isRealVideo(f) || TitleFix.isSubtitleUrl(f.url)) return
@@ -410,17 +421,16 @@ object BrowserDetect {
             val ck = MediaIdentity.canonicalMedia(f.url)
             if (!boosted.add(ck)) return
             scope.launch {
-                val nf = try { kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f) } } catch (e: Exception) { if (e is CancellationException) throw e; null }
+                val nf = try { kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f, seenFor(f)) } } catch (e: Exception) { if (e is CancellationException) throw e; null }
                 withContext(Dispatchers.Main) {
                     if (nf != null && nf.url != f.url && (nf.quality == 0 || nf.quality >= minH)) {
                         boosted.add(MediaIdentity.canonicalMedia(nf.url))
                         Trail.add(listOf(f.url, nf.url, f.page), "qualidade máxima", "o player pediu ${f.quality}p; achei ${if (nf.quality > 0) "${nf.quality}p" else "a lista principal"} e troquei")
                         publish(nf.copy(title = f.title, extra = f.extra), ks)
                     } else {
-                        val k = "low:$ck"
-                        val why = "qualidade baixa: ${if (nf != null && nf.quality > 0) nf.quality else f.quality}p (abaixo de ${minH}p)"
-                        Trail.addOnce(listOf(f.url, f.page), "escondido", why)
-                        if (suppressed.none { it.key == k }) { suppressed += Det(k, f, keys = ks, badge = why); alreadyHere.intValue = suppressed.size }
+                        // não aparece em lugar nenhum; se o player pedir a versão maior depois (você troca para 1080), ela entra
+                        boosted.remove(ck)
+                        Trail.addOnce(listOf(f.url, f.page), "ignorado", "qualidade ${if (nf != null && nf.quality > 0) nf.quality else f.quality}p (abaixo de ${minH}p)")
                     }
                 }
             }
@@ -429,7 +439,7 @@ object BrowserDetect {
         // qualidade máxima: o player começa baixo (360p); procura a lista principal / versão 1080 e troca este item por ela
         if ((f.kind == Kind.HLS || f.kind == Kind.DIRECT) && boosted.add(MediaIdentity.canonicalMedia(f.url))) scope.launch {
             try {
-                val nf = kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f) }
+                val nf = kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f, seenFor(f)) }
                 if (nf != null && nf.url != f.url) {
                     boosted.add(MediaIdentity.canonicalMedia(nf.url))
                     Trail.add(listOf(f.url, nf.url, f.page), "qualidade máxima", "o player pediu ${if (f.quality > 0) "${f.quality}p" else "uma qualidade só"}; achei ${if (nf.kind == Kind.HLS && Extract.isHls(nf.url) && nf.quality > 0) "a lista principal (até ${nf.quality}p)" else "${nf.quality}p"} e troquei")
@@ -506,6 +516,13 @@ object BrowserDetect {
                     rememberHidden(keepTitle.page.ifBlank { keepTitle.url }, keepTitle, pk, hideReasonOf(keepTitle, pk))
                     list.removeAt(i)
                 } else list[i] = list[i].copy(f = keepTitle, sel = list[i].sel, keys = pk, state = 0)
+            } else {
+                // escondido: se chegou uma versão melhor do mesmo vídeo (ex.: você trocou o player para 1080), fica a melhor
+                val j = suppressed.indexOfFirst { d -> d.keys.any { it in ks } || (d.f.kind != Kind.PHOTO && MediaIdentity.same(d.f, f)) }
+                if (j >= 0 && MediaIdentity.isBetter(f, suppressed[j].f)) {
+                    suppressed[j] = suppressed[j].copy(f = f.copy(title = TitleFix.pick(suppressed[j].f.title, f.title).ifBlank { f.title }))
+                    Trail.addOnce(listOf(f.url, f.page), "escondido atualizado", "versão melhor do mesmo vídeo${if (f.quality > 0) " (${f.quality}p)" else ""}")
+                }
             }
             synchronized(seenCards) { ks.forEach { keys[it] = hitKey } }
             return
@@ -653,9 +670,11 @@ object BrowserDetect {
     /** Só esconde se está ATIVO na fila agora ou se o envio foi confirmado. FAIL/SKIP/CANCEL e queued_keys sozinhos não escondem. */
     private fun blocked(f: Found, ks: List<String>): Boolean = BrowserHide.shouldHide(hideReasonOf(f, ks))
     private fun rememberHidden(card: String, f: Found, pk: List<String>, reason: BrowserHide.Reason) {
-        val k = "card:" + normPage(card)
+        val k = if (f.url != card && f.kind != Kind.SERVER && f.kind != Kind.MSE) "h:" + MediaIdentity.canonicalMedia(f.url) else "card:" + normPage(card)
         val why = try { hideWhyText(f, pk) } catch (_: Exception) { "" }
-        if (suppressed.none { it.key == k }) { suppressed += Det(k, f, keys = pk, badge = why.ifBlank { BrowserHide.badge(reason).orEmpty() }); Trail.addOnce(listOf(f.url, f.page, card), "escondido", why) }
+        val j = suppressed.indexOfFirst { it.key == k }
+        if (j >= 0 && MediaIdentity.isBetter(f, suppressed[j].f)) suppressed[j] = suppressed[j].copy(f = f)
+        if (j < 0) { suppressed += Det(k, f, keys = pk, badge = why.ifBlank { BrowserHide.badge(reason).orEmpty() }); Trail.addOnce(listOf(f.url, f.page, card), "escondido", why) }
         alreadyHere.intValue = suppressed.size
     }
 
@@ -701,6 +720,7 @@ object BrowserDetect {
     fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null, force: Boolean = false, src: String = "navegador") {
         if (page.isNotBlank()) browsing = page
         if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
+        if (Extract.isHls(url)) seenHls.getOrPut(normPage(page)) { java.util.Collections.synchronizedSet(LinkedHashSet()) }.let { s -> if (s.size < 80) s += url }
         if (!force && BrowserGrouping.isFilteredOutVideoUrl(url)) { Trail.addOnce(listOf(url, page), "visto e ignorado", "$src • parecia prévia/anúncio/miniatura"); return }
         val kind = Extract.mediaKindOf(url) ?: kindHint ?: return
         Trail.addOnce(listOf(url, page), "achado", "$src • $kind em ${Trail.host(url)} • página ${Trail.host(page)}")
@@ -1158,11 +1178,14 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onLoadAl
                     Switch(onlyChecked, { onlyChecked = it })
                 }
                 val hiddenN by BrowserDetect.alreadyHere
-                if (hiddenN > 0) OutlinedButton({ BrowserDetect.showHidden() }, Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                if (hiddenN > 0) Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedButton({ BrowserDetect.clearHidden() }) { Icon(Icons.Rounded.DeleteSweep, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text("Limpar") }
+                OutlinedButton({ BrowserDetect.showHidden() }, Modifier.weight(1f)) {
                     val hs = BrowserDetect.suppressed.toList()
                     val rep = hs.count { it.badge.startsWith("REPETIDO") }
                     val low = hs.count { it.badge.startsWith("qualidade baixa") }
                     Text("Mostrar os $hiddenN escondidos" + listOfNotNull(if (rep > 0) "$rep repetido(s)" else null, if (low > 0) "$low abaixo de ${Prefs.minHeight}p" else null).joinToString(", ").let { if (it.isNotBlank()) " ($it)" else "" }, maxLines = 2)
+                }
                 }
                 Button({
                     BrowserDetect.sendAsync(checked, onSent)

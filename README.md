@@ -4,6 +4,12 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.30
+- **Trocou o player para 1080 → o 1080 aparece**: antes, depois que a versão 360p ia para Escondidos, qualquer outra versão do mesmo vídeo era jogada fora (inclusive a 1080). Agora a versão melhor substitui a de baixo. O app também guarda todas as listas HLS que o player pediu na página e procura a maior entre elas.
+- **Abaixo de 720p nem aparece** (nem nos Escondidos). Se depois o player pedir a versão maior, ela entra.
+- **Botão Limpar nos Escondidos**: tira tudo de lá (e os repetidos que vieram de lá); não voltam nesta página.
+- Escondidos agora são por vídeo, não por página: vários vídeos da mesma página não se sobrepõem.
+
 ## 1.9.29
 - **Só 720p ou mais** (Configurações, ligado por padrão): vídeo abaixo de 720p não é enviado — o app confere a resolução real do arquivo antes de mandar. Na lista, link de qualidade baixa primeiro tenta a versão maior; se não existir, vai para Escondidos com "qualidade baixa".
 - **Repetidos nunca mais**: antes de enviar, compara a duração do arquivo com os já enviados do mesmo site (funciona com o navegador aberto). Nos Escondidos aparece "REPETIDO (já enviado)"; "Mostrar escondidos" traz os repetidos desmarcados e sem botão de baixar (antes mandava baixar tudo forçando).
