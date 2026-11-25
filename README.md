@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.36
+- **Fila grande sem travar**: no máximo 2 gravações pelo navegador ao mesmo tempo (antes até 10 navegadores ocultos tocando vídeo juntos, todos na thread da tela — o app travava durante a fila e ficava liso ao pausar). Abrir página na fila: 2 por vez (antes 3).
+- A tela da Fila redesenha no máximo 1x por segundo com milhares de itens, e a fila é gravada no disco a cada 5 s (antes a cada 1,5 s, serializando todos os itens).
+
 ## 1.9.35
 - **Baixar pela própria página**: quando o servidor do vídeo recusa o app (HTTP 403) mas toca no player, o navegador oculto agora baixa o arquivo de dentro da página (fetch do navegador, com os mesmos cookies, cabeçalhos e token do player) e manda os bytes ao app. Usa o endereço que o `<video>` está tocando naquela hora.
 - **Corrigido "Navegador não capturou dados do player MSE"**: se o download pelo link capturado falhava, o navegador oculto era fechado antes da última tentativa, que então nunca capturava nada. Agora ele só fecha quando o download dá certo.

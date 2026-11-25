@@ -52,6 +52,9 @@ object BrowserMseDownloader {
 
     fun init(c: Context) { appCtx = c.applicationContext }
 
+    /** No máximo 2 gravações pelo navegador ao mesmo tempo (antes até 10, o que travava a tela durante a fila). */
+    const val MAX_HIDDEN = 2
+
     fun effectiveConcurrency(desired: Int, availBytes: Long, totalBytes: Long, lowMemory: Boolean): Pair<Int, String?> {
         val d = desired.coerceIn(1, 10)
         return when {
@@ -68,7 +71,8 @@ object BrowserMseDownloader {
     }
 
     private fun currentCap(): Pair<Int, String?> {
-        val desired = try { Prefs.parDown.coerceIn(1, 10) } catch (_: Exception) { 10 }
+        // Cada navegador oculto toca vídeo e roda na mesma thread da tela: com vários ao mesmo tempo o app inteiro trava.
+        val desired = try { Prefs.parDown.coerceIn(1, MAX_HIDDEN) } catch (_: Exception) { MAX_HIDDEN }
         val ctx = appCtx ?: return desired to null
         return try {
             val am = ctx.getSystemService(ActivityManager::class.java) ?: return desired to null

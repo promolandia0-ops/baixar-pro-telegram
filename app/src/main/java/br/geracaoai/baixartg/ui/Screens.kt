@@ -1,5 +1,6 @@
 package br.geracaoai.baixartg.ui
 
+import kotlinx.coroutines.flow.conflate
 import android.Manifest
 import android.content.ClipboardManager
 import android.widget.Toast
@@ -379,7 +380,10 @@ fun LazyListScope.photosSection(phase: Phase) {
 fun QueueTab() {
     val items by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState(); val status by Jobs.status.collectAsState()
     val query = rememberSaveable { mutableStateOf("") }
-    val pItems by Pipeline.items.collectAsState()
+    // A fila muda várias vezes por segundo; com milhares de itens a tela só redesenha no máximo 1x por segundo.
+    val pItems by androidx.compose.runtime.produceState(Pipeline.items.value) {
+        Pipeline.items.conflate().collect { value = it; kotlinx.coroutines.delay(if (it.size > 300) 1_000 else 250) }
+    }
     val pFilter = rememberSaveable { mutableStateOf(0) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
         if (pItems.isNotEmpty()) pipelinePanel(pItems, pFilter)
