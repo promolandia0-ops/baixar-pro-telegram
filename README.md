@@ -4,6 +4,13 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.31
+- **Player na maior qualidade sozinho**: quando aparece um vídeo HLS (ou um link abaixo de 720p), o app manda os players da página (hls.js, Shaka, JW Player, Video.js, Plyr) irem para a maior qualidade — é como você trocar para 1080 na mão; o 1080 que o player pede entra na lista.
+- **Lista principal pega de dentro do player**: o agente segura o hls.js/Shaka na hora em que carregam e avisa o endereço da lista principal (com todas as qualidades).
+- **Detecção sempre ligada pelo agente**: respostas de rede com lista HLS/DASH ou JSON com endereços de vídeo, e `<video>` carregando em qualquer quadro, entram na lista na hora (antes só o detetive usava isso).
+- Se mesmo assim só existir abaixo de 720p e a página ficar vazia por 15 s, aparece desmarcado com "só achei 360p" (em vez de sumir tudo).
+- **Detetive age**: força a qualidade máxima e, no fim, manda para a fila o que achou (repetidos e abaixo de 720p continuam barrados).
+
 ## 1.9.30
 - **Trocou o player para 1080 → o 1080 aparece**: antes, depois que a versão 360p ia para Escondidos, qualquer outra versão do mesmo vídeo era jogada fora (inclusive a 1080). Agora a versão melhor substitui a de baixo. O app também guarda todas as listas HLS que o player pediu na página e procura a maior entre elas.
 - **Abaixo de 720p nem aparece** (nem nos Escondidos). Se depois o player pedir a versão maior, ela entra.

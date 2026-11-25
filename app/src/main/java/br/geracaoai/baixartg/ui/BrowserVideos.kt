@@ -409,6 +409,41 @@ object BrowserDetect {
      * para a thread principal (antes travava a tela a cada vídeo detectado). Mesmas regras de antes.
      */
     private val boosted = java.util.Collections.synchronizedSet(HashSet<String>())
+    private val maxqAsked = java.util.Collections.synchronizedSet(HashSet<String>())
+    /** Player na maior qualidade (uma vez por página): o player passa a pedir o 1080 e ele entra na lista. */
+    fun askMaxQuality(page: String) {
+        if (!maxqAsked.add(normPage(page))) return
+        scope.launch { delay(2_500); withContext(Dispatchers.Main) { DetBridge.broadcast("maxq") }; delay(6_000); withContext(Dispatchers.Main) { DetBridge.broadcast("maxq") } }
+    }
+
+    /** O agente viu um endereço de vídeo (player carregou, hls.js/shaka, <video>): entra como se o navegador tivesse visto. */
+    fun fromAgentMedia(u: String, frame: String, via: String) {
+        if (MediaPick.isAdUrl(u)) return
+        val k = Extract.mediaKindOf(u) ?: (if (via.isNotBlank()) Kind.HLS else null) ?: return
+        intercepted(u, browsing.ifBlank { frame }, "", k, src = if (via.isNotBlank()) "o player ($via) carregou a lista do vídeo" else "o <video> começou a carregar (em ${Trail.host(frame)})")
+    }
+
+    /** O agente leu uma resposta do site: lista HLS/DASH ou JSON com endereços de vídeo dentro. */
+    fun fromAgentNet(u: String, frame: String, body: String) {
+        if (mode.intValue == 1 || body.isBlank()) return
+        scope.launch {
+            val t = body.trimStart()
+            val hits = ArrayList<Pair<String, Kind?>>()
+            if (t.startsWith("#EXTM3U")) { if (u.startsWith("http") && (t.contains("#EXT-X-STREAM-INF") || t.contains("#EXTINF"))) hits += u to Kind.HLS }
+            else if (t.startsWith("<") && t.contains("<MPD")) { if (u.startsWith("http")) hits += u to Kind.SERVER }
+            else DetScan.urlsIn(t, u, max = 60, withImages = false, deep = false).forEach { h ->
+                when (h.t) { DetScan.T.HLS -> hits += h.url to Kind.HLS; DetScan.T.DASH -> hits += h.url to Kind.SERVER; DetScan.T.FILE -> hits += h.url to null; else -> {} }
+            }
+            if (hits.isEmpty()) return@launch
+            withContext(Dispatchers.Main) {
+                hits.take(25).forEach { (h, k) ->
+                    if (!MediaPick.isAdUrl(h)) intercepted(h, browsing.ifBlank { frame }, "", k,
+                        src = if (h == u) "resposta de rede com a lista do vídeo (lida dentro do player)" else "endereço de vídeo dentro de uma resposta do site (${Trail.host(u)})")
+                }
+            }
+        }
+    }
+
     /** Todas as listas HLS que o player pediu em cada página (a principal costuma estar entre elas). */
     private val seenHls = java.util.concurrent.ConcurrentHashMap<String, MutableSet<String>>()
     private fun seenFor(f: Found) = seenHls[normPage(f.page)]?.toList().orEmpty().filter { it != f.url }
@@ -430,7 +465,18 @@ object BrowserDetect {
                     } else {
                         // não aparece em lugar nenhum; se o player pedir a versão maior depois (você troca para 1080), ela entra
                         boosted.remove(ck)
-                        Trail.addOnce(listOf(f.url, f.page), "ignorado", "qualidade ${if (nf != null && nf.quality > 0) nf.quality else f.quality}p (abaixo de ${minH}p)")
+                        val q = if (nf != null && nf.quality > 0) nf.quality else f.quality
+                        Trail.addOnce(listOf(f.url, f.page), "ignorado", "qualidade ${q}p (abaixo de ${minH}p) • pedi ao player a maior qualidade")
+                        askMaxQuality(f.page)
+                        scope.launch {
+                            delay(15_000)
+                            withContext(Dispatchers.Main) {
+                                // nada melhor apareceu e a página ficou sem vídeo nenhum: mostra este, desmarcado, para não ficar vazio
+                                val pk = normPage(f.page)
+                                if (list.none { normPage(it.f.page) == pk } && list.none { it.key == "low:$ck" } && !blocked(f, ks))
+                                    list += Det("low:$ck", f, sel = false, keys = ks.filter { it.startsWith("ip:") || it.startsWith("p:") }, badge = "só achei ${q}p (o site não deu maior)")
+                            }
+                        }
                     }
                 }
             }
@@ -724,6 +770,7 @@ object BrowserDetect {
         if (!force && BrowserGrouping.isFilteredOutVideoUrl(url)) { Trail.addOnce(listOf(url, page), "visto e ignorado", "$src • parecia prévia/anúncio/miniatura"); return }
         val kind = Extract.mediaKindOf(url) ?: kindHint ?: return
         Trail.addOnce(listOf(url, page), "achado", "$src • $kind em ${Trail.host(url)} • página ${Trail.host(page)}")
+        if (kind == Kind.HLS && Prefs.minHeight > 0) askMaxQuality(page)
         val info = pageInfo[normPage(page)]
         val t = TitleFix.pick(info?.first, title).ifBlank { Extract.mediaTitle(url, "") }
         val extra = listOfNotNull(info?.first, info?.second, TitleFix.clean(title)).filter { it.isNotBlank() }.distinct().joinToString(" ")

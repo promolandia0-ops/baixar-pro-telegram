@@ -35,6 +35,9 @@ object DetBridge {
     @Volatile var blobs = 0
     @Volatile var pageStart = 0L
     private val replies = ConcurrentHashMap<Int, MutableList<JSONObject>>()
+    /** Sempre ligado: endereço de vídeo que o agente viu (player carregou, hls.js/shaka, resposta de rede) vai direto para a lista. */
+    @Volatile var onMedia: ((url: String, frame: String, src: String) -> Unit)? = null
+    @Volatile var onNet: ((url: String, frame: String, body: String) -> Unit)? = null
     private val seq = AtomicInteger(1)
 
     /** Liga a ponte no WebView (uma vez, quando ele é criado). */
@@ -55,15 +58,28 @@ object DetBridge {
             val f = o.optString("f")
             synchronized(proxies) { if (f.isNotBlank()) proxies[f] = reply }
             when (o.optString("t")) {
-                "net" -> synchronized(net) {
-                    net.addLast(NetHit(f, o.optString("u"), o.optString("b"), System.currentTimeMillis()))
-                    while (net.size > 200) net.removeFirst()
+                "net" -> {
+                    synchronized(net) {
+                        net.addLast(NetHit(f, o.optString("u"), o.optString("b"), System.currentTimeMillis()))
+                        while (net.size > 200) net.removeFirst()
+                    }
+                    try { onNet?.invoke(o.optString("u"), f, o.optString("b")) } catch (_: Throwable) {}
                 }
-                "media" -> if (o.optInt("blob") == 1) blobs++ else o.optString("u").takeIf { it.startsWith("http") }?.let { u -> synchronized(media) { media += u; if (media.size > 300) media.remove(media.first()) } }
+                "media" -> if (o.optInt("blob") == 1) blobs++ else o.optString("u").takeIf { it.startsWith("http") }?.let { u ->
+                    synchronized(media) { media += u; if (media.size > 300) media.remove(media.first()) }
+                    try { onMedia?.invoke(u, f, o.optString("via")) } catch (_: Throwable) {}
+                }
                 "drm" -> drm = o.optString("ks").ifBlank { "sim" }
                 "scan", "photos", "did" -> replies[o.optInt("id")]?.add(o)
             }
         } catch (_: Throwable) {}
+    }
+
+    /** Manda um comando para todos os quadros sem esperar resposta (ex.: "maxq" = player na maior qualidade). */
+    fun broadcast(cmd: String) {
+        val j = JSONObject().put("c", cmd).put("id", 0).toString()
+        val targets = synchronized(proxies) { proxies.values.toList() }
+        for (p in targets) try { p.postMessage(j) } catch (_: Throwable) {}
     }
 
     fun newPage() {

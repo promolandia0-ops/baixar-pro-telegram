@@ -86,6 +86,7 @@ object Detective {
         var title: String = web.title.orEmpty()
         val host get() = Extract.host(page)
         val startV = videos(); val startP = BrowserDetect.photos.size
+        val startKeys = BrowserDetect.list.map { it.key }.toHashSet()
         val cands = LinkedHashMap<String, Cand>()
         val tested = HashSet<String>()
         val photoUrls = LinkedHashMap<String, String>()
@@ -532,6 +533,13 @@ object Detective {
                 if (drm.isNotBlank() && !gotV()) return drmResult()
             }
 
+            if (full) {
+                log.begin("Player na maior qualidade")
+                val mq = DetBridge.ask(web, "maxq", 1_200).sumOf { it.optInt("n") }
+                if (mq > 0) waitFor(6_000)
+                log.done(if (mq > 0) St.FIXED else St.INFO, if (mq > 0) "Mudei $mq player(s) para a maior qualidade; o 1080 que ele pedir entra na lista." else "Não achei controle de qualidade (o app procura a lista principal sozinho).")
+            }
+
             if (full && !gotV()) {
                 // 17) rolar até o player
                 log.begin("Mostrar o player na tela e tocar de novo")
@@ -604,6 +612,15 @@ object Detective {
             // 22) fotos
             if (full || BrowserDetect.photosOn.value) photoLayer()
 
+            // não fica só no diagnóstico: o que ele achou já vai para a fila
+            if (full && gotV()) {
+                val news = BrowserDetect.list.filter { it.key !in startKeys && !it.sent && it.state == 0 && !it.badge.startsWith("REPETIDO") && !it.badge.startsWith("só achei") }
+                if (news.isNotEmpty()) {
+                    log.begin("Baixar o que achei")
+                    BrowserDetect.sendAsync(news) { }
+                    log.done(St.FIXED, "Mandei ${news.size} vídeo(s) para a fila (repetidos e abaixo de ${Prefs.minHeight}p são barrados antes de enviar).")
+                }
+            }
             if (gotV() || gotP()) DetMemory.save(host, wins, recipesHit, players.filter { it.isNotBlank() }.take(4))
             CrashLog.mark("detetive: vídeos=${videos() - startV} fotos=${BrowserDetect.photos.size - startP} testes=$tests")
             return result(null, lessonUrl.takeIf { !full && !gotV() }, lessonTitle)
@@ -832,6 +849,7 @@ object Detective {
             val n = DetBridge.ask(web, "play", 1_500).sumOf { it.optInt("n") }
             delay(1_500)
             DetBridge.ask(web, "play", 800)
+            DetBridge.ask(web, "maxq", 800)   // player na maior qualidade: ele pede o 1080 e o 1080 entra na lista
             return n
         }
 

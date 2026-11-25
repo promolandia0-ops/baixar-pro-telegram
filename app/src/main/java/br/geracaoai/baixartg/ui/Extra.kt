@@ -645,6 +645,8 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             BrowserRuntime.installServiceWorkerHook()
             // detetive: agente em todos os quadros (inclusive players de outro site) + canal de volta para o app
             br.geracaoai.baixartg.core.DetBridge.install(this)
+            br.geracaoai.baixartg.core.DetBridge.onMedia = { u, fr, via -> BrowserDetect.fromAgentMedia(u, fr, via) }
+            br.geracaoai.baixartg.core.DetBridge.onNet = { u, fr, b -> BrowserDetect.fromAgentNet(u, fr, b) }
             val start = BrowserRuntime.reloadUrl.also { BrowserRuntime.reloadUrl = null } ?: initialAddr.takeIf { gen == 0 }
             if (start != null && start.length > 8) loadUrl(start)
         }
