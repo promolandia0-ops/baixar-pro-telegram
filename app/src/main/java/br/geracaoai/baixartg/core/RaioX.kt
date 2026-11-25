@@ -76,7 +76,9 @@ o.players=[];P.forEach(function(p){try{if(window[p[0]])o.players.push(p[1])}catc
 try{if(window.flashvars&&(window.flashvars.video_url||window.flashvars.video_alt_url))o.players.push('kvs')}catch(e){}
 if(q('media-player,mux-player,video-js').length)o.players.push('web-component');
 var err={1:'abortado',2:'rede',3:'decodificação',4:'fonte não suportada'};
-o.videos=[];q('video').forEach(function(v,i){if(i>5)return;var s=v.currentSrc||v.src||'';
+function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)});r.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)w(f.contentDocument,d+1)}catch(x){}})}catch(x){}}w(document,0);return o}
+o.shadow=0;try{q('*').forEach(function(e){if(e.shadowRoot)o.shadow++})}catch(e){}
+o.videos=[];__bv().forEach(function(v,i){if(i>5)return;var s=v.currentSrc||v.src||'';
 o.videos.push({src:s.indexOf('blob:')===0?'blob':s.indexOf('http')===0?'http':s?'outro':'nenhuma',url:s.indexOf('http')===0?s:'',rs:v.readyState,ns:v.networkState,paused:v.paused,t:Math.round(v.currentTime||0),d:isFinite(v.duration)?Math.round(v.duration):-1,w:v.videoWidth||0,h:v.videoHeight||0,err:v.error?(err[v.error.code]||v.error.code):'',drm:!!v.mediaKeys,sources:v.querySelectorAll('source').length,poster:!!v.poster,cors:v.crossOrigin||''})});
 o.iframes=[];q('iframe').forEach(function(f){var r=f.getBoundingClientRect();if(o.iframes.length<8&&/^https?:/i.test(f.src||''))o.iframes.push({u:f.src,big:r.width>=200&&r.height>=120})});
 o.og=!!document.querySelector('meta[property="og:video"],meta[property="og:video:url"],meta[property="og:video:secure_url"]');
@@ -389,7 +391,7 @@ return JSON.stringify(o);
         val pl = o.optJSONArray("players")
         sb.appendLine("players: " + (if (pl == null || pl.length() == 0) "nenhum conhecido" else (0 until pl.length()).joinToString(", ") { pl.optString(it) }))
         val vs = o.optJSONArray("videos")
-        sb.appendLine("<video> na página: ${vs?.length() ?: 0}")
+        sb.appendLine("<video> na página: ${vs?.length() ?: 0} (contando os escondidos em componentes/iframes do mesmo site) • componentes fechados (shadow DOM): ${o.optInt("shadow")}")
         val ifr = o.optJSONArray("iframes")
         if (ifr != null && ifr.length() > 0) sb.appendLine("iframes: " + (0 until ifr.length()).mapNotNull { ifr.optJSONObject(it) }.joinToString(", ") {
             val u = it.optString("u"); tag(u, "emb") + (if (Trail.host(u) == Trail.host(page)) "(mesmo site)" else "") + (if (it.optBoolean("big")) "[grande]" else "")

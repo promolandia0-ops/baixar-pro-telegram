@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.41
+- **Players escondidos**: o app e o Raio-X enxergam o `<video>` dentro de componentes fechados (shadow DOM) e de iframes do mesmo site (antes: "nenhum `<video>` na página" mesmo com o player pedindo o vídeo).
+- **Toque de verdade no player**: o navegador oculto rola até o player e toca em cima dele (antes tocava no meio da tela). Players que só recebem o link depois de um toque ("sem fonte") passam a carregar.
+
 ## 1.9.40
 - **Fila: o `<video>` da página baixa direto**: quando o navegador oculto acha o `<video>`/`<source>` com o link (inclusive `data-src`), o app baixa esse link direto antes de tentar gravar o player. Resolve sites cujo vídeo é um MP4 comum mas que só aparece depois do JavaScript (antes o item virava "MSE" e falhava com "Navegador não capturou dados").
 - **Raio-X: ORIGEM DO LINK**: procura o vídeo que tocou no HTML sem navegador, na página depois de carregar e nas respostas das APIs, e diz em que campo/atributo ele está (só o nome do campo) — e o que o app precisa fazer para achar.

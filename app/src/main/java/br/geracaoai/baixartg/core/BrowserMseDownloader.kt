@@ -289,6 +289,39 @@ return 'ok';
         override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean = false
     }
 
+    /**
+     * Toque de verdade em cima do player (não no meio da tela): rola até o <video>/player e toca no centro dele.
+     * Players que só recebem o link do vídeo depois de um toque real (o <video> ficava "sem fonte") passam a carregar.
+     */
+    private fun tapPlayer(wv: WebView) {
+        try {
+            wv.evaluateJavascript(PLAYER_RECT_JS) { raw ->
+                val p = raw?.trim('"')?.split(',')?.mapNotNull { it.trim().toFloatOrNull() }
+                if (p != null && p.size == 2 && p[0] > 0 && p[1] > 0) tapAt(wv, p[0], p[1]) else tapCenter(wv)
+            }
+        } catch (_: Exception) { tapCenter(wv) }
+    }
+
+    private const val PLAYER_RECT_JS = """(function(){try{
+function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)})}catch(x){}}w(document,0);return o}
+var el=null,vs=__bv();for(var i=0;i<vs.length;i++){var r=vs[i].getBoundingClientRect();if(r.width>40&&r.height>40){el=vs[i];break}}
+if(!el){var c=document.querySelectorAll('.jwplayer,.video-js,.plyr,[class*=player i],[id*=player i],media-player,mux-player');for(var j=0;j<c.length;j++){var r2=c[j].getBoundingClientRect();if(r2.width>80&&r2.height>60){el=c[j];break}}}
+if(!el)return '';
+try{el.scrollIntoView({block:'center'})}catch(e){}
+var b=el.getBoundingClientRect(),d=window.devicePixelRatio||1;
+return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
+}catch(e){return ''}})()"""
+
+    private fun tapAt(wv: WebView, x: Float, y: Float) {
+        try {
+            val t = SystemClock.uptimeMillis()
+            val down = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0)
+            val up = MotionEvent.obtain(t, t + 40, MotionEvent.ACTION_UP, x, y, 0)
+            wv.dispatchTouchEvent(down); wv.dispatchTouchEvent(up)
+            down.recycle(); up.recycle()
+        } catch (_: Exception) {}
+    }
+
     private fun tapCenter(wv: WebView) {
         try {
             val w = wv.width.takeIf { it > 0 } ?: 1080
@@ -393,7 +426,7 @@ return 'ok';
                         lastBeat.set(System.currentTimeMillis())
                         try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}
                         try { view.evaluateJavascript(JsRender.PLAY_JS_SCRIPT) {} } catch (_: Exception) {}
-                        tapCenter(view)
+                        tapPlayer(view)
                     }
 
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -469,7 +502,7 @@ return 'ok';
                                 }
                             }
                             wv.evaluateJavascript(JsRender.PLAY_JS_SCRIPT) {}
-                            tapCenter(wv)
+                            tapPlayer(wv)
                         } catch (_: Exception) {}
                     }
                 }
@@ -552,7 +585,7 @@ return 'ok';
             // Prioridade 2b: o servidor recusou o app (ex.: HTTP 403). Baixa pela própria página, com o fetch do navegador.
             if (!closed.get()) webView?.let { live ->
                 val src = withContext(Dispatchers.Main) {
-                    evalString(live, "(function(){try{var a=[];document.querySelectorAll('video').forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src],source[data-src]');for(var i=0;i<q.length;i++){var x=q[i].src||q[i].getAttribute('data-src')||'';if(x.indexOf('//')===0)x=location.protocol+x;if(x.indexOf('http')===0)a.push(x);}var ds=v.getAttribute('data-src')||'';if(ds.indexOf('http')===0)a.push(ds);});return a.join('\\n')}catch(e){return ''}})()")
+                    evalString(live, "(function(){function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)});r.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)w(f.contentDocument,d+1)}catch(x){}})}catch(x){}}w(document,0);return o}try{var a=[];__bv().forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src],source[data-src]');for(var i=0;i<q.length;i++){var x=q[i].src||q[i].getAttribute('data-src')||'';if(x.indexOf('//')===0)x=location.protocol+x;if(x.indexOf('http')===0)a.push(x);}var ds=v.getAttribute('data-src')||'';if(ds.indexOf('http')===0)a.push(ds);});return a.join('\\n')}catch(e){return ''}})()")
                 }.orEmpty().split('\n').map { it.trim() }.filter { it.isNotBlank() }
                 val direct = src + ranged.map { it.url } + listOfNotNull(f.url.takeIf { Extract.mediaKindOf(it) == Kind.DIRECT || f.kind == Kind.DIRECT })
                 // O <video> da página já tem o link: tenta baixar DIRETO (sem gravar o player). Muitos servidores não exigem nada.
@@ -653,7 +686,8 @@ return 'ok';
 
     /** Resumo técnico do(s) <video> da página: tocou? deu erro? de onde vem (blob/http)? tem DRM? Nada de link ou título. */
     private const val STATE_JS = """(function(){try{
-var v=document.querySelectorAll('video'),out=[];
+function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)});r.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)w(f.contentDocument,d+1)}catch(x){}})}catch(x){}}w(document,0);return o}
+var v=__bv(),out=[];
 var err={1:'abortado',2:'rede',3:'decodificação',4:'formato/endereço não suportado'};
 for(var i=0;i<v.length&&i<4;i++){var x=v[i],s=x.currentSrc||x.src||'';
 out.push('vídeo'+(i+1)+': '+(s.indexOf('blob:')===0?'blob(MSE)':s.indexOf('http')===0?'http':s?'outro':'sem fonte')+
