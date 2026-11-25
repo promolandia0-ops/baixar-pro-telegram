@@ -642,7 +642,7 @@ object Detective {
 
             // o rastro: exatamente como este vídeo foi achado, escondido/mostrado, baixado e enviado
             val hhmm = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale("pt", "BR"))
-            val ev = Trail.of(listOf(media)).ifEmpty { Trail.of(listOf(media, pg)) }
+            val ev = Trail.of(listOf(media, pg))
             log.begin("Rastro deste vídeo, do site até o Telegram")
             var origin = ""
             if (ev.isNotEmpty()) {

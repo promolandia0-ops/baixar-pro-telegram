@@ -52,9 +52,6 @@ object BrowserMseDownloader {
 
     fun init(c: Context) { appCtx = c.applicationContext }
 
-    /** No máximo 2 gravações pelo navegador ao mesmo tempo (antes até 10, o que travava a tela durante a fila). */
-    const val MAX_HIDDEN = 2
-
     fun effectiveConcurrency(desired: Int, availBytes: Long, totalBytes: Long, lowMemory: Boolean): Pair<Int, String?> {
         val d = desired.coerceIn(1, 10)
         return when {
@@ -71,8 +68,7 @@ object BrowserMseDownloader {
     }
 
     private fun currentCap(): Pair<Int, String?> {
-        // Cada navegador oculto toca vídeo e roda na mesma thread da tela: com vários ao mesmo tempo o app inteiro trava.
-        val desired = try { Prefs.parDown.coerceIn(1, MAX_HIDDEN) } catch (_: Exception) { MAX_HIDDEN }
+        val desired = try { Prefs.parDown.coerceIn(1, 10) } catch (_: Exception) { 10 }
         val ctx = appCtx ?: return desired to null
         return try {
             val am = ctx.getSystemService(ActivityManager::class.java) ?: return desired to null
@@ -170,156 +166,11 @@ object BrowserMseDownloader {
 
         fun closeAll() { tracks.values.forEach { it.close() } }
         fun deleteAll() { closeAll(); tracks.values.forEach { it.file.delete() } }
-
-        // ---- Download feito pela própria página (fetch do navegador: mesmos cookies, cabeçalhos e "jeito" do player) ----
-        @Volatile private var fetchOut: BufferedOutputStream? = null
-        val fetchBytes = AtomicLong(0)
-        val fetchTotal = AtomicLong(-1)
-        val fetchDone = AtomicBoolean(false)
-        @Volatile var fetchErr: String? = null
-
-        @Synchronized fun startFetch(file: File) {
-            closeFetch()
-            fetchOut = BufferedOutputStream(FileOutputStream(file), 256 * 1024)
-            fetchBytes.set(0); fetchTotal.set(-1); fetchDone.set(false); fetchErr = null
-        }
-
-        @Synchronized fun closeFetch() {
-            try { fetchOut?.flush() } catch (_: Exception) {}
-            try { fetchOut?.close() } catch (_: Exception) {}
-            fetchOut = null
-        }
-
-        @JavascriptInterface
-        fun onFetchStart(total: String) {
-            onActivity()
-            fetchTotal.set(total.trim().toLongOrNull() ?: -1L)
-        }
-
-        @JavascriptInterface
-        fun onFetchChunk(b64: String) {
-            if (b64.isEmpty()) return
-            onActivity()
-            try {
-                val raw = Base64.decode(b64, Base64.DEFAULT)
-                synchronized(this) { fetchOut?.write(raw) }
-                fetchBytes.addAndGet(raw.size.toLong())
-            } catch (e: Exception) { fetchErr = "gravar: ${e.message}"; fetchDone.set(true) }
-        }
-
-        @JavascriptInterface
-        fun onFetchEnd(err: String) {
-            onActivity()
-            if (err.isNotBlank()) fetchErr = err.take(160)
-            fetchDone.set(true)
-        }
-    }
-
-    /** Pede à página (WebView) para baixar o arquivo com fetch() e manda os bytes ao app em pedaços. */
-    private fun fetchJs(url: String, cred: String): String {
-        val u = org.json.JSONObject.quote(url)
-        val c = org.json.JSONObject.quote(cred)
-        return """(function(u,cred){
-var B=window.__bptMse; if(!B) return 'nobridge';
-try{ if(window.__bptFetchAbort) window.__bptFetchAbort.abort(); }catch(e){}
-var ac=null; try{ ac=new AbortController(); window.__bptFetchAbort=ac; }catch(e){}
-try{ document.querySelectorAll('video,audio').forEach(function(v){ try{v.pause();}catch(e){} }); }catch(e){}
-var opt={credentials:cred,cache:'no-store',referrerPolicy:'unsafe-url'}; if(ac) opt.signal=ac.signal;
-fetch(u,opt).then(function(r){
-  if(!r.ok && r.status!==206){ B.onFetchEnd('HTTP '+r.status); return; }
-  var ct=r.headers.get('content-type')||'';
-  if(/text\/html|application\/json/i.test(ct)){ B.onFetchEnd('resposta '+ct.split(';')[0]); return; }
-  B.onFetchStart(String(r.headers.get('content-length')||-1));
-  if(!r.body||!r.body.getReader){ return r.arrayBuffer().then(function(ab){ var v=new Uint8Array(ab); for(var o=0;o<v.length;o+=524288){ var p=v.subarray(o,o+524288),s=''; for(var i=0;i<p.length;i+=32768){ s+=String.fromCharCode.apply(null,p.subarray(i,i+32768)); } B.onFetchChunk(btoa(s)); } B.onFetchEnd(''); }); }
-  var rd=r.body.getReader();
-  function pump(){ return rd.read().then(function(x){
-    if(x.done){ B.onFetchEnd(''); return; }
-    var v=x.value,s=''; for(var i=0;i<v.length;i+=32768){ s+=String.fromCharCode.apply(null,v.subarray(i,i+32768)); }
-    B.onFetchChunk(btoa(s)); return pump(); }); }
-  return pump();
-}).catch(function(e){ B.onFetchEnd('bloqueado: '+((e&&e.message)||e)); });
-return 'ok';
-})($u,$c)"""
-    }
-
-    /**
-     * Baixa pela própria página: o pedido sai do navegador (mesmo TLS, cookies, Sec-Fetch e token do player).
-     * Resolve servidores que recusam o app (HTTP 403) mas aceitam o player.
-     */
-    private suspend fun fetchInPage(
-        wv: WebView, bridge: Bridge, pageUrl: String, urls: List<String>, dir: File, title: String, progress: (Long, Long) -> Unit,
-    ): File? {
-        for (u in urls.filter { it.startsWith("http", true) }.distinct().take(4)) {
-            for (cred in listOf("include", "omit")) {
-                currentCoroutineContext().ensureActive()
-                val out = File(dir, Downloader.safe(title) + "_" + System.nanoTime() + ".mp4")
-                bridge.startFetch(out)
-                val started = withContext(Dispatchers.Main) { evalString(wv, fetchJs(u, cred)) }
-                if (started != "ok") { bridge.closeFetch(); out.delete(); return null }
-                var last = 0L
-                var lastAt = System.currentTimeMillis()
-                while (!bridge.fetchDone.get()) {
-                    currentCoroutineContext().ensureActive()
-                    delay(400)
-                    val got = bridge.fetchBytes.get()
-                    val now = System.currentTimeMillis()
-                    if (got > last) { last = got; lastAt = now; progress(got, bridge.fetchTotal.get()) }
-                    if (now - lastAt > 30_000L) { bridge.fetchErr = "sem dados por 30 s"; break }
-                }
-                if (!bridge.fetchDone.get()) withContext(Dispatchers.Main) {
-                    try { wv.evaluateJavascript("try{window.__bptFetchAbort&&window.__bptFetchAbort.abort()}catch(e){}") {} } catch (_: Exception) {}
-                }
-                bridge.closeFetch()
-                val err = bridge.fetchErr
-                val total = bridge.fetchTotal.get()
-                val kind = if (out.exists() && out.length() > 0) Downloader.sniffFile(out) else "unknown"
-                val ok = err == null && out.length() >= 64 * 1024 && kind != "html" && kind != "image" && (total <= 0 || out.length() >= total)
-                Trail.add(listOf(u, pageUrl), "navegador: baixar pela página", if (ok) "${out.length() / 1_000_000} MB" else "falhou: ${err ?: "arquivo $kind ${out.length()} bytes"} (credenciais: $cred)")
-                if (ok) return out
-                out.delete()
-                // Erro HTTP do servidor não muda trocando credenciais; bloqueio de CORS muda.
-                if (err != null && err.startsWith("HTTP")) break
-            }
-        }
-        return null
     }
 
     private class PassThrough(c: Context) : FrameLayout(c) {
         override fun dispatchTouchEvent(ev: MotionEvent?): Boolean = false
         override fun onInterceptTouchEvent(ev: MotionEvent?): Boolean = false
-    }
-
-    /**
-     * Toque de verdade em cima do player (não no meio da tela): rola até o <video>/player e toca no centro dele.
-     * Players que só recebem o link do vídeo depois de um toque real (o <video> ficava "sem fonte") passam a carregar.
-     */
-    private fun tapPlayer(wv: WebView) {
-        try {
-            wv.evaluateJavascript(PLAYER_RECT_JS) { raw ->
-                val p = raw?.trim('"')?.split(',')?.mapNotNull { it.trim().toFloatOrNull() }
-                if (p != null && p.size == 2 && p[0] > 0 && p[1] > 0) tapAt(wv, p[0], p[1]) else tapCenter(wv)
-            }
-        } catch (_: Exception) { tapCenter(wv) }
-    }
-
-    private const val PLAYER_RECT_JS = """(function(){try{
-function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)})}catch(x){}}w(document,0);return o}
-var el=null,vs=__bv();for(var i=0;i<vs.length;i++){var r=vs[i].getBoundingClientRect();if(r.width>40&&r.height>40){el=vs[i];break}}
-if(!el){var c=document.querySelectorAll('.jwplayer,.video-js,.plyr,[class*=player i],[id*=player i],media-player,mux-player');for(var j=0;j<c.length;j++){var r2=c[j].getBoundingClientRect();if(r2.width>80&&r2.height>60){el=c[j];break}}}
-if(!el)return '';
-try{el.scrollIntoView({block:'center'})}catch(e){}
-var b=el.getBoundingClientRect(),d=window.devicePixelRatio||1;
-return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
-}catch(e){return ''}})()"""
-
-    private fun tapAt(wv: WebView, x: Float, y: Float) {
-        try {
-            val t = SystemClock.uptimeMillis()
-            val down = MotionEvent.obtain(t, t, MotionEvent.ACTION_DOWN, x, y, 0)
-            val up = MotionEvent.obtain(t, t + 40, MotionEvent.ACTION_UP, x, y, 0)
-            wv.dispatchTouchEvent(down); wv.dispatchTouchEvent(up)
-            down.recycle(); up.recycle()
-        } catch (_: Exception) {}
     }
 
     private fun tapCenter(wv: WebView) {
@@ -426,7 +277,7 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
                         lastBeat.set(System.currentTimeMillis())
                         try { view.evaluateJavascript(MseHookScript.SCRIPT) {} } catch (_: Exception) {}
                         try { view.evaluateJavascript(JsRender.PLAY_JS_SCRIPT) {} } catch (_: Exception) {}
-                        tapPlayer(view)
+                        tapCenter(view)
                     }
 
                     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
@@ -502,7 +353,7 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
                                 }
                             }
                             wv.evaluateJavascript(JsRender.PLAY_JS_SCRIPT) {}
-                            tapPlayer(wv)
+                            tapCenter(wv)
                         } catch (_: Exception) {}
                     }
                 }
@@ -538,18 +389,18 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
             // Prioridade 1: Manifest DASH (.mpd) ou HLS (.m3u8) com TODOS os cabeçalhos capturados
             val dash = hint.manifests.lastOrNull { MseCapture.isDash(it) }
             if (dash != null) {
-                pauseMedia(webView)
+                destroyWeb()
                 try {
-                    return MseDownloader.downloadDash(dash, pageUrl, dir, f.title, maxHeight, progress = progress).also { destroyWeb() }
+                    return MseDownloader.downloadDash(dash, pageUrl, dir, f.title, maxHeight, progress = progress)
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
             }
             val hls = hint.manifests.lastOrNull { MseCapture.isHls(it) }
             if (hls != null) {
-                pauseMedia(webView)
+                destroyWeb()
                 try {
-                    return Downloader.hls(hls.url, pageUrl, dir, f.title, progress, maxHeight = maxHeight, headers = hls.headers).also { destroyWeb() }
+                    return Downloader.hls(hls.url, pageUrl, dir, f.title, progress, maxHeight = maxHeight, headers = hls.headers)
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
@@ -567,56 +418,22 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
                     it.url != bestReq.url && (it.contentType.startsWith("audio/", true) || it.url.contains("audio", true))
                 }
                 try {
-                    pauseMedia(webView)
+                    destroyWeb()
                     if (audioReq != null) {
                         val vTmp = MseDownloader.downloadRanges(bestReq, pageUrl, workDir, f.title + "_v") { g, t -> progress(g, t) }
                         val aTmp = MseDownloader.downloadRanges(audioReq, pageUrl, workDir, f.title + "_a") { _, _ -> }
                         val out = File(dir, Downloader.safe(f.title) + "_" + System.nanoTime() + ".mp4")
-                        return Remux.muxTracks(vTmp, aTmp, out).also { destroyWeb() }
+                        return Remux.muxTracks(vTmp, aTmp, out)
                     }
                     val out = MseDownloader.downloadRanges(bestReq, pageUrl, dir, f.title, progress = progress)
-                    if (out.length() >= 4096) { destroyWeb(); return out }
+                    if (out.length() >= 4096) return out
                     out.delete()
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
             }
 
-            // Prioridade 2b: o servidor recusou o app (ex.: HTTP 403). Baixa pela própria página, com o fetch do navegador.
-            if (!closed.get()) webView?.let { live ->
-                val src = withContext(Dispatchers.Main) {
-                    evalString(live, "(function(){function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)});r.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)w(f.contentDocument,d+1)}catch(x){}})}catch(x){}}w(document,0);return o}try{var a=[];__bv().forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src],source[data-src]');for(var i=0;i<q.length;i++){var x=q[i].src||q[i].getAttribute('data-src')||'';if(x.indexOf('//')===0)x=location.protocol+x;if(x.indexOf('http')===0)a.push(x);}var ds=v.getAttribute('data-src')||'';if(ds.indexOf('http')===0)a.push(ds);});return a.join('\\n')}catch(e){return ''}})()")
-                }.orEmpty().split('\n').map { it.trim() }.filter { it.isNotBlank() }
-                val direct = src + ranged.map { it.url } + listOfNotNull(f.url.takeIf { Extract.mediaKindOf(it) == Kind.DIRECT || f.kind == Kind.DIRECT })
-                // A página montada (depois do JavaScript) pode ter o link no JSON-LD (contentUrl), em <source> ou em configs:
-                // lê o HTML vivo com o mesmo leitor do app, sem precisar o vídeo tocar.
-                val domHtml = withContext(Dispatchers.Main) { evalString(live, "(function(){try{return document.documentElement.outerHTML.slice(0,6000000)}catch(e){return ''}})()") }
-                val fromDom = if (domHtml.isNullOrBlank()) emptyList() else try {
-                    withContext(Dispatchers.Default) { Extract.parse(pageUrl, domHtml).videos.filter { it.kind == Kind.DIRECT }.map { it.url } }
-                } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
-                if (fromDom.isNotEmpty()) Trail.add(listOf(f.url, pageUrl), "navegador: página montada", "achei ${fromDom.size} link(s) de vídeo no código da página")
-                // O <video> da página já tem o link: tenta baixar DIRETO (sem gravar o player). Muitos servidores não exigem nada.
-                for (u in (src + fromDom).filter { !it.startsWith("blob:") && !MediaPick.isAdUrl(it) && !Extract.isPreviewVideo(it) && !Extract.isHls(it) && !Extract.isDash(it) }.distinct().take(4)) {
-                    val got = try {
-                        Downloader.download(Found(u, pageUrl, f.title, Kind.DIRECT, ref = pageUrl, extra = f.extra), dir, Prefs.server, maxHeight, fast = true, progress = progress)
-                    } catch (e: Exception) { if (e is CancellationException) throw e; Trail.add(listOf(f.url, pageUrl), "navegador: link do <video> direto", "falhou: ${e.message?.take(100)}"); null }
-                    if (got != null && got.length() >= 64 * 1024) {
-                        Trail.add(listOf(f.url, pageUrl), "navegador: link do <video> direto", "funcionou: ${got.length() / 1_000_000} MB")
-                        destroyWeb(); return got
-                    }
-                    got?.delete()
-                }
-                val viaPage = if (direct.isNotEmpty() && !(finalBridge.mseActive.get() && hint.segments.size >= 2))
-                    try { fetchInPage(live, finalBridge, pageUrl, direct.filter { !MediaPick.isAdUrl(it) && !Extract.isHls(it) }, dir, f.title, progress) }
-                    catch (e: Exception) { if (e is CancellationException) throw e; null }
-                else null
-                if (viaPage != null) { destroyWeb(); return viaPage }
-                // volta a tocar para a captura do player (prioridade 3)
-                withContext(Dispatchers.Main) { try { live.evaluateJavascript(JsRender.PLAY_JS_SCRIPT) {} } catch (_: Exception) {} }
-            }
-
             // Prioridade 3 (último recurso): captura bytes do appendBuffer por trilha via @JavascriptInterface
-            if (closed.get()) throw DlException("Navegador oculto foi fechado antes da captura")
             val wv = webView ?: throw DlException("Não foi possível capturar o vídeo pelo navegador")
             withContext(Dispatchers.Main) {
                 try {
@@ -651,12 +468,6 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
                 if (now - lastGrowthAt > stallLimit) break
             }
 
-            // Estado do player no navegador oculto (anônimo: sem link nem título) para o diagnóstico de falhas
-            try {
-                val st = withContext(Dispatchers.Main) { evalString(wv, STATE_JS) }
-                if (!st.isNullOrBlank()) Trail.add(listOf(f.url, pageUrl), "navegador: estado do player",
-                    st + " • bytes capturados ${finalBridge.totalBytes.get()} • MSE ${if (finalBridge.mseActive.get()) "sim" else "não"} • pedidos vistos: manifest ${hint.manifests.size}, direto ${hint.rangesOrDirect.size}, pedaços ${hint.segments.size}")
-            } catch (e: Exception) { if (e is CancellationException) throw e }
             destroyWeb()
             finalBridge.closeAll()
 
@@ -689,25 +500,6 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
             workDir.deleteRecursively()
             releaseSlot()
         }
-    }
-
-    /** Resumo técnico do(s) <video> da página: tocou? deu erro? de onde vem (blob/http)? tem DRM? Nada de link ou título. */
-    private const val STATE_JS = """(function(){try{
-function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)});r.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)w(f.contentDocument,d+1)}catch(x){}})}catch(x){}}w(document,0);return o}
-var v=__bv(),out=[];
-var err={1:'abortado',2:'rede',3:'decodificação',4:'formato/endereço não suportado'};
-for(var i=0;i<v.length&&i<4;i++){var x=v[i],s=x.currentSrc||x.src||'';
-out.push('vídeo'+(i+1)+': '+(s.indexOf('blob:')===0?'blob(MSE)':s.indexOf('http')===0?'http':s?'outro':'sem fonte')+
-' pronto='+x.readyState+' rede='+x.networkState+' '+(x.paused?'pausado':'tocando')+
-' tempo='+Math.round(x.currentTime||0)+'/'+(isFinite(x.duration)?Math.round(x.duration):'?')+'s'+
-(x.error?' ERRO='+(err[x.error.code]||x.error.code):'')+(x.mediaKeys?' DRM=sim':'')+' '+(x.videoWidth||0)+'x'+(x.videoHeight||0));}
-var ifr=document.querySelectorAll('iframe').length;
-return (out.length?out.join(' | '):'nenhum <video> na página')+(ifr?' • iframes='+ifr:'');
-}catch(e){return 'erro ao ler: '+e}})()"""
-
-    private fun pauseMedia(wv: WebView?) {
-        val w = wv ?: return
-        main.post { try { w.evaluateJavascript("try{document.querySelectorAll('video,audio').forEach(function(v){v.pause()})}catch(e){}") {} } catch (_: Exception) {} }
     }
 
     private fun File.readBytes(max: Int): ByteArray {

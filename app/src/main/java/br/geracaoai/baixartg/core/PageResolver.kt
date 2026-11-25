@@ -20,7 +20,7 @@ object PageResolver {
      * "preview" fica de fora aqui (é a prévia curta); se não sobrar outra coisa, vira o último recurso depois do servidor.
      */
     fun best(list: List<Found>, allowPreview: Boolean = false): Found? {
-        val vids = list.map { MediaIdentity.withQuality(it) }.filter { isReal(it) && (allowPreview || !isPreview(it)) && !MediaPick.isAdUrl(it.url) && !PlayCapture.isDead(it.url) && !LinkExpiry.isExpired(it.url, 5_000) }
+        val vids = list.map { MediaIdentity.withQuality(it) }.filter { isReal(it) && (allowPreview || !isPreview(it)) && !MediaPick.isAdUrl(it.url) }
         val pool = vids.filter { it.kind != Kind.SERVER }.ifEmpty { vids }
         val picked = MediaPick.pick(pool.map { MediaPick.Cand(it.url, pageUrl = it.page) })
         if (picked != null) return pool.filter { it.url == picked.url }.reduceOrNull { a, b -> if (MediaIdentity.isBetter(b, a)) b else a }
@@ -43,7 +43,7 @@ object PageResolver {
         val out = ArrayList<Found>()
         for (a in apis.distinct().take(10)) {
             val body = fetch(a, referer) ?: continue
-            out += try { Extract.parse(a, body).videos.map { it.copy(ref = referer) } } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+            out += Extract.parse(a, body).videos.map { it.copy(ref = referer) }
         }
         return out
     }
@@ -51,8 +51,8 @@ object PageResolver {
     /** Página renderizada no WebView com play: devolve (título real da página, melhor vídeo). */
     suspend fun viaWebView(card: String, render: suspend (String) -> JsPage?): Pair<String, Found?> {
         val js = try { render(card) } catch (e: Exception) { if (e is CancellationException) throw e; null } ?: return "" to null
-        val pr = try { js.html?.let { Extract.parse(card, it) } } catch (e: Exception) { if (e is CancellationException) throw e; null }
-        val title = try { TitleFix.pick(js.collected?.bestPageTitle, pr?.title) } catch (_: Exception) { js.collected?.bestPageTitle.orEmpty() }
+        val pr = js.html?.let { Extract.parse(card, it) }
+        val title = TitleFix.pick(js.collected?.bestPageTitle, pr?.title)
         val cand = ArrayList<Found>()
         cand += js.media.map { it.copy(ref = it.ref ?: card) }
         synchronized(previews) { cand.filter { isPreview(it) }.forEach { previews[card] = it } }
@@ -88,21 +88,19 @@ object PageResolver {
     }
 
     private suspend fun resolveFull0(card: String, title: String, ctx: String): Found? {
-        val t0 = (try { title.ifBlank { Extract.fileName(card).replace('-', ' ').replace('_', ' ') } } catch (_: Exception) { title }).ifBlank { "vídeo" }
-        // 1) o que o player já pediu nesta página (mesmos cookies/Referer); links vencidos ficam de fora
-        PlayCapture.bestFor(Found(card, card, t0, Kind.DIRECT, ref = card, extra = t0))?.takeIf { !PlayCapture.isDead(it.url) }?.let { hit ->
+        val t0 = title.ifBlank { Extract.fileName(card).replace('-', ' ').replace('_', ' ') }.ifBlank { "vídeo" }
+        // 1) o que o player já pediu nesta página (mesmos cookies/Referer)
+        PlayCapture.bestFor(Found(card, card, t0, Kind.DIRECT, ref = card, extra = t0))?.let { hit ->
             val kind = Extract.mediaKindOf(hit.url) ?: Kind.DIRECT
             return Found(hit.url, card, t0, kind, ref = hit.referer ?: card, extra = t0)
         }
         if (Extract.isVideoUrl(card)) return Found(card, card, t0, Extract.mediaKindOf(card) ?: Kind.DIRECT, ref = card, extra = t0)
         if (Extract.YTDLP_HOSTS.containsMatchIn(card)) return Found(card, card, t0, Kind.SERVER, extra = t0)
-        // Cada etapa protegida: um erro de leitura do HTML (ex.: "String must not be empty") não pode impedir as próximas.
-        val html = try { fetch(card, null) } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
-        val pr = try { html?.let { Extract.parse(card, it) } } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
-        val t = (try { TitleFix.pick(pr?.title, title) } catch (_: Exception) { title }).ifBlank { t0 }
-        val vids = pr?.videos.orEmpty().filter { !PlayCapture.isDead(it.url) }
-        best(vids)?.let { return it.copy(page = card, ref = it.ref ?: card, title = t, extra = listOf(t, ctx, it.extra).joinToString(" ").trim()) }
-        best(vids, allowPreview = true)?.let { pv -> synchronized(previews) { previews[card] = pv.copy(title = t) } }
+        val html = fetch(card, null)
+        val pr = html?.let { Extract.parse(card, it) }
+        val t = TitleFix.pick(pr?.title, title).ifBlank { t0 }
+        best(pr?.videos.orEmpty())?.let { return it.copy(page = card, ref = it.ref ?: card, title = t, extra = listOf(t, ctx, it.extra).joinToString(" ").trim()) }
+        best(pr?.videos.orEmpty(), allowPreview = true)?.let { pv -> synchronized(previews) { previews[card] = pv.copy(title = t) } }
         // 2) fluxo confiável da 1.9.7: com navegador aberto tenta servidor antes de abrir WebView oculto; senão WebView oculto (pool 10) e depois servidor
         val browserOpen = JsRender.browserVisible
         if (browserOpen) {

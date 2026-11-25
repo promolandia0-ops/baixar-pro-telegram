@@ -100,8 +100,7 @@ object Pipeline {
     @Volatile private var saveJob: Job? = null
     private fun save() {
         if (saveJob?.isActive == true) return
-        // Com milhares de itens gravar a fila inteira é pesado: no máximo a cada 5 s durante o trabalho.
-        saveJob = scope.launch { delay(if (items.value.size > 300) 5_000 else 1_500); saveNow() }
+        saveJob = scope.launch { delay(1500); saveNow() }
     }
     private val saveLock = Any()
     /** Grava sempre fora da thread principal. */
@@ -715,13 +714,6 @@ object Pipeline {
             if (canMse && !mseFirst) steps += "navegador" to mseStep
             val tu = listOf(f.url, t.page, f.page)
             Trail.add(tu, "download: começou", "link ${f.kind} em ${Trail.host(f.url)} • origem ${Trail.host(f.ref ?: f.page).ifBlank { "nenhuma" }} • ordem: ${steps.joinToString(" → ") { it.first }}")
-            // Link temporário que já venceu: não perde tempo com ele; vai direto pegar um link novo na página.
-            if (f.kind != Kind.PHOTO && f.kind != Kind.MSE && f.url != f.page && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && LinkExpiry.isExpired(f.url)) {
-                val ago = (System.currentTimeMillis() - (LinkExpiry.expiresAt(f.url) ?: 0L)) / 1000
-                Trail.add(tu, "download: link vencido antes de começar", (if (ago >= 0) "venceu há ${ago}s" else "vence em ${-ago}s") + "; pegando link novo na página")
-                PlayCapture.markDead(f.url)
-                steps.removeAll { it.first in setOf("direct", "hls", "play") }
-            }
             for ((name, fn) in steps) {
                 currentCoroutineContext().ensureActive()
                 tried = markTried(tried, name)
@@ -731,49 +723,18 @@ object Pipeline {
                     Trail.add(tu, "download: funcionou com \"${stepName(name)}\"", "${fmt(file!!.length())} • arquivo ${Downloader.sniffFile(file!!)}")
                     break
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) {
-                    lastErr = e; file?.delete(); file = null
-                    Trail.add(tu, "download: \"${stepName(name)}\" falhou", e.message?.take(160) ?: e.javaClass.simpleName)
-                    // Link trancado/vencido (ex.: HTTP 423): não adianta insistir nele; o passo "reabrir a página" busca um novo.
-                    if (PlayCapture.isExpiredError(e) && name in setOf("hls", "direct", "play") && f.url != f.page) {
-                        PlayCapture.markDead(f.url)
-                        Trail.add(tu, "download: link vencido", "o servidor recusou o link guardado; vou pegar um novo na página")
-                    }
-                }
+                catch (e: Exception) { lastErr = e; file?.delete(); file = null; Trail.add(tu, "download: \"${stepName(name)}\" falhou", e.message?.take(160) ?: e.javaClass.simpleName) }
             }
             if (file == null && f.kind != Kind.PHOTO && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && !hasTried(tried, "resolve")) {
                 tried = markTried(tried, "resolve")
-                // Até 3 links novos: se o primeiro também vier trancado, marca como vencido e reabre de novo.
-                var round = 0
-                while (file == null && round < 3) {
-                    round++
-                    currentCoroutineContext().ensureActive()
-                    upd(t.id, persist = false) { it.copy(tried = tried, msg = "reabrindo página…" + if (round > 1) " ($round)" else "") }
-                    val nf = try { withTimeoutOrNull(120_000) { PageResolver.resolveFull(f.page, t.title, t.extra) } }
-                        catch (e: CancellationException) { throw e }
-                        catch (e: Exception) { lastErr = e; Trail.add(tu, "download: reabrir a página falhou", e.message?.take(160) ?: e.javaClass.simpleName); null }
-                    Trail.add(listOf(f.url, t.page, f.page, nf?.url), "download: reabriu a página", if (nf != null) "achou link ${nf.kind} em ${Trail.host(nf.url)}" else "não achou link novo")
-                    if (nf == null || PlayCapture.isDead(nf.url)) break
-                    val prev = f
+                upd(t.id, persist = false) { it.copy(tried = tried, msg = "reabrindo página…") }
+                val nf = withTimeoutOrNull(60_000) { PageResolver.resolveFull(f.page, t.title, t.extra) }
+                Trail.add(listOf(f.url, t.page, f.page, nf?.url), "download: reabriu a página", if (nf != null) "achou link novo ${nf.kind} em ${Trail.host(nf.url)}" else "não achou link novo")
+                if (nf != null) {
                     f = nf
                     upd(t.id) { it.copy(f = nf, title = TitleFix.pick(nf.title, it.title).ifBlank { it.title }, tried = tried) }
-                    try {
-                        file = finish(Downloader.download(nf, dir, Prefs.server, 0, fast = true, prog()))
-                        Trail.add(tu, "download: funcionou com \"${stepName("resolve")}\"", "${fmt(file!!.length())} • arquivo ${Downloader.sniffFile(file!!)}")
-                    } catch (e: CancellationException) { throw e } catch (e: Exception) {
-                        lastErr = e; file?.delete(); file = null
-                        Trail.add(tu, "download: link novo falhou", e.message?.take(160) ?: e.javaClass.simpleName)
-                        // HLS do link novo: tenta também a lista direto (com o Referer certo)
-                        if (nf.kind == Kind.HLS || nf.url.contains(".m3u8", true)) {
-                            try { file = finish(Downloader.hls(nf.url, nf.ref ?: nf.page, dir, t.title, prog(), maxHeight = 0)) }
-                            catch (e2: CancellationException) { throw e2 } catch (e2: Exception) { lastErr = e2; file?.delete(); file = null }
-                        }
-                        if (file == null) {
-                            if (PlayCapture.isExpiredError(lastErr) || nf.url == prev.url) PlayCapture.markDead(nf.url) else break
-                        }
-                    }
-                }
-                if (file == null && canMse && !hasTried(tried, "navegador")) {
+                    try { file = finish(Downloader.download(nf, dir, Prefs.server, 0, fast = true, prog())) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
+                } else if (canMse && !hasTried(tried, "navegador")) {
                     tried = markTried(tried, "navegador")
                     upd(t.id, persist = false) { it.copy(tried = tried, msg = "baixando pelo navegador…") }
                     try { file = finish(mseStep()) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
@@ -826,14 +787,9 @@ object Pipeline {
             val siteHost = Extract.host(t.page.ifBlank { f.page })
             if (meta != null) {
                 Trail.add(listOf(f.url, t.page, f.page), "arquivo conferido", "${if (meta.w > 0) "${meta.w}x${meta.h}" else "resolução ?"} • ${meta.durMs / 1000}s")
-                // Qualidade mínima: horizontal mede o lado menor (1280x720 = 720p); VERTICAL (rede social) mede o lado maior
-                // (720x1280, 404x720…). Antes media sempre o lado menor e barrava quase todo vídeo vertical, que já era a
-                // maior qualidade que existia.
                 val min = Prefs.minHeight
-                val vertical = meta.h > meta.w && meta.w > 0
-                val measured = if (vertical) maxOf(meta.w, meta.h) else meta.short
-                if (min > 0 && measured in 1 until min) {
-                    markSkipped(t, "qualidade ${meta.w}x${meta.h} (abaixo de ${min}p) — pulado", ks)
+                if (min > 0 && meta.short in 1 until min) {
+                    markSkipped(t, "qualidade ${meta.short}p (abaixo de ${min}p) — pulado", ks)
                     return
                 }
                 if (!t.force) VideoQuality.repeatOf(siteHost, meta.durMs)?.let { prev ->

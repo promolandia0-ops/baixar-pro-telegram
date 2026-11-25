@@ -4,58 +4,8 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
-## 1.9.44
-- **Vídeo vertical não é mais barrado pelos 720p**: a qualidade mínima media sempre o lado menor, então vídeo de rede social (404x720, 540x720, 608x1080…) era "pulado" mesmo sendo a maior qualidade que existe. Agora horizontal mede o lado menor (1280x720 = 720p) e vertical mede o lado maior.
-- **Link achado dentro de uma resposta do site só entra se abrir**: em alguns sites esse link é recusado (HTTP 423/403) até o player tocar; antes entrava na lista e falhava sempre. Agora é testado na hora e, se recusar, fica de fora (o link que o player pede quando você dá play continua entrando).
-- Diagnóstico das falhas mostra só o rastro DO vídeo (antes vinham os eventos de todos os vídeos da mesma página).
-
-## 1.9.43
-- **Sites KVS** (Kernel Video Sharing, o sistema de milhares de sites de vídeo): o link `function/0/…` agora é desembaralhado com o `license_code` da página, como o player faz. Antes o app só cortava o prefixo e ficava com o link embaralhado (403/404).
-- **Padrões de players**: link montado juntando pedaços de texto em variáveis (com comentários no meio), chamadas `setVideoUrlHigh/Low/HLS`, `.src(...)`, `loadSource(...)`, `file:`/`videoUrl:`, listas de qualidades em JSON (`"720p":[…]`, `mediaDefinitions`). Testado com páginas de exemplo antes de entrar.
-- **Raio-X**: mostra se a página usa KVS embaralhado e quantos links os padrões acharam.
-
-## 1.9.42
-- **Link escondido em base64**: o leitor do app decodifica os trechos em base64 do código da página (o que o site faz com `atob()`) e procura o vídeo ali (link direto, `contentUrl`, caminhos). Sites que só montam o JSON-LD/player depois do JavaScript passam a ser achados sem navegador.
-- **Fila**: o navegador oculto lê a página montada (JSON-LD `contentUrl`, `<source>`, configs) com o mesmo leitor do app e baixa o link direto, sem depender de o vídeo tocar.
-- **Raio-X**: a ORIGEM DO LINK também procura no HTML decodificado de base64.
-
-## 1.9.41
-- **Players escondidos**: o app e o Raio-X enxergam o `<video>` dentro de componentes fechados (shadow DOM) e de iframes do mesmo site (antes: "nenhum `<video>` na página" mesmo com o player pedindo o vídeo).
-- **Toque de verdade no player**: o navegador oculto rola até o player e toca em cima dele (antes tocava no meio da tela). Players que só recebem o link depois de um toque ("sem fonte") passam a carregar.
-
-## 1.9.40
-- **Fila: o `<video>` da página baixa direto**: quando o navegador oculto acha o `<video>`/`<source>` com o link (inclusive `data-src`), o app baixa esse link direto antes de tentar gravar o player. Resolve sites cujo vídeo é um MP4 comum mas que só aparece depois do JavaScript (antes o item virava "MSE" e falhava com "Navegador não capturou dados").
-- **Raio-X: ORIGEM DO LINK**: procura o vídeo que tocou no HTML sem navegador, na página depois de carregar e nas respostas das APIs, e diz em que campo/atributo ele está (só o nome do campo) — e o que o app precisa fazer para achar.
-
-## 1.9.39
-- **Raio-X do site** (botão **Analisar** no Navegador): abra o link, entre na conta se precisar e toque em Analisar. O app lê a página (players, `<video>`, iframes, links no código, proteções), dá play sozinho e grava tudo que o player pede (listas HLS/DASH, MP4, pedaços, APIs, chave, licença DRM), repete o pedido de vídeo fora do navegador tirando uma peça de cada vez (cookie, Referer, cabeçalhos especiais, navegador, Range) e com Origin, lê a resposta (CDN, CORS, partes), confere a validade do link e repete depois de ~40 s, testa o caminho do app (HTML sem navegador, servidor yt-dlp) e as maiores fotos. Termina com um VEREDITO. O relatório não tem link, nome do site, título, cookies, tokens nem login.
-- **Login salvo**: ao entrar num site pelo Navegador, o app pergunta se quer salvar o e-mail/usuário e a senha. Ficam criptografados com o Keystore, só neste aparelho, e são preenchidos sozinhos na próxima vez (também em login de duas etapas). Lista e "Apagar" em Configurações → Contas logadas. Nunca entram em relatório ou diagnóstico.
-
-## 1.9.38
-- **Link vencido não perde tempo**: se o link do vídeo tem data de validade e já venceu, o app vai direto pegar um link novo na página (antes tentava o link velho, o servidor, a lista HLS...). Links vencidos capturados antes também ficam de fora.
-- **Erro real aparece**: o "HTTP 403" do link direto não some mais atrás do erro do servidor yt-dlp; assim o app percebe que é link vencido e busca outro.
-- **Servidor yt-dlp fora do ar é pulado por 3 min** (em vez de esperar por ele em cada vídeo da fila).
-- **Fotos recusadas**: tenta outras origens (página, site, servidor da foto) antes de desistir.
-- **Diagnóstico**: "Copiar todos" começa com o ambiente (Android, WebView, memória, armazenamento, rede, servidor yt-dlp, fila) e um resumo por tipo de falha; falhas iguais são agrupadas (antes vinham 20 textos idênticos). Fotos com falha agora são testadas (resposta, tipo, KB, pixels, versão maior).
-- Corrige o build da 1.9.36/1.9.37.
-
-## 1.9.37
-- **Pede o vídeo como o player**: o app mandava sempre o cabeçalho "Origin" junto com a página de origem; o `<video>` do site não manda, e muitos servidores recusam (HTTP 403) quem manda. Agora vai sem Origin; só usa quando o teste mostra que o servidor exige.
-- **Diagnóstico de falhas mais completo (continua anônimo)**: forma do link (nomes dos campos, se tem validade e se já tinha vencido quando o app foi baixar, tempo entre achar e baixar), cabeçalhos que o player mandou (só os nomes), teste de cada origem sem e com Origin, texto da resposta de erro do servidor (sem links, tokens nem números longos) e o estado do player no navegador oculto (tocou? erro? blob/http? DRM?).
-- Inclui a 1.9.36 (fila grande sem travar), cujo build falhou por limite do servidor de bibliotecas.
-
-## 1.9.36
-- **Fila grande sem travar**: no máximo 2 gravações pelo navegador ao mesmo tempo (antes até 10 navegadores ocultos tocando vídeo juntos, todos na thread da tela — o app travava durante a fila e ficava liso ao pausar). Abrir página na fila: 2 por vez (antes 3).
-- A tela da Fila redesenha no máximo 1x por segundo com milhares de itens, e a fila é gravada no disco a cada 5 s (antes a cada 1,5 s, serializando todos os itens).
-
-## 1.9.35
-- **Baixar pela própria página**: quando o servidor do vídeo recusa o app (HTTP 403) mas toca no player, o navegador oculto agora baixa o arquivo de dentro da página (fetch do navegador, com os mesmos cookies, cabeçalhos e token do player) e manda os bytes ao app. Usa o endereço que o `<video>` está tocando naquela hora.
-- **Corrigido "Navegador não capturou dados do player MSE"**: se o download pelo link capturado falhava, o navegador oculto era fechado antes da última tentativa, que então nunca capturava nada. Agora ele só fecha quando o download dá certo.
-
-## 1.9.34
-- **Link trancado (HTTP 423/403/410) não trava mais o download**: quando o site recusa o link guardado (token vencido), o app marca esse link como vencido, reabre a página e pega um link novo (até 3 vezes), testando também a lista HLS do link novo. Antes ele insistia no mesmo link morto em todas as tentativas.
-- **Corrigido "String must not be empty"**: um erro ao ler o HTML ou a resposta do site, ao reabrir a página, derrubava o item inteiro. Agora cada etapa é protegida e, se nada der certo, ainda tenta a gravação pelo navegador.
-- Reabrir a página tem até 120 s (antes 60 s, que acabava antes do navegador oculto quando o servidor yt-dlp estava fora do ar).
+## 1.9.45
+- **Volta para a 1.9.33** (a versão da madrugada de 25/11), sem nenhuma mudança: só o número subiu para instalar por cima da 1.9.43/1.9.44.
 
 ## 1.9.33
 - **Download com a origem certa**: o app agora guarda a origem VERDADEIRA de cada pedido do player (muitas vezes o próprio player, não a página) e, antes de baixar, testa as origens — a do pedido, a que o player usou ao tocar, a página, o site, o servidor do vídeo, nenhuma — e usa a primeira que devolve vídeo. Antes ia sempre a página e muitos servidores recusavam (HTTP 403).

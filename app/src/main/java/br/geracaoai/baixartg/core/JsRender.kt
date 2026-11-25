@@ -36,7 +36,7 @@ object JsRender {
      */
     private val gate = Semaphore(3)
     /** WebViews próprios da fila de envio. */
-    private val queueGate = Semaphore(2)
+    private val queueGate = Semaphore(3)
     /** Quantos WebViews ocultos estão vivos agora (diagnóstico). */
     val alive = java.util.concurrent.atomic.AtomicInteger(0)
     val aliveQueue = java.util.concurrent.atomic.AtomicInteger(0)

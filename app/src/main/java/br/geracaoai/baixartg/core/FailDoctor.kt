@@ -27,63 +27,23 @@ object FailDoctor {
         return t
     }
 
-    private data class Probe(val code: Int, val ct: String, val sniff: String?, val body: ByteArray, val server: String = "")
+    private data class Probe(val code: Int, val ct: String, val sniff: String?, val body: ByteArray)
 
-    private suspend fun probe(url: String, ref: String?, max: Int, range: Boolean, origin: Boolean = false): Probe? = withContext(Dispatchers.IO) {
+    private suspend fun probe(url: String, ref: String?, max: Int, range: Boolean): Probe? = withContext(Dispatchers.IO) {
         withTimeoutOrNull(12_000) {
             try {
                 val b = Request.Builder().url(url).header("Accept", "*/*")
                 if (range) b.header("Range", "bytes=0-" + (max - 1))
-                if (!ref.isNullOrBlank()) { b.header("Referer", ref); if (origin) Net.originOf(ref)?.let { b.header("Origin", it.trimEnd('/')) } }
+                if (!ref.isNullOrBlank()) { b.header("Referer", ref); Net.originOf(ref)?.let { b.header("Origin", it.trimEnd('/')) } }
                 Net.fast.newCall(b.build()).await().use { r ->
                     val out = java.io.ByteArrayOutputStream()
                     r.body?.byteStream()?.use { ins -> val buf = ByteArray(16_384); while (out.size() < max) { val n = ins.read(buf, 0, minOf(buf.size, max - out.size())); if (n < 0) break; out.write(buf, 0, n) } }
                     val bytes = out.toByteArray()
-                    val srv = listOfNotNull(r.header("Server"), r.header("cf-ray")?.let { "cloudflare" }, r.header("x-amz-cf-id")?.let { "cloudfront" }, r.header("x-bunny-cache")?.let { "bunny" })
-                        .joinToString("/") { it.lowercase().replace(Regex("[^a-z0-9./ -]"), "").take(24) }.ifBlank { "" }
-                    Probe(r.code, r.header("Content-Type").orEmpty().substringBefore(';'), DetScan.sniff(bytes, r.header("Content-Type")), bytes, srv)
+                    Probe(r.code, r.header("Content-Type").orEmpty().substringBefore(';'), DetScan.sniff(bytes, r.header("Content-Type")), bytes)
                 }
             } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; Probe(-1, e.javaClass.simpleName, null, ByteArray(0)) }
         }
     }
-
-    /** Texto da resposta de erro sem nada que identifique: links, sites, tokens e números longos somem. */
-    private fun errorText(p: Probe, title: String): String {
-        if (p.body.isEmpty() || p.sniff?.let { DetScan.isVideoSniff(it) } == true) return ""
-        var t = String(p.body.copyOf(minOf(p.body.size, 1500)), Charsets.UTF_8)
-        if (p.ct.contains("html", true)) t = t.replace(Regex("(?s)<(script|style)[^>]*>.*?</\\1>"), " ").replace(Regex("<[^>]+>"), " ")
-        t = anon(t, title)
-        t = t.replace(Regex("[A-Za-z0-9_\\-+/=]{20,}"), "…").replace(Regex("\\d{6,}"), "#").replace(Regex("\\s+"), " ").trim()
-        return t.take(220)
-    }
-
-    /** Validade do link: nomes dos campos e, se houver data de vencimento, quanto faltava quando o app foi baixar. */
-    private fun linkShape(url: String, foundAt: Long, triedAt: Long): String {
-        val q = url.substringAfter('?', "").substringBefore('#')
-        val pairs = q.split('&').filter { it.isNotBlank() }.map { it.substringBefore('=').lowercase() to it.substringAfter('=', "") }
-        val names = pairs.map { it.first.take(20) }.distinct()
-        val sb = StringBuilder("campos: " + (if (names.isEmpty()) "nenhum" else names.joinToString(", ")))
-        val pathTok = Regex("/(?:[a-f0-9]{24,}|[A-Za-z0-9_-]{32,})/").containsMatchIn(url.substringBefore('?'))
-        if (pathTok) sb.append(" • token no caminho")
-        val fmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale("pt", "BR"))
-        val expName = Regex("^(e|exp|expire|expires|expiry|expiration|validto|valid|deadline|ttl|until|end|t|ts|time|timestamp)$")
-        for ((k, v) in pairs) {
-            if (!expName.matches(k)) continue
-            val n = v.toLongOrNull() ?: continue
-            val ms = when { n in 1_000_000_000L..9_999_999_999L -> n * 1000; n in 1_000_000_000_000L..9_999_999_999_999L -> n; else -> continue }
-            if (ms < 1_500_000_000_000L) continue
-            val now = System.currentTimeMillis()
-            val parts = ArrayList<String>()
-            parts += "campo '$k' = data ${fmt.format(java.util.Date(ms))}"
-            if (foundAt > 0) parts += "achado ${fmt.format(java.util.Date(foundAt))} (" + secs(ms - foundAt) + " de validade)"
-            if (triedAt > 0) parts += "baixar às ${fmt.format(java.util.Date(triedAt))} → " + if (triedAt > ms) "JÁ VENCIDO" else "faltavam ${secs(ms - triedAt)}"
-            parts += "agora → " + if (now > ms) "vencido" else "faltam ${secs(ms - now)}"
-            sb.append("\n  validade: " + parts.joinToString(" • "))
-        }
-        return sb.toString()
-    }
-
-    private fun secs(ms: Long): String { val s = ms / 1000; return if (kotlin.math.abs(s) >= 120) "${s / 60} min" else "$s s" }
 
     suspend fun diagnose(t: Pipeline.PItem, n: Int): String {
         val f = t.f
@@ -96,8 +56,7 @@ object FailDoctor {
         sb.appendLine("mensagem: " + anon(t.msg.ifBlank { "?" }, title))
 
         // o que aconteceu, passo a passo (rastro)
-        // só o que é DESTE vídeo (pela página vinham os eventos de todos os vídeos dela)
-        val ev = (if (f != null) Trail.of(listOf(f.url)) else emptyList()).ifEmpty { Trail.of(listOf(t.page)) }
+        val ev = Trail.of(listOfNotNull(f?.url, t.page, f?.page))
         if (ev.isNotEmpty()) {
             sb.appendLine("rastro:")
             val fmt = java.text.SimpleDateFormat("dd/MM HH:mm:ss", java.util.Locale("pt", "BR"))
@@ -109,68 +68,20 @@ object FailDoctor {
         } else {
             val signed = DetLearn.isSigned(f.url)
             sb.appendLine("link: ${if (signed) "TEMPORÁRIO (tem token/validade)" else "fixo"} • cookies para o servidor do vídeo: ${cookieCount(f.url)} • para o site: ${cookieCount(t.page)}")
-            if (f.kind == Kind.PHOTO) {
-                // Foto: abre a imagem agora com cada origem e mede (tipo, tamanho em bytes e em pixels)
-                sb.appendLine("teste da foto agora (origem → resposta):")
-                var okAny = false
-                val codesP = ArrayList<Int>()
-                for ((name, r) in linkedMapOf("a página" to f.page, "o endereço do site" to Net.originOf(f.page), "nenhuma" to "").entries.distinctBy { it.value }) {
-                    if (r == null) continue
-                    val p = probe(f.url, r, 3_000_000, range = false)
-                    if (p == null) { sb.appendLine("  $name: sem resposta (12 s)"); continue }
-                    codesP += p.code
-                    val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                    try { android.graphics.BitmapFactory.decodeByteArray(p.body, 0, p.body.size, o) } catch (_: Exception) {}
-                    val dims = if (o.outWidth > 0) "${o.outWidth}x${o.outHeight}" else "não é imagem"
-                    sb.appendLine("  $name: HTTP ${p.code} ${p.ct} • ${p.body.size / 1000} KB • $dims")
-                    if (p.code in 200..299 && o.outWidth > 0) okAny = true
-                    if (!okAny && p.code >= 400) errorText(p, title).takeIf { it.isNotBlank() }?.let { sb.appendLine("    resposta: $it") }
-                }
-                val alt = try { PhotoGrab.fallback(f.url) } catch (_: Exception) { null }
-                sb.appendLine("versão alternativa da foto (maior/original): ${if (alt != null && alt != f.url) "existe (${tag(alt, "cdn")})" else "nenhuma"}")
-                sb.appendLine("forma do link: " + linkShape(f.url, 0L, 0L))
-                if (!okAny) causes += when {
-                    codesP.any { it == 403 || it == 401 } -> "o servidor da foto recusa o app (HTTP 403/401): ela só abre dentro da página (proteção contra link direto)"
-                    codesP.any { it == 404 || it == 410 } -> "a foto não existe mais nesse endereço (HTTP 404/410)"
-                    codesP.all { it < 0 } -> "sem conexão com o servidor da foto"
-                    else -> "o endereço não devolve uma imagem (devolve página/erro)"
-                }
-            }
             if (f.kind == Kind.HLS || f.kind == Kind.DIRECT) {
                 val play = try { PlayCapture.bestFor(f)?.referer } catch (_: Exception) { null }
                 val pageO = Net.originOf(f.page)
                 val refs = linkedMapOf<String, String?>("a gravada no item" to f.ref, "a que o player usou" to play, "a página" to f.page, "o endereço do site" to pageO, "o servidor do vídeo" to Net.originOf(f.url), "nenhuma" to "")
                 var okRef: String? = null; var okProbe: Probe? = null
                 val codes = ArrayList<Int>()
-                // quando foi achado e quando tentou baixar (pelo rastro)
-                val foundAt = ev.firstOrNull { it.step.startsWith("achado") }?.t ?: 0L
-                val triedAt = ev.firstOrNull { it.step.startsWith("download: começou") }?.t ?: 0L
-                sb.appendLine("forma do link: " + linkShape(f.url, foundAt, triedAt))
-                if (foundAt > 0 && triedAt > 0) sb.appendLine("tempo entre achar e baixar: ${secs(triedAt - foundAt)}")
-                // o que o player mandou para o servidor do vídeo (só NOMES dos cabeçalhos)
-                try {
-                    val h = MseCapture.snapshot(f.page.ifBlank { t.page }).let { it.rangesOrDirect + it.manifests + it.segments }
-                        .filter { Trail.host(it.url) == Trail.host(f.url) }
-                    if (h.isNotEmpty()) sb.appendLine("o player pediu ${h.size}x a esse servidor • cabeçalhos do player: " +
-                        h.flatMap { it.headers.keys }.map { it.lowercase() }.distinct().sorted().joinToString(", ").ifBlank { "nenhum além dos comuns" })
-                    else sb.appendLine("o player não foi visto pedindo a esse servidor (pedido não capturado)")
-                } catch (_: Exception) {}
-                var firstErr: Probe? = null
-                sb.appendLine("teste agora (origem → resposta), como o player (sem Origin) e com Origin:")
+                sb.appendLine("teste agora (origem → resposta):")
                 for ((name, r) in refs.entries.distinctBy { it.value }) {
                     if (r == null) continue
-                    for (withO in if (r.isBlank()) listOf(false) else listOf(false, true)) {
-                        val p = probe(f.url, r, 200_000, range = true, origin = withO)
-                        val line = if (p == null) "sem resposta (12 s)" else if (p.code < 0) "erro de conexão (${p.ct})" else "HTTP ${p.code} ${p.ct.ifBlank { "" }} → ${p.sniff ?: "?"}"
-                        sb.appendLine("  $name${if (withO) " + Origin" else ""}: $line")
-                        if (p != null) codes += p.code
-                        if (p != null && p.code >= 400 && firstErr == null) firstErr = p
-                        if (okRef == null && p != null && p.code in 200..299 && (DetScan.isVideoSniff(p.sniff))) { okRef = r; okProbe = p }
-                    }
-                }
-                firstErr?.let { e ->
-                    val txt = errorText(e, title)
-                    sb.appendLine("resposta de erro do servidor (HTTP ${e.code}${if (e.server.isNotBlank()) ", servidor " + e.server else ""}): " + txt.ifBlank { "(vazia)" })
+                    val p = probe(f.url, r, 200_000, range = true)
+                    val line = if (p == null) "sem resposta (12 s)" else if (p.code < 0) "erro de conexão (${p.ct})" else "HTTP ${p.code} ${p.ct.ifBlank { "" }} → ${p.sniff ?: "?"}"
+                    sb.appendLine("  $name: $line")
+                    if (p != null) codes += p.code
+                    if (okRef == null && p != null && p.code in 200..299 && (DetScan.isVideoSniff(p.sniff))) { okRef = r; okProbe = p }
                 }
                 if (okRef == null) {
                     causes += when {
@@ -232,65 +143,6 @@ object FailDoctor {
         val p = probe(seg, ref, 8_192, range = true)
         sb.appendLine("primeiro pedaço: ${if (p == null) "sem resposta" else "HTTP ${p.code} → ${p.sniff ?: "?"}"}" + " (em ${tag(seg, "cdn")})")
         if (p != null && p.code !in 200..299) causes += "a lista abre, mas os PEDAÇOS são recusados (HTTP ${p.code}) — o servidor dos pedaços pede outra origem/cookie"
-    }
-
-    /** Cabeçalho do "Copiar todos": aparelho, navegador, memória, rede e servidor (nada pessoal). */
-    fun envReport(c: android.content.Context): String = buildString {
-        appendLine("=== ambiente === app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME}")
-        val wv = try { androidx.webkit.WebViewCompat.getCurrentWebViewPackage(c)?.versionName ?: "?" } catch (_: Throwable) { "?" }
-        appendLine("Android ${android.os.Build.VERSION.RELEASE} (API ${android.os.Build.VERSION.SDK_INT}) • WebView $wv")
-        try {
-            val am = c.getSystemService(android.app.ActivityManager::class.java)
-            val mi = android.app.ActivityManager.MemoryInfo().also { am.getMemoryInfo(it) }
-            val free = c.cacheDir.usableSpace
-            appendLine("memória livre ${mi.availMem / 1_000_000} MB de ${mi.totalMem / 1_000_000} MB${if (mi.lowMemory) " (BAIXA)" else ""} • armazenamento livre ${free / 1_000_000_000} GB")
-        } catch (_: Exception) {}
-        try {
-            val cm = c.getSystemService(android.net.ConnectivityManager::class.java)
-            val nc = cm.getNetworkCapabilities(cm.activeNetwork)
-            val net = when {
-                nc == null -> "sem rede"
-                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
-                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_CELLULAR) -> "dados móveis"
-                nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
-                else -> "outra"
-            }
-            appendLine("rede: $net${nc?.let { " • ~${it.linkDownstreamBandwidthKbps / 1000} Mbps" } ?: ""}")
-        } catch (_: Exception) {}
-        appendLine("fila: ${Prefs.parDown} downloads ao mesmo tempo • navegadores ocultos ao mesmo tempo: no máx. ${BrowserMseDownloader.MAX_HIDDEN} • qualidade mínima ${Prefs.minHeight}p")
-        appendLine("servidor yt-dlp: ${Downloader.ServerHealth.status()}")
-        val l = Pipeline.items.value
-        val by = l.groupingBy { it.st.name }.eachCount().entries.sortedByDescending { it.value }.joinToString(", ") { "${it.key} ${it.value}" }
-        appendLine("fila agora: ${l.size} itens ($by)")
-    }
-
-    /**
-     * Junta falhas iguais (mesmo site, mesmo servidor e mesma causa): mostra o diagnóstico completo da primeira
-     * e só a contagem das outras — antes vinham 20 textos idênticos.
-     */
-    fun groupReports(reports: List<String>): String {
-        fun keyOf(r: String): String {
-            val lines = r.lines()
-            val head = lines.getOrNull(1)?.substringAfter("•")?.trim().orEmpty()
-            val cause = lines.lastOrNull { it.startsWith("CAUSA PROVÁVEL") }.orEmpty()
-            val msg = lines.firstOrNull { it.startsWith("mensagem:") }.orEmpty()
-            return "$head|$cause|$msg"
-        }
-        val groups = LinkedHashMap<String, MutableList<String>>()
-        for (r in reports.filter { it.isNotBlank() }) groups.getOrPut(keyOf(r)) { ArrayList() } += r
-        return buildString {
-            appendLine("=== resumo: ${reports.count { it.isNotBlank() }} falhas em ${groups.size} tipo(s) ===")
-            groups.values.forEachIndexed { i, g ->
-                val cause = g.first().lines().lastOrNull { it.startsWith("CAUSA PROVÁVEL") }?.removePrefix("CAUSA PROVÁVEL: ") ?: "?"
-                appendLine("tipo ${i + 1}: ${g.size}× — ${cause.take(160)}")
-            }
-            groups.values.forEachIndexed { i, g ->
-                appendLine()
-                appendLine("##### tipo ${i + 1} (${g.size} falha${if (g.size > 1) "s" else ""} igual${if (g.size > 1) "is" else ""}) #####")
-                append(g.first())
-                appendLine()
-            }
-        }.trimEnd()
     }
 
     private fun cookieCount(u: String?): Int = try { (CookieManager.getInstance().getCookie(u ?: "") ?: "").split(';').count { it.isNotBlank() } } catch (_: Exception) { 0 }
