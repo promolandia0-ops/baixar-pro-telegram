@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.40
+- **Fila: o `<video>` da página baixa direto**: quando o navegador oculto acha o `<video>`/`<source>` com o link (inclusive `data-src`), o app baixa esse link direto antes de tentar gravar o player. Resolve sites cujo vídeo é um MP4 comum mas que só aparece depois do JavaScript (antes o item virava "MSE" e falhava com "Navegador não capturou dados").
+- **Raio-X: ORIGEM DO LINK**: procura o vídeo que tocou no HTML sem navegador, na página depois de carregar e nas respostas das APIs, e diz em que campo/atributo ele está (só o nome do campo) — e o que o app precisa fazer para achar.
+
 ## 1.9.39
 - **Raio-X do site** (botão **Analisar** no Navegador): abra o link, entre na conta se precisar e toque em Analisar. O app lê a página (players, `<video>`, iframes, links no código, proteções), dá play sozinho e grava tudo que o player pede (listas HLS/DASH, MP4, pedaços, APIs, chave, licença DRM), repete o pedido de vídeo fora do navegador tirando uma peça de cada vez (cookie, Referer, cabeçalhos especiais, navegador, Range) e com Origin, lê a resposta (CDN, CORS, partes), confere a validade do link e repete depois de ~40 s, testa o caminho do app (HTML sem navegador, servidor yt-dlp) e as maiores fotos. Termina com um VEREDITO. O relatório não tem link, nome do site, título, cookies, tokens nem login.
 - **Login salvo**: ao entrar num site pelo Navegador, o app pergunta se quer salvar o e-mail/usuário e a senha. Ficam criptografados com o Keystore, só neste aparelho, e são preenchidos sozinhos na próxima vez (também em login de duas etapas). Lista e "Apagar" em Configurações → Contas logadas. Nunca entram em relatório ou diagnóstico.

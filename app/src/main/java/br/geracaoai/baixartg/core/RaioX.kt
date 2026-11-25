@@ -173,6 +173,15 @@ return JSON.stringify(o);
         val sb = StringBuilder()
         val verdict = ArrayList<String>()
         val started = System.currentTimeMillis()
+        var staticDone = false
+        var staticHtml: String? = null
+        suspend fun static(): String? {
+            if (!staticDone) {
+                staticDone = true
+                staticHtml = try { withTimeoutOrNull(15_000) { PageResolver.fetch(page, null) } } catch (e: Exception) { if (e is CancellationException) throw e; null }
+            }
+            return staticHtml
+        }
         sb.appendLine("=== RAIO-X === app v${br.geracaoai.baixartg.BuildConfig.VERSION_NAME} • página ${tag(page, "site")}")
 
         // 1) página antes do play
@@ -309,13 +318,39 @@ return JSON.stringify(o);
                 val again2 = hit(main.url, base)
                 if (again.ok && !again2.ok) verdict += "o link parece de USO LIMITADO (falhou ao repetir)"
             }
+
+            // 3b) de onde a página tira esse link (para o app achar sem precisar tocar)
+            sb.appendLine()
+            sb.appendLine("[3b] ORIGEM DO LINK (onde o link do vídeo aparece)")
+            progress.step("Procurando de onde vem o link…")
+            val inStatic = locate(static(), main.url)
+            sb.appendLine("  HTML sem navegador: $inStatic")
+            val dom = try { eval("(function(){try{return document.documentElement.outerHTML.slice(0,4000000)}catch(e){return ''}})()") } catch (e: Exception) { if (e is CancellationException) throw e; null }
+            val inDom = locate(dom, main.url)
+            sb.appendLine("  página depois de carregar (DOM): $inDom")
+            var inApi = false
+            for (a in apis.distinctBy { it.url }.take(6)) {
+                val ck = try { Net.cookies?.cookieFor(a.url) } catch (_: Exception) { null }
+                val h = linkedMapOf("User-Agent" to Net.userAgent, "Accept" to "application/json, text/plain, */*", "Referer" to page)
+                if (!ck.isNullOrBlank()) h["Cookie"] = ck
+                val res = hit(a.url, h, 1_500_000)
+                val loc = locate(String(res.body, Charsets.UTF_8), main.url)
+                sb.appendLine("  resposta da API ${tag(a.url, "api")} (HTTP ${res.code} ${res.ct}): $loc")
+                if (loc.startsWith("SIM")) inApi = true
+            }
+            when {
+                inStatic.startsWith("SIM") -> verdict += "o link do vídeo JÁ ESTÁ no HTML (${inStatic.substringAfter("em ").substringBefore(" (")}): o app tem que achar sem navegador — se não achou, é o leitor do app (mande este relatório)"
+                inApi -> verdict += "o link vem de uma API chamada pela página: o app pode chamar a mesma API"
+                inDom.startsWith("SIM") -> verdict += "o link só aparece depois que o JavaScript monta a página (${inDom.substringAfter("em ").substringBefore(" (")}): precisa do navegador, mas não precisa dar play"
+                else -> verdict += "o link não aparece em lugar nenhum antes do play: é montado na hora pelo player"
+            }
         }
 
         // 5) caminho do próprio app
         sb.appendLine()
         sb.appendLine("[4] CAMINHO DO APP")
         progress.step("Testando o caminho do app…")
-        val html = try { withTimeoutOrNull(15_000) { PageResolver.fetch(page, null) } } catch (e: Exception) { if (e is CancellationException) throw e; null }
+        val html = static()
         if (html == null) sb.appendLine("HTML sem navegador: não abriu (bloqueio, anti-robô ou login)")
         else {
             val pr = try { Extract.parse(page, html) } catch (e: Exception) { if (e is CancellationException) throw e; null }
@@ -442,6 +477,34 @@ return JSON.stringify(o);
             if (a.code !in 200..299) verdict += "as fotos não abrem fora da página (HTTP ${a.code})"
             else if (b.code !in 200..299) verdict += "as fotos exigem a página de origem/cookie (o app já manda)"
         }
+    }
+
+    /** O link (ou o nome do arquivo) está neste texto? Em que campo/atributo? Só nomes de campo, nunca valores. */
+    private fun locate(text: String?, url: String): String {
+        if (text.isNullOrBlank()) return "não abriu"
+        val clean = url.substringBefore('#')
+        val noQ = clean.substringBefore('?')
+        val path = try { java.net.URI(noQ).rawPath.orEmpty() } catch (_: Exception) { "" }
+        val file = noQ.substringAfterLast('/')
+        val tries = listOf(
+            clean to "link inteiro", clean.replace("/", "\\/") to "link inteiro (com \\/)", noQ to "link sem os parâmetros",
+            noQ.replace("/", "\\/") to "link sem parâmetros (com \\/)", noQ.substringAfter("://").let { "//$it" } to "link sem https:",
+            path to "só o caminho (sem o domínio)", file to "só o nome do arquivo (o link é montado por código)",
+        ).filter { it.first.length >= 6 }
+        val hit = tries.firstOrNull { text.contains(it.first) } ?: return "não está"
+        val i = text.indexOf(hit.first)
+        var count = 0; var from = 0
+        while (count < 99) { val j = text.indexOf(hit.first, from); if (j < 0) break; count++; from = j + hit.first.length }
+        val before = text.substring(maxOf(0, i - 160), i)
+        val attr = Regex("""<([a-zA-Z0-9-]+)[^<>]*\s([a-zA-Z_:-]+)\s*=\s*["']?[^"'<>]*$""").find(before)
+        val key = Regex("""["']?([A-Za-z_$][\w$-]{0,30})["']?\s*[:=]\s*\[?\s*["'][^"'<>]*$""").find(before)?.groupValues?.get(1)
+        val inLd = Regex("""application/ld\+json""").containsMatchIn(text.substring(maxOf(0, i - 3000), i)) && !before.contains("</script")
+        val where = when {
+            attr != null -> "<${attr.groupValues[1].lowercase()} ${attr.groupValues[2].lowercase()}=…>"
+            key != null -> "campo \"$key\"" + if (inLd) " do JSON-LD" else ""
+            else -> "texto solto"
+        }
+        return "SIM — ${hit.second}, em $where (${count}x)"
     }
 
     private fun refKind(ref: String, page: String, media: String) = when {

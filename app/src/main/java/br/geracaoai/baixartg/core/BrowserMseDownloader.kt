@@ -552,9 +552,20 @@ return 'ok';
             // Prioridade 2b: o servidor recusou o app (ex.: HTTP 403). Baixa pela própria página, com o fetch do navegador.
             if (!closed.get()) webView?.let { live ->
                 val src = withContext(Dispatchers.Main) {
-                    evalString(live, "(function(){try{var a=[];document.querySelectorAll('video').forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src]');for(var i=0;i<q.length;i++){if(q[i].src&&q[i].src.indexOf('http')===0)a.push(q[i].src);}});return a.join('\\n')}catch(e){return ''}})()")
+                    evalString(live, "(function(){try{var a=[];document.querySelectorAll('video').forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src],source[data-src]');for(var i=0;i<q.length;i++){var x=q[i].src||q[i].getAttribute('data-src')||'';if(x.indexOf('//')===0)x=location.protocol+x;if(x.indexOf('http')===0)a.push(x);}var ds=v.getAttribute('data-src')||'';if(ds.indexOf('http')===0)a.push(ds);});return a.join('\\n')}catch(e){return ''}})()")
                 }.orEmpty().split('\n').map { it.trim() }.filter { it.isNotBlank() }
                 val direct = src + ranged.map { it.url } + listOfNotNull(f.url.takeIf { Extract.mediaKindOf(it) == Kind.DIRECT || f.kind == Kind.DIRECT })
+                // O <video> da página já tem o link: tenta baixar DIRETO (sem gravar o player). Muitos servidores não exigem nada.
+                for (u in src.filter { !it.startsWith("blob:") && !MediaPick.isAdUrl(it) && !Extract.isPreviewVideo(it) && !Extract.isHls(it) && !Extract.isDash(it) }.distinct().take(3)) {
+                    val got = try {
+                        Downloader.download(Found(u, pageUrl, f.title, Kind.DIRECT, ref = pageUrl, extra = f.extra), dir, Prefs.server, maxHeight, fast = true, progress = progress)
+                    } catch (e: Exception) { if (e is CancellationException) throw e; Trail.add(listOf(f.url, pageUrl), "navegador: link do <video> direto", "falhou: ${e.message?.take(100)}"); null }
+                    if (got != null && got.length() >= 64 * 1024) {
+                        Trail.add(listOf(f.url, pageUrl), "navegador: link do <video> direto", "funcionou: ${got.length() / 1_000_000} MB")
+                        destroyWeb(); return got
+                    }
+                    got?.delete()
+                }
                 val viaPage = if (direct.isNotEmpty() && !(finalBridge.mseActive.get() && hint.segments.size >= 2))
                     try { fetchInPage(live, finalBridge, pageUrl, direct.filter { !MediaPick.isAdUrl(it) && !Extract.isHls(it) }, dir, f.title, progress) }
                     catch (e: Exception) { if (e is CancellationException) throw e; null }
