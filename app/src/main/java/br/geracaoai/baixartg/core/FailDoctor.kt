@@ -27,23 +27,63 @@ object FailDoctor {
         return t
     }
 
-    private data class Probe(val code: Int, val ct: String, val sniff: String?, val body: ByteArray)
+    private data class Probe(val code: Int, val ct: String, val sniff: String?, val body: ByteArray, val server: String = "")
 
-    private suspend fun probe(url: String, ref: String?, max: Int, range: Boolean): Probe? = withContext(Dispatchers.IO) {
+    private suspend fun probe(url: String, ref: String?, max: Int, range: Boolean, origin: Boolean = false): Probe? = withContext(Dispatchers.IO) {
         withTimeoutOrNull(12_000) {
             try {
                 val b = Request.Builder().url(url).header("Accept", "*/*")
                 if (range) b.header("Range", "bytes=0-" + (max - 1))
-                if (!ref.isNullOrBlank()) { b.header("Referer", ref); Net.originOf(ref)?.let { b.header("Origin", it.trimEnd('/')) } }
+                if (!ref.isNullOrBlank()) { b.header("Referer", ref); if (origin) Net.originOf(ref)?.let { b.header("Origin", it.trimEnd('/')) } }
                 Net.fast.newCall(b.build()).await().use { r ->
                     val out = java.io.ByteArrayOutputStream()
                     r.body?.byteStream()?.use { ins -> val buf = ByteArray(16_384); while (out.size() < max) { val n = ins.read(buf, 0, minOf(buf.size, max - out.size())); if (n < 0) break; out.write(buf, 0, n) } }
                     val bytes = out.toByteArray()
-                    Probe(r.code, r.header("Content-Type").orEmpty().substringBefore(';'), DetScan.sniff(bytes, r.header("Content-Type")), bytes)
+                    val srv = listOfNotNull(r.header("Server"), r.header("cf-ray")?.let { "cloudflare" }, r.header("x-amz-cf-id")?.let { "cloudfront" }, r.header("x-bunny-cache")?.let { "bunny" })
+                        .joinToString("/") { it.lowercase().replace(Regex("[^a-z0-9./ -]"), "").take(24) }.ifBlank { "" }
+                    Probe(r.code, r.header("Content-Type").orEmpty().substringBefore(';'), DetScan.sniff(bytes, r.header("Content-Type")), bytes, srv)
                 }
             } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; Probe(-1, e.javaClass.simpleName, null, ByteArray(0)) }
         }
     }
+
+    /** Texto da resposta de erro sem nada que identifique: links, sites, tokens e números longos somem. */
+    private fun errorText(p: Probe, title: String): String {
+        if (p.body.isEmpty() || p.sniff?.let { DetScan.isVideoSniff(it) } == true) return ""
+        var t = String(p.body.copyOf(minOf(p.body.size, 1500)), Charsets.UTF_8)
+        if (p.ct.contains("html", true)) t = t.replace(Regex("(?s)<(script|style)[^>]*>.*?</\\1>"), " ").replace(Regex("<[^>]+>"), " ")
+        t = anon(t, title)
+        t = t.replace(Regex("[A-Za-z0-9_\\-+/=]{20,}"), "…").replace(Regex("\\d{6,}"), "#").replace(Regex("\\s+"), " ").trim()
+        return t.take(220)
+    }
+
+    /** Validade do link: nomes dos campos e, se houver data de vencimento, quanto faltava quando o app foi baixar. */
+    private fun linkShape(url: String, foundAt: Long, triedAt: Long): String {
+        val q = url.substringAfter('?', "").substringBefore('#')
+        val pairs = q.split('&').filter { it.isNotBlank() }.map { it.substringBefore('=').lowercase() to it.substringAfter('=', "") }
+        val names = pairs.map { it.first.take(20) }.distinct()
+        val sb = StringBuilder("campos: " + (if (names.isEmpty()) "nenhum" else names.joinToString(", ")))
+        val pathTok = Regex("/(?:[a-f0-9]{24,}|[A-Za-z0-9_-]{32,})/").containsMatchIn(url.substringBefore('?'))
+        if (pathTok) sb.append(" • token no caminho")
+        val fmt = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale("pt", "BR"))
+        val expName = Regex("^(e|exp|expire|expires|expiry|expiration|validto|valid|deadline|ttl|until|end|t|ts|time|timestamp)$")
+        for ((k, v) in pairs) {
+            if (!expName.matches(k)) continue
+            val n = v.toLongOrNull() ?: continue
+            val ms = when { n in 1_000_000_000L..9_999_999_999L -> n * 1000; n in 1_000_000_000_000L..9_999_999_999_999L -> n; else -> continue }
+            if (ms < 1_500_000_000_000L) continue
+            val now = System.currentTimeMillis()
+            val parts = ArrayList<String>()
+            parts += "campo '$k' = data ${fmt.format(java.util.Date(ms))}"
+            if (foundAt > 0) parts += "achado ${fmt.format(java.util.Date(foundAt))} (" + secs(ms - foundAt) + " de validade)"
+            if (triedAt > 0) parts += "baixar às ${fmt.format(java.util.Date(triedAt))} → " + if (triedAt > ms) "JÁ VENCIDO" else "faltavam ${secs(ms - triedAt)}"
+            parts += "agora → " + if (now > ms) "vencido" else "faltam ${secs(ms - now)}"
+            sb.append("\n  validade: " + parts.joinToString(" • "))
+        }
+        return sb.toString()
+    }
+
+    private fun secs(ms: Long): String { val s = ms / 1000; return if (kotlin.math.abs(s) >= 120) "${s / 60} min" else "$s s" }
 
     suspend fun diagnose(t: Pipeline.PItem, n: Int): String {
         val f = t.f
@@ -74,14 +114,35 @@ object FailDoctor {
                 val refs = linkedMapOf<String, String?>("a gravada no item" to f.ref, "a que o player usou" to play, "a página" to f.page, "o endereço do site" to pageO, "o servidor do vídeo" to Net.originOf(f.url), "nenhuma" to "")
                 var okRef: String? = null; var okProbe: Probe? = null
                 val codes = ArrayList<Int>()
-                sb.appendLine("teste agora (origem → resposta):")
+                // quando foi achado e quando tentou baixar (pelo rastro)
+                val foundAt = ev.firstOrNull { it.step.startsWith("achado") }?.t ?: 0L
+                val triedAt = ev.firstOrNull { it.step.startsWith("download: começou") }?.t ?: 0L
+                sb.appendLine("forma do link: " + linkShape(f.url, foundAt, triedAt))
+                if (foundAt > 0 && triedAt > 0) sb.appendLine("tempo entre achar e baixar: ${secs(triedAt - foundAt)}")
+                // o que o player mandou para o servidor do vídeo (só NOMES dos cabeçalhos)
+                try {
+                    val h = MseCapture.snapshot(f.page.ifBlank { t.page }).let { it.rangesOrDirect + it.manifests + it.segments }
+                        .filter { Trail.host(it.url) == Trail.host(f.url) }
+                    if (h.isNotEmpty()) sb.appendLine("o player pediu ${h.size}x a esse servidor • cabeçalhos do player: " +
+                        h.flatMap { it.headers.keys }.map { it.lowercase() }.distinct().sorted().joinToString(", ").ifBlank { "nenhum além dos comuns" })
+                    else sb.appendLine("o player não foi visto pedindo a esse servidor (pedido não capturado)")
+                } catch (_: Exception) {}
+                var firstErr: Probe? = null
+                sb.appendLine("teste agora (origem → resposta), como o player (sem Origin) e com Origin:")
                 for ((name, r) in refs.entries.distinctBy { it.value }) {
                     if (r == null) continue
-                    val p = probe(f.url, r, 200_000, range = true)
-                    val line = if (p == null) "sem resposta (12 s)" else if (p.code < 0) "erro de conexão (${p.ct})" else "HTTP ${p.code} ${p.ct.ifBlank { "" }} → ${p.sniff ?: "?"}"
-                    sb.appendLine("  $name: $line")
-                    if (p != null) codes += p.code
-                    if (okRef == null && p != null && p.code in 200..299 && (DetScan.isVideoSniff(p.sniff))) { okRef = r; okProbe = p }
+                    for (withO in if (r.isBlank()) listOf(false) else listOf(false, true)) {
+                        val p = probe(f.url, r, 200_000, range = true, origin = withO)
+                        val line = if (p == null) "sem resposta (12 s)" else if (p.code < 0) "erro de conexão (${p.ct})" else "HTTP ${p.code} ${p.ct.ifBlank { "" }} → ${p.sniff ?: "?"}"
+                        sb.appendLine("  $name${if (withO) " + Origin" else ""}: $line")
+                        if (p != null) codes += p.code
+                        if (p != null && p.code >= 400 && firstErr == null) firstErr = p
+                        if (okRef == null && p != null && p.code in 200..299 && (DetScan.isVideoSniff(p.sniff))) { okRef = r; okProbe = p }
+                    }
+                }
+                firstErr?.let { e ->
+                    val txt = errorText(e, title)
+                    sb.appendLine("resposta de erro do servidor (HTTP ${e.code}${if (e.server.isNotBlank()) ", servidor " + e.server else ""}): " + txt.ifBlank { "(vazia)" })
                 }
                 if (okRef == null) {
                     causes += when {

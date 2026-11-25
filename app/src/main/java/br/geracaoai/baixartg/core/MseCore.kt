@@ -793,7 +793,8 @@ object MseDownloader {
             val ref = if (!referer.isNullOrBlank() && referer != url) referer else Net.originOf(url)
             if (!ref.isNullOrBlank()) {
                 b.header("Referer", ref)
-                if (!clean.keys.any { it.equals("Origin", true) }) {
+                // Pedido de mídia do player não leva Origin; só põe se o servidor exigir (descoberto no teste de origens).
+                if (!clean.keys.any { it.equals("Origin", true) } && Trail.host(url) in Downloader.needsOrigin) {
                     Net.originOf(ref)?.trimEnd('/')?.let { b.header("Origin", it) }
                 }
             }

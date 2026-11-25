@@ -32,7 +32,9 @@ object Downloader {
             val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
             if (ref != null) {
                 header("Referer", ref)
-                try {
+                // O player (<video>) NÃO manda "Origin" ao pedir o vídeo; muitos servidores recusam (403) quem manda.
+                // Só manda quando o teste de origens mostrou que este servidor exige.
+                if (Trail.host(url) in needsOrigin) try {
                     val o = java.net.URI(ref)
                     if (o.scheme != null && o.authority != null) header("Origin", "${o.scheme}://${o.authority}")
                 } catch (_: Exception) {}
@@ -50,16 +52,21 @@ object Downloader {
      * Origem (Referer) que o servidor do vídeo aceita: testa a do pedido original, a que o player usou ao tocar, a página,
      * o endereço do site, a do próprio servidor e nenhuma; fica a primeira que devolve vídeo (não página/erro).
      */
+    /** Servidores de vídeo que só respondem com o cabeçalho Origin (descoberto pelo teste de origens). */
+    val needsOrigin: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+
     suspend fun pickReferer(f: Found): String? {
         if (f.kind != Kind.HLS && f.kind != Kind.DIRECT) return null
         val play = try { PlayCapture.bestFor(f)?.takeIf { Trail.key(it.url) == Trail.key(f.url) }?.referer } catch (_: Exception) { null }
         val pageO = Net.originOf(f.page); val urlO = Net.originOf(f.url)
         val cands = listOf(f.ref, play, f.page.ifBlank { null }, pageO, urlO, "").distinct()
-        for (r in cands) {
+        // Primeiro como o player faz (Referer sem Origin); depois com Origin.
+        val tries = cands.map { it to false } + cands.filter { !it.isNullOrBlank() }.map { it to true }
+        for ((r, withOrigin) in tries) {
             val res = kotlinx.coroutines.withTimeoutOrNull(10_000) {
                 try {
                     val b = Request.Builder().url(f.url).header("Accept", "*/*").header("Range", "bytes=0-4095")
-                    if (!r.isNullOrBlank()) { b.header("Referer", r); Net.originOf(r)?.let { b.header("Origin", it.trimEnd('/')) } }
+                    if (!r.isNullOrBlank()) { b.header("Referer", r); if (withOrigin) Net.originOf(r)?.let { b.header("Origin", it.trimEnd('/')) } }
                     Net.fast.newCall(b.build()).await().use { resp ->
                         val head = resp.body?.byteStream()?.use { s -> val buf = ByteArray(4096); val n = s.read(buf); if (n > 0) buf.copyOf(n) else ByteArray(0) } ?: ByteArray(0)
                         resp.code to DetScan.sniff(head, resp.header("Content-Type"))
@@ -67,6 +74,7 @@ object Downloader {
                 } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
             } ?: continue
             if (res.first in 200..299 && (DetScan.isVideoSniff(res.second) || res.second == "text" && f.kind == Kind.HLS)) {
+                if (withOrigin) needsOrigin += Trail.host(f.url) else needsOrigin -= Trail.host(f.url)
                 if (r != f.ref) Trail.here("origem certa", "o vídeo só abriu com a origem: ${when (r) { "" -> "nenhuma"; f.page -> "a página"; pageO -> "o endereço do site"; urlO -> "o próprio servidor do vídeo"; play -> "a do player (" + Trail.host(r) + ")"; else -> Trail.host(r) }}")
                 return r
             }

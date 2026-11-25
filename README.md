@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.37
+- **Pede o vídeo como o player**: o app mandava sempre o cabeçalho "Origin" junto com a página de origem; o `<video>` do site não manda, e muitos servidores recusam (HTTP 403) quem manda. Agora vai sem Origin; só usa quando o teste mostra que o servidor exige.
+- **Diagnóstico de falhas mais completo (continua anônimo)**: forma do link (nomes dos campos, se tem validade e se já tinha vencido quando o app foi baixar, tempo entre achar e baixar), cabeçalhos que o player mandou (só os nomes), teste de cada origem sem e com Origin, texto da resposta de erro do servidor (sem links, tokens nem números longos) e o estado do player no navegador oculto (tocou? erro? blob/http? DRM?).
+- Inclui a 1.9.36 (fila grande sem travar), cujo build falhou por limite do servidor de bibliotecas.
+
 ## 1.9.36
 - **Fila grande sem travar**: no máximo 2 gravações pelo navegador ao mesmo tempo (antes até 10 navegadores ocultos tocando vídeo juntos, todos na thread da tela — o app travava durante a fila e ficava liso ao pausar). Abrir página na fila: 2 por vez (antes 3).
 - A tela da Fila redesenha no máximo 1x por segundo com milhares de itens, e a fila é gravada no disco a cada 5 s (antes a cada 1,5 s, serializando todos os itens).

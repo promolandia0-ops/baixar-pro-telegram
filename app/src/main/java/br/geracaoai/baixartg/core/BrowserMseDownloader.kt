@@ -600,6 +600,12 @@ return 'ok';
                 if (now - lastGrowthAt > stallLimit) break
             }
 
+            // Estado do player no navegador oculto (anônimo: sem link nem título) para o diagnóstico de falhas
+            try {
+                val st = withContext(Dispatchers.Main) { evalString(wv, STATE_JS) }
+                if (!st.isNullOrBlank()) Trail.add(listOf(f.url, pageUrl), "navegador: estado do player",
+                    st + " • bytes capturados ${finalBridge.totalBytes.get()} • MSE ${if (finalBridge.mseActive.get()) "sim" else "não"} • pedidos vistos: manifest ${hint.manifests.size}, direto ${hint.rangesOrDirect.size}, pedaços ${hint.segments.size}")
+            } catch (e: Exception) { if (e is CancellationException) throw e }
             destroyWeb()
             finalBridge.closeAll()
 
@@ -633,6 +639,19 @@ return 'ok';
             releaseSlot()
         }
     }
+
+    /** Resumo técnico do(s) <video> da página: tocou? deu erro? de onde vem (blob/http)? tem DRM? Nada de link ou título. */
+    private const val STATE_JS = """(function(){try{
+var v=document.querySelectorAll('video'),out=[];
+var err={1:'abortado',2:'rede',3:'decodificação',4:'formato/endereço não suportado'};
+for(var i=0;i<v.length&&i<4;i++){var x=v[i],s=x.currentSrc||x.src||'';
+out.push('vídeo'+(i+1)+': '+(s.indexOf('blob:')===0?'blob(MSE)':s.indexOf('http')===0?'http':s?'outro':'sem fonte')+
+' pronto='+x.readyState+' rede='+x.networkState+' '+(x.paused?'pausado':'tocando')+
+' tempo='+Math.round(x.currentTime||0)+'/'+(isFinite(x.duration)?Math.round(x.duration):'?')+'s'+
+(x.error?' ERRO='+(err[x.error.code]||x.error.code):'')+(x.mediaKeys?' DRM=sim':'')+' '+(x.videoWidth||0)+'x'+(x.videoHeight||0));}
+var ifr=document.querySelectorAll('iframe').length;
+return (out.length?out.join(' | '):'nenhum <video> na página')+(ifr?' • iframes='+ifr:'');
+}catch(e){return 'erro ao ler: '+e}})()"""
 
     private fun pauseMedia(wv: WebView?) {
         val w = wv ?: return
