@@ -89,7 +89,7 @@ object Downloader {
         val raw = if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
             Kind.DIRECT -> try { retry { if (fast) directFast(f.url, ref, dir, f.title, progress) else direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
+                if (f.page != f.url) serverOr(e, f.page, dir, server, progress) else throw e
             }
             Kind.PHOTO -> try { retry { photo(f.url, ref, dir, f.title, progress, pageUrl = f.page) } } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
@@ -99,7 +99,7 @@ object Downloader {
             // stream falhou: tenta a página pelo servidor yt-dlp (antes o item falhava direto)
             Kind.HLS -> try { hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight) } catch (e: Exception) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
-                if (f.page.isNotBlank() && f.page != f.url && !Extract.isVideoUrl(f.page)) viaServer(f.page, dir, server, progress) else throw e
+                if (f.page.isNotBlank() && f.page != f.url && !Extract.isVideoUrl(f.page)) serverOr(e, f.page, dir, server, progress) else throw e
             }
             Kind.SERVER -> viaServer(f.url, dir, server, progress)
             Kind.MEGA -> Mega.download(f, dir, progress)
@@ -202,7 +202,15 @@ object Downloader {
             progress(resolved.bytes.size.toLong(), resolved.bytes.size.toLong())
             return out
         }
-        val first = photoOnce(url, referer, dir, title, progress)
+        // Foto recusada (403/401/página no lugar): tenta outras origens antes de desistir — a página, o site, o próprio servidor, nenhuma.
+        val refs = listOf(referer, pageUrl.ifBlank { null }, Net.originOf(pageUrl), Net.originOf(url), "").distinct()
+        var firstErr: Exception? = null
+        var first: File? = null
+        for (r in refs) {
+            try { first = photoOnce(url, r?.ifBlank { null } ?: if (r == "") url else referer, dir, title, progress); if (r != referer) Trail.here("foto: origem certa", "abriu com ${if (r.isNullOrBlank()) "nenhuma" else Trail.host(r)}"); break }
+            catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; if (firstErr == null) firstErr = e }
+        }
+        if (first == null) throw firstErr ?: DlException("Não consegui baixar a foto")
         val long = photoLongSide(first)
         if (long in 1 until 400) {
             val alts = (PhotoGrab.upgradeVariants(url) + listOfNotNull(PhotoGrab.fallback(url))).distinct().filter { it != url }
@@ -344,12 +352,37 @@ object Downloader {
         progress(got, len); return got
     }
 
+    /**
+     * Plano B pelo servidor, sem esconder o erro original: antes o "HTTP 403" do link direto sumia atrás do
+     * "Erro no download" do servidor, e o app não percebia que era só pegar um link novo.
+     */
+    private suspend fun serverOr(orig: Exception, page: String, dir: File, server: String, progress: (Long, Long) -> Unit): File =
+        try { viaServer(page, dir, server, progress) } catch (e2: Exception) {
+            if (e2 is kotlinx.coroutines.CancellationException) throw e2
+            throw DlException("${orig.message ?: orig.javaClass.simpleName} (servidor yt-dlp: ${e2.message?.take(80) ?: "falhou"})")
+        }
+
+    /** Servidor yt-dlp fora do ar (5xx/429/sem conexão): pula ele por 3 min em vez de esperar em cada vídeo. */
+    object ServerHealth {
+        @Volatile var downUntil = 0L
+        @Volatile var lastError = ""
+        fun isDown() = System.currentTimeMillis() < downUntil
+        fun markDown(why: String) { downUntil = System.currentTimeMillis() + 3 * 60_000L; lastError = why.take(80) }
+        fun markUp() { downUntil = 0L }
+        fun status(): String = if (isDown()) "fora do ar (${lastError}); volta a tentar em ${((downUntil - System.currentTimeMillis()) / 1000).coerceAtLeast(0)} s" else if (lastError.isNotBlank()) "ok agora (último erro: $lastError)" else "ok"
+    }
+
     /** Usa o backend baixar-video (yt-dlp + fallback HTML/KVS). */
     suspend fun viaServer(pageUrl: String, dir: File, server: String, progress: (Long, Long) -> Unit): File {
+        if (ServerHealth.isDown()) throw DlException("Servidor yt-dlp fora do ar agora (pulado: ${ServerHealth.lastError})")
         val base = server.trimEnd('/')
         val json = "application/json".toMediaType()
         val body = session(JSONObject().put("url", pageUrl).put("mode", "video"), pageUrl).toString().toRequestBody(json)
-        val r = Net.slow.newCall(Request.Builder().url("$base/api/download").post(body).build()).await()
+        val r = try { Net.slow.newCall(Request.Builder().url("$base/api/download").post(body).build()).await() } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            ServerHealth.markDown(e.javaClass.simpleName); throw e
+        }
+        if (r.code == 429 || r.code >= 500) ServerHealth.markDown("HTTP ${r.code}") else ServerHealth.markUp()
         r.use {
             val ct = r.header("Content-Type") ?: ""
             if (ct.contains("application/json")) {
@@ -536,9 +569,11 @@ object Downloader {
 
     /** Pergunta ao servidor se ele (yt-dlp) acha vídeo na página. Retorna o título ou null. */
     suspend fun probe(server: String, pageUrl: String, client: okhttp3.OkHttpClient = Net.slow): String? {
+        if (ServerHealth.isDown()) { lastProbeError = "Servidor yt-dlp fora do ar agora (${ServerHealth.lastError})"; return null }
         val body = session(JSONObject().put("url", pageUrl), pageUrl).toString().toRequestBody("application/json".toMediaType())
         return try {
             client.newCall(Request.Builder().url(server.trimEnd('/') + "/api/info").post(body).build()).await().use { r ->
+                if (r.code == 429 || r.code >= 500) ServerHealth.markDown("HTTP ${r.code}") else ServerHealth.markUp()
                 val raw = r.body?.string() ?: ""
                 val j = try { JSONObject(raw) } catch (_: Exception) {
                     if (!r.isSuccessful) lastProbeError = "Servidor yt-dlp: HTTP ${r.code}"
@@ -564,6 +599,7 @@ object Downloader {
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             lastProbeError = (e.message ?: "Falha ao falar com o servidor yt-dlp").take(200)
+            if (e is java.io.IOException) ServerHealth.markDown(e.javaClass.simpleName)
             null
         }
     }

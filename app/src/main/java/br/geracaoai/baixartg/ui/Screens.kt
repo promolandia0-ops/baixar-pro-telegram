@@ -1,6 +1,5 @@
 package br.geracaoai.baixartg.ui
 
-import kotlinx.coroutines.flow.conflate
 import android.Manifest
 import android.content.ClipboardManager
 import android.widget.Toast
@@ -382,7 +381,7 @@ fun QueueTab() {
     val query = rememberSaveable { mutableStateOf("") }
     // A fila muda várias vezes por segundo; com milhares de itens a tela só redesenha no máximo 1x por segundo.
     val pItems by androidx.compose.runtime.produceState(Pipeline.items.value) {
-        Pipeline.items.conflate().collect { value = it; kotlinx.coroutines.delay(if (it.size > 300) 1_000 else 250) }
+        Pipeline.items.collect { value = it; kotlinx.coroutines.delay(if (it.size > 300) 1_000 else 250) }
     }
     val pFilter = rememberSaveable { mutableStateOf(0) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -506,7 +505,7 @@ private fun FailDiagPanel(items: List<Pipeline.PItem>) {
                 Text(if (left > 0) "Testando agora… faltam $left" else "Pronto. Sem nomes nem links (sites viram códigos).", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
             }
             if (left > 0) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-            TextButton({ copy(ctx, todo.joinToString("\n\n") { reports[it.id] ?: "" }, "${todo.size} diagnóstico(s) copiado(s). Cole no chat.") }) { Text("Copiar todos") }
+            TextButton({ copy(ctx, br.geracaoai.baixartg.core.FailDoctor.envReport(ctx) + "\n" + br.geracaoai.baixartg.core.FailDoctor.groupReports(todo.map { reports[it.id] ?: "" }), "${todo.size} diagnóstico(s) copiado(s), falhas iguais agrupadas. Cole no chat.") }) { Text("Copiar todos") }
         }
         if (items.size > todo.size) Text("Mostrando as ${todo.size} falhas mais recentes de ${items.size}.", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
         todo.forEach { t ->

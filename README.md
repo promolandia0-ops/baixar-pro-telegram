@@ -4,6 +4,14 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.38
+- **Link vencido não perde tempo**: se o link do vídeo tem data de validade e já venceu, o app vai direto pegar um link novo na página (antes tentava o link velho, o servidor, a lista HLS...). Links vencidos capturados antes também ficam de fora.
+- **Erro real aparece**: o "HTTP 403" do link direto não some mais atrás do erro do servidor yt-dlp; assim o app percebe que é link vencido e busca outro.
+- **Servidor yt-dlp fora do ar é pulado por 3 min** (em vez de esperar por ele em cada vídeo da fila).
+- **Fotos recusadas**: tenta outras origens (página, site, servidor da foto) antes de desistir.
+- **Diagnóstico**: "Copiar todos" começa com o ambiente (Android, WebView, memória, armazenamento, rede, servidor yt-dlp, fila) e um resumo por tipo de falha; falhas iguais são agrupadas (antes vinham 20 textos idênticos). Fotos com falha agora são testadas (resposta, tipo, KB, pixels, versão maior).
+- Corrige o build da 1.9.36/1.9.37.
+
 ## 1.9.37
 - **Pede o vídeo como o player**: o app mandava sempre o cabeçalho "Origin" junto com a página de origem; o `<video>` do site não manda, e muitos servidores recusam (HTTP 403) quem manda. Agora vai sem Origin; só usa quando o teste mostra que o servidor exige.
 - **Diagnóstico de falhas mais completo (continua anônimo)**: forma do link (nomes dos campos, se tem validade e se já tinha vencido quando o app foi baixar, tempo entre achar e baixar), cabeçalhos que o player mandou (só os nomes), teste de cada origem sem e com Origin, texto da resposta de erro do servidor (sem links, tokens nem números longos) e o estado do player no navegador oculto (tocou? erro? blob/http? DRM?).

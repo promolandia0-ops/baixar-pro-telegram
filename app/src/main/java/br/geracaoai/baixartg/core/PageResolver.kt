@@ -20,7 +20,7 @@ object PageResolver {
      * "preview" fica de fora aqui (é a prévia curta); se não sobrar outra coisa, vira o último recurso depois do servidor.
      */
     fun best(list: List<Found>, allowPreview: Boolean = false): Found? {
-        val vids = list.map { MediaIdentity.withQuality(it) }.filter { isReal(it) && (allowPreview || !isPreview(it)) && !MediaPick.isAdUrl(it.url) && !PlayCapture.isDead(it.url) }
+        val vids = list.map { MediaIdentity.withQuality(it) }.filter { isReal(it) && (allowPreview || !isPreview(it)) && !MediaPick.isAdUrl(it.url) && !PlayCapture.isDead(it.url) && !LinkExpiry.isExpired(it.url, 5_000) }
         val pool = vids.filter { it.kind != Kind.SERVER }.ifEmpty { vids }
         val picked = MediaPick.pick(pool.map { MediaPick.Cand(it.url, pageUrl = it.page) })
         if (picked != null) return pool.filter { it.url == picked.url }.reduceOrNull { a, b -> if (MediaIdentity.isBetter(b, a)) b else a }

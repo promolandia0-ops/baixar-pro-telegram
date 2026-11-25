@@ -715,6 +715,13 @@ object Pipeline {
             if (canMse && !mseFirst) steps += "navegador" to mseStep
             val tu = listOf(f.url, t.page, f.page)
             Trail.add(tu, "download: começou", "link ${f.kind} em ${Trail.host(f.url)} • origem ${Trail.host(f.ref ?: f.page).ifBlank { "nenhuma" }} • ordem: ${steps.joinToString(" → ") { it.first }}")
+            // Link temporário que já venceu: não perde tempo com ele; vai direto pegar um link novo na página.
+            if (f.kind != Kind.PHOTO && f.kind != Kind.MSE && f.url != f.page && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && LinkExpiry.isExpired(f.url)) {
+                val ago = (System.currentTimeMillis() - (LinkExpiry.expiresAt(f.url) ?: 0L)) / 1000
+                Trail.add(tu, "download: link vencido antes de começar", (if (ago >= 0) "venceu há ${ago}s" else "vence em ${-ago}s") + "; pegando link novo na página")
+                PlayCapture.markDead(f.url)
+                steps.removeAll { it.first in setOf("direct", "hls", "play") }
+            }
             for ((name, fn) in steps) {
                 currentCoroutineContext().ensureActive()
                 tried = markTried(tried, name)

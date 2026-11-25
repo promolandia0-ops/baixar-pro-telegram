@@ -53,7 +53,7 @@ object PlayCapture {
 
     fun hits(page: String): List<Hit> {
         val list = byPage[key(page)] ?: return emptyList()
-        return synchronized(list) { list.filter { it.url.substringBefore('#') !in dead }.toList() }
+        return synchronized(list) { list.filter { it.url.substringBefore('#') !in dead && !LinkExpiry.isExpired(it.url, 5_000) }.toList() }
     }
 
     /** Links que o servidor recusou de vez (423/410/403/401: token vencido ou trancado). Não voltam a ser escolhidos. */
