@@ -486,6 +486,10 @@ object BrowserDetect {
         if ((f.kind == Kind.HLS || f.kind == Kind.DIRECT) && boosted.add(MediaIdentity.canonicalMedia(f.url))) scope.launch {
             try {
                 val nf = kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f, seenFor(f)) }
+                if (nf == null && f.kind == Kind.HLS && f.quality == 0) {
+                    // já é a lista principal: lê até que qualidade ela vai, para aparecer na lista (ex.: 1080p)
+                    QualityBoost.maxHeightOf(f)?.let { h -> withContext(Dispatchers.Main) { publish(f.copy(quality = h), ks) } }
+                }
                 if (nf != null && nf.url != f.url) {
                     boosted.add(MediaIdentity.canonicalMedia(nf.url))
                     Trail.add(listOf(f.url, nf.url, f.page), "qualidade máxima", "o player pediu ${if (f.quality > 0) "${f.quality}p" else "uma qualidade só"}; achei ${if (nf.kind == Kind.HLS && Extract.isHls(nf.url) && nf.quality > 0) "a lista principal (até ${nf.quality}p)" else "${nf.quality}p"} e troquei")
@@ -896,19 +900,26 @@ object BrowserDetect {
             if (curRaw.isEmpty()) { onMsg("Nada novo para enviar."); return@launch }
             val curKeys = curRaw.map { it.key }.toHashSet()
             list.removeAll { it.key in curKeys }   // somem da lista na hora
-            // Mescla variantes do mesmo vídeo dentro da mesma seleção em 1 só item
-            val cur = ArrayList<Det>(curRaw.size)
-            for (d in curRaw) {
-                val idx = if (d.state == 0) cur.indexOfFirst { o -> o.state == 0 && MediaIdentity.same(o.f, d.f) } else -1
-                if (idx >= 0) {
-                    val o = cur[idx]
-                    val bf = if (MediaIdentity.isBetter(d.f, o.f)) d.f else o.f
-                    cur[idx] = o.copy(f = bf, keys = (o.keys + d.keys).distinct())
-                } else cur += d
+            // Mescla variantes do mesmo vídeo dentro da mesma seleção em 1 só item. Fora da thread da tela e com
+            // índice de chaves: antes comparava cada vídeo com todos (lista grande = tela travada e o app fechava).
+            val cur = withContext(Dispatchers.Default) {
+                val out = ArrayList<Det>(curRaw.size)
+                val idx = HashMap<String, Int>()
+                for (d in curRaw) {
+                    val dk = if (d.state == 0) (if (d.f.kind == Kind.PHOTO) listOf("pc:" + MediaIdentity.canonicalMedia(d.f.url)) else MediaIdentity.keys(d.f)) else emptyList()
+                    val i = dk.firstNotNullOfOrNull { idx[it] }
+                    if (i != null) {
+                        val o = out[i]
+                        val bf = if (MediaIdentity.isBetter(d.f, o.f)) d.f else o.f
+                        out[i] = o.copy(f = bf, keys = (o.keys + d.keys).distinct())
+                        dk.forEach { idx.putIfAbsent(it, i) }
+                    } else { out += d; dk.forEach { idx.putIfAbsent(it, out.size - 1) } }
+                }
+                out
             }
             // os que ainda carregavam param aqui: a fila abre cada página sozinha, sem esperar os outros
             cur.filter { it.state != 0 }.forEach { d -> jobs.remove(normPage(d.f.page))?.cancel() }
-            dispatch(cur)
+            withContext(Dispatchers.Default) { dispatch(cur) }
             onMsg("${cur.size} vídeo(s) na fila de envio. Podem ir até 10 ao mesmo tempo (veja na Fila).")
         }
     }
@@ -1241,7 +1252,7 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onLoadAl
                     items(visible, key = { it.key }) { d ->
                         ListItem(
                             headlineContent = { Text(d.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
-                            supportingContent = { Text((when (d.state) { 1 -> "carregando…"; 2 -> "não achou vídeo"; else -> d.f.typeLabel + " • " + (when (d.f.kind) { Kind.SERVER -> "via servidor"; Kind.MSE -> "pelo navegador"; else -> "pronto" }) }) + (if (d.badge.isNotBlank()) " • " + d.badge else "") + if (d.sent) " • Já enviado" else "") },
+                            supportingContent = { Text((when (d.state) { 1 -> "carregando…"; 2 -> "não achou vídeo"; else -> d.f.typeLabel + (if (d.f.quality > 0) " • ${MediaIdentity.qualityLabel(d.f.quality)}" else if (d.f.kind == Kind.HLS) " • maior qualidade" else "") + " • " + (when (d.f.kind) { Kind.SERVER -> "via servidor"; Kind.MSE -> "pelo navegador"; else -> "pronto" }) }) + (if (d.badge.isNotBlank()) " • " + d.badge else "") + if (d.sent) " • Já enviado" else "") },
                             leadingContent = { Checkbox(d.sel && !d.sent && !d.badge.startsWith("REPETIDO"), { v -> BrowserDetect.toggle(d.key, v) }, enabled = !d.sent && !d.badge.startsWith("REPETIDO")) },
                             trailingContent = {
                                 val rep = d.badge.startsWith("REPETIDO")

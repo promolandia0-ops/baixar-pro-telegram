@@ -160,6 +160,9 @@ object Pipeline {
             val curItems = items.value.toMutableList()
             val have = curItems.filter { it.st != PS.FAIL && it.st != PS.ANALYZE && it.st != PS.CANCEL }.map { uniqueKey(it.page, it.title, it.keys, it.f) }.toHashSet()
             var added = 0
+            // índice das chaves de mídia dos itens ativos (antes: cada novo era comparado com todos da fila na thread da tela)
+            val mIdx = HashMap<String, Int>()
+            curItems.forEachIndexed { i, ex -> if (!isFinal(ex.st) && !ex.photo && ex.f != null) MediaIdentity.keys(ex.f).forEach { k -> mIdx.putIfAbsent(k, i) } }
             for (it in list) {
                 val uk = uniqueKey(it.page, it.title, it.keys, it.f, it.uniq)
                 if (it.force) {
@@ -174,9 +177,8 @@ object Pipeline {
                 if (!have.add(uk)) continue
                 val extraKey = it.uniq.trim().takeIf { k -> k.isNotBlank() }?.let { k -> "id:$k" }
                 val newKeys = expandKeys(it.page, it.keys + listOfNotNull(extraKey), it.f)
-                val sameIdx = if (it.f != null && !it.photo) curItems.indexOfFirst { ex ->
-                    !isFinal(ex.st) && !ex.photo && ex.f != null && MediaIdentity.same(ex.f, it.f)
-                } else -1
+                val itKeys = if (it.f != null && !it.photo) MediaIdentity.keys(it.f) else emptyList()
+                val sameIdx = itKeys.firstNotNullOfOrNull { k -> mIdx[k] }?.takeIf { i -> i < curItems.size && !isFinal(curItems[i].st) } ?: -1
                 if (sameIdx >= 0) {
                     val ex = curItems[sameIdx]
                     val betterF = if (MediaIdentity.isBetter(it.f!!, ex.f!!)) it.f else ex.f
@@ -184,6 +186,7 @@ object Pipeline {
                     curItems[sameIdx] = ex.copy(f = betterF, title = betterTitle, keys = (ex.keys + newKeys).distinct())
                 } else {
                     curItems += PItem(nextId++, it.page, it.title, it.extra, newKeys, it.f, if (it.f != null) PS.READY else PS.WAIT, photo = it.photo, force = it.force)
+                    itKeys.forEach { k -> mIdx.putIfAbsent(k, curItems.size - 1) }
                     added++
                 }
             }

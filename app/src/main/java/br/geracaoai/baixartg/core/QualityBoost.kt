@@ -48,6 +48,15 @@ object QualityBoost {
         return null
     }
 
+    /** Até que qualidade vai uma lista principal HLS (null se não deu para ler). */
+    suspend fun maxHeightOf(f: Found): Int? {
+        val (code, b) = fetch(f.url, f.ref ?: f.page.ifBlank { null }) ?: return null
+        if (code !in 200..299) return null
+        val t = String(b, Charsets.UTF_8)
+        if (!t.contains("#EXT-X-STREAM-INF")) return null
+        return DetScan.hlsInfo(t).maxHeight.takeIf { it > 0 }
+    }
+
     /** Versão maior do mesmo vídeo (HLS principal ou arquivo em resolução maior), conferida. */
     suspend fun better(f: Found, seen: List<String> = emptyList()): Found? {
         val ref = f.ref ?: f.page.ifBlank { null }

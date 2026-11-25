@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.32
+- **Corrigido: o app fechava ao tocar em Baixar.** A mescla dos vídeos escolhidos e a entrada na fila comparavam cada vídeo com todos os outros na thread da tela; com lista/fila grande a tela travava (ANR) e o Android fechava. Agora roda fora da tela e com índice de chaves (instantâneo).
+- **Menos memória**: as respostas de rede guardadas para o detetive ficaram bem menores (antes podiam passar de 100 MB e o Android fechava o app).
+- **Qualidade aparece na lista**: cada vídeo mostra a resolução (ex.: 1080p); a lista principal HLS é lida para mostrar até onde vai. No download sempre vai a maior qualidade.
+
 ## 1.9.31
 - **Player na maior qualidade sozinho**: quando aparece um vídeo HLS (ou um link abaixo de 720p), o app manda os players da página (hls.js, Shaka, JW Player, Video.js, Plyr) irem para a maior qualidade — é como você trocar para 1080 na mão; o 1080 que o player pede entra na lista.
 - **Lista principal pega de dentro do player**: o agente segura o hls.js/Shaka na hora em que carregam e avisa o endereço da lista principal (com todas as qualidades).

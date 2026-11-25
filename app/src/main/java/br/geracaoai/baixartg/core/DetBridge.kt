@@ -60,8 +60,9 @@ object DetBridge {
             when (o.optString("t")) {
                 "net" -> {
                     synchronized(net) {
-                        net.addLast(NetHit(f, o.optString("u"), o.optString("b"), System.currentTimeMillis()))
-                        while (net.size > 200) net.removeFirst()
+                        // guarda pouco (antes: até 200 × 400 KB e o Android fechava o app por falta de memória)
+                        net.addLast(NetHit(f, o.optString("u"), o.optString("b").take(60_000), System.currentTimeMillis()))
+                        while (net.size > 40) net.removeFirst()
                     }
                     try { onNet?.invoke(o.optString("u"), f, o.optString("b")) } catch (_: Throwable) {}
                 }
