@@ -448,7 +448,10 @@ object Extract {
             val u = m.value
             if (isPhotoUrl(u)) addPhoto(u) else addVideo(u)
         }
-        KVS.findAll(raw).forEach { addVideo(it.groupValues[1].replace(RX_CRAWLER_13, "")) }
+        // KVS embaralhado ("function/0/…") é desembaralhado pelo TubePatterns com o license_code; aqui só os links limpos
+        KVS.findAll(raw).forEach { val v = it.groupValues[1]; if (!RX_CRAWLER_13.containsMatchIn(v)) addVideo(v) }
+        // Padrões de players de sites de vídeo: KVS, link montado com pedaços, setVideoUrl/HLS, listas de qualidades
+        try { TubePatterns.extract(pageUrl, html).forEach { addVideo(it, ogTitle) } } catch (_: Exception) {}
         REL_MEDIA.findAll(raw).forEach { m ->
             val u = m.groupValues[1]
             if (isPhotoUrl(u)) addPhoto(u) else addVideo(u)

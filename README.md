@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.43
+- **Sites KVS** (Kernel Video Sharing, o sistema de milhares de sites de vídeo): o link `function/0/…` agora é desembaralhado com o `license_code` da página, como o player faz. Antes o app só cortava o prefixo e ficava com o link embaralhado (403/404).
+- **Padrões de players**: link montado juntando pedaços de texto em variáveis (com comentários no meio), chamadas `setVideoUrlHigh/Low/HLS`, `.src(...)`, `loadSource(...)`, `file:`/`videoUrl:`, listas de qualidades em JSON (`"720p":[…]`, `mediaDefinitions`). Testado com páginas de exemplo antes de entrar.
+- **Raio-X**: mostra se a página usa KVS embaralhado e quantos links os padrões acharam.
+
 ## 1.9.42
 - **Link escondido em base64**: o leitor do app decodifica os trechos em base64 do código da página (o que o site faz com `atob()`) e procura o vídeo ali (link direto, `contentUrl`, caminhos). Sites que só montam o JSON-LD/player depois do JavaScript passam a ser achados sem navegador.
 - **Fila**: o navegador oculto lê a página montada (JSON-LD `contentUrl`, `<source>`, configs) com o mesmo leitor do app e baixa o link direto, sem depender de o vídeo tocar.

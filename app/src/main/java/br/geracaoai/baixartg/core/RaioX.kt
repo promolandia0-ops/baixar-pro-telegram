@@ -363,6 +363,10 @@ return JSON.stringify(o);
             val v = pr?.videos.orEmpty()
             sb.appendLine("HTML sem navegador: ${html.length / 1000} KB • vídeos achados sem navegador: ${v.size}" + (if (v.isNotEmpty()) " (" + v.groupingBy { it.kind.name }.eachCount().entries.joinToString(", ") { "${it.key} ${it.value}" } + ")" else ""))
             if (v.isEmpty() && main != null) sb.appendLine("  → o link só aparece depois do play/JS (o app precisa do navegador para achar)")
+            val tp = try { TubePatterns.extract(page, html) } catch (e: Exception) { emptyList() }
+            val kvsScr = Regex("""video_(?:alt_)?url\d*\s*[:=]\s*['"]function/\d+/""").containsMatchIn(html)
+            val kvsLic = Regex("""license_code\s*[:=]""").containsMatchIn(html)
+            sb.appendLine("padrões de player no HTML: KVS ${if (kvsScr) "embaralhado" + (if (kvsLic) " (com license_code: o app desembaralha)" else " (SEM license_code)") else if (html.contains("video_url")) "limpo" else "não"} • links pelos padrões de player: ${tp.size}")
         }
         sb.appendLine("servidor yt-dlp: ${Downloader.ServerHealth.status()}")
         if (!Downloader.ServerHealth.isDown()) {
