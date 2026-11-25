@@ -466,7 +466,57 @@ fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<In
         val a = ArrayList<Pipeline.PItem>(l.size); l.filterTo(a) { pipeGroup(it.st) == 1 }; l.filterTo(a) { pipeGroup(it.st) != 1 }; a
     } else if (f == 5) l.filter { !isPhotoItem(it) } else if (f == 6) l.filter { isPhotoItem(it) } else l.filter { pipeGroup(it.st) == f }
     if (shown.isEmpty()) item(key = "pipe-empty") { Text("Nada aqui.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-    items(shown, key = { "pq" + it.id }, contentType = { "pipe" }) { t -> PipeRow(t) }
+    // Falhas: o diagnóstico de cada uma aparece na tela, pronto para copiar (sem nomes nem links)
+    if (f == 4 && shown.isNotEmpty()) item(key = "fail-diag") { FailDiagPanel(shown) }
+    else items(shown, key = { "pq" + it.id }, contentType = { "pipe" }) { t -> PipeRow(t) }
+}
+
+@Composable
+private fun FailDiagPanel(items: List<Pipeline.PItem>) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val todo = remember(items.map { it.id }) { items.take(20) }
+    val reports = remember(todo.map { it.id }) { mutableStateMapOf<Long, String>() }
+    var left by remember(todo.map { it.id }) { mutableStateOf(todo.size) }
+    LaunchedEffect(todo.map { it.id }) {
+        val gate = kotlinx.coroutines.sync.Semaphore(3)
+        kotlinx.coroutines.coroutineScope {
+            todo.forEachIndexed { i, t ->
+                launch {
+                    gate.acquire()
+                    try {
+                        reports[t.id] = "analisando (testando o link agora)…"
+                        reports[t.id] = try { FailDoctor.diagnose(t, i + 1) } catch (e: Exception) {
+                            if (e is kotlinx.coroutines.CancellationException) throw e
+                            "— falha ${i + 1} —\nnão consegui analisar: ${e.javaClass.simpleName}"
+                        }
+                    } finally { gate.release(); left-- }
+                }
+            }
+        }
+    }
+    val cs = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Diagnóstico de cada falha", style = MaterialTheme.typography.titleSmall)
+                Text(if (left > 0) "Testando agora… faltam $left" else "Pronto. Sem nomes nem links (sites viram códigos).", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+            if (left > 0) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            TextButton({ copy(ctx, todo.joinToString("\n\n") { reports[it.id] ?: "" }, "${todo.size} diagnóstico(s) copiado(s). Cole no chat.") }) { Text("Copiar todos") }
+        }
+        if (items.size > todo.size) Text("Mostrando as ${todo.size} falhas mais recentes de ${items.size}.", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+        todo.forEach { t ->
+            Surface(color = cs.surfaceContainerLow, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(reports[t.id] ?: "esperando para analisar…", style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    Row {
+                        TextButton({ copy(ctx, reports[t.id] ?: "", "Diagnóstico copiado. Cole no chat.") }) { Text("Copiar") }
+                        TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+                    }
+                }
+            }
+        }
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

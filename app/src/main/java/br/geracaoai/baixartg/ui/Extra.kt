@@ -151,7 +151,7 @@ object BrowserRuntime {
                         BrowserDiag.media("sw", u)
                         if (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u)) MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-sw")
                         if (Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u)) && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
-                            BrowserDetect.intercepted(u, pg, "", src = "pedido do service worker do site")
+                            BrowserDetect.intercepted(u, pg, "", src = "pedido do service worker do site", ref = hdrs["Referer"])
                             br.geracaoai.baixartg.core.PlayCapture.record(u, pg, hdrs["Referer"] ?: pg)
                         }
                     } catch (_: Throwable) {}
@@ -605,7 +605,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     }
                     if (u.startsWith("http") && Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u))) {
                         if (!br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
-                            BrowserDetect.intercepted(u, pg, "", src = "o player pediu o vídeo pela rede do navegador (origem ${br.geracaoai.baixartg.core.Trail.host(hdrs["Referer"] ?: pg)})")
+                            BrowserDetect.intercepted(u, pg, "", src = "o player pediu o vídeo pela rede do navegador (origem ${br.geracaoai.baixartg.core.Trail.host(hdrs["Referer"] ?: pg)})", ref = hdrs["Referer"])
                             val ref = hdrs["Referer"] ?: pg
                             br.geracaoai.baixartg.core.PlayCapture.record(u, pg, ref)
                         }

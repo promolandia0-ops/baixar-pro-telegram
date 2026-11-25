@@ -767,7 +767,7 @@ object BrowserDetect {
     fun setAll(v: Boolean) { for (i in list.indices) { val d = list[i]; val nv = v && !d.sent; if (d.sel != nv) list[i] = d.copy(sel = nv) } }
 
     /** Mídia interceptada pelo navegador (pedido de rede de vídeo). */
-    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null, force: Boolean = false, src: String = "navegador") {
+    fun intercepted(url: String, page: String, title: String, kindHint: Kind? = null, force: Boolean = false, src: String = "navegador", ref: String? = null) {
         if (page.isNotBlank()) browsing = page
         if (mode.intValue == 1) return   // "Só fotos": não procura vídeo nenhum
         if (Extract.isHls(url)) seenHls.getOrPut(normPage(page)) { java.util.Collections.synchronizedSet(LinkedHashSet()) }.let { s -> if (s.size < 80) s += url }
@@ -780,7 +780,8 @@ object BrowserDetect {
         val extra = listOfNotNull(info?.first, info?.second, TitleFix.clean(title)).filter { it.isNotBlank() }.distinct().joinToString(" ")
         // Na página de UM vídeo (watch/embed), tudo que o player pede vira um vídeo só; na listagem, agrupa por identidade da mídia
         val xk = if (Extract.looksLikeVideoPage(page)) listOf("ip:" + normPage(page)) else emptyList()
-        publish(Found(url, page, t, kind, ref = page, extra = extra), xk)
+        // origem VERDADEIRA do pedido (muitas vezes o player, não a página): sem ela o servidor do vídeo recusa (403)
+        publish(Found(url, page, t, kind, ref = ref?.takeIf { it.startsWith("http") } ?: page, extra = extra), xk)
     }
 
     /** Detetive: vídeo já conferido (baixou o começo e é vídeo de verdade), com o Referer que funcionou. Só thread principal. */

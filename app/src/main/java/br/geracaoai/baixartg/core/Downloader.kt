@@ -46,8 +46,37 @@ object Downloader {
         if (n <= 0) "unknown" else Extract.sniffMagic(if (n == buf.size) buf else buf.copyOf(n))
     }
 
+    /**
+     * Origem (Referer) que o servidor do vídeo aceita: testa a do pedido original, a que o player usou ao tocar, a página,
+     * o endereço do site, a do próprio servidor e nenhuma; fica a primeira que devolve vídeo (não página/erro).
+     */
+    suspend fun pickReferer(f: Found): String? {
+        if (f.kind != Kind.HLS && f.kind != Kind.DIRECT) return null
+        val play = try { PlayCapture.bestFor(f)?.takeIf { Trail.key(it.url) == Trail.key(f.url) }?.referer } catch (_: Exception) { null }
+        val pageO = Net.originOf(f.page); val urlO = Net.originOf(f.url)
+        val cands = listOf(f.ref, play, f.page.ifBlank { null }, pageO, urlO, "").distinct()
+        for (r in cands) {
+            val res = kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                try {
+                    val b = Request.Builder().url(f.url).header("Accept", "*/*").header("Range", "bytes=0-4095")
+                    if (!r.isNullOrBlank()) { b.header("Referer", r); Net.originOf(r)?.let { b.header("Origin", it.trimEnd('/')) } }
+                    Net.fast.newCall(b.build()).await().use { resp ->
+                        val head = resp.body?.byteStream()?.use { s -> val buf = ByteArray(4096); val n = s.read(buf); if (n > 0) buf.copyOf(n) else ByteArray(0) } ?: ByteArray(0)
+                        resp.code to DetScan.sniff(head, resp.header("Content-Type"))
+                    }
+                } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+            } ?: continue
+            if (res.first in 200..299 && (DetScan.isVideoSniff(res.second) || res.second == "text" && f.kind == Kind.HLS)) {
+                if (r != f.ref) Trail.here("origem certa", "o vídeo só abriu com a origem: ${when (r) { "" -> "nenhuma"; f.page -> "a página"; pageO -> "o endereço do site"; urlO -> "o próprio servidor do vídeo"; play -> "a do player (" + Trail.host(r) + ")"; else -> Trail.host(r) }}")
+                return r
+            }
+        }
+        return null
+    }
+
     suspend fun download(f: Found, dir: File, server: String, maxHeight: Int = 0, fast: Boolean = false, progress: (Long, Long) -> Unit): File {
-        val ref = f.ref ?: f.page
+        val picked = try { pickReferer(f) } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+        val ref = picked?.ifBlank { null } ?: f.ref ?: f.page
         if (f.kind == Kind.MEGA) return Mega.download(f, dir, progress)
         val raw = if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
             Kind.DIRECT -> try { retry { if (fast) directFast(f.url, ref, dir, f.title, progress) else direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {

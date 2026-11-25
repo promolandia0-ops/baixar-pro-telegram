@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.33
+- **Download com a origem certa**: o app agora guarda a origem VERDADEIRA de cada pedido do player (muitas vezes o próprio player, não a página) e, antes de baixar, testa as origens — a do pedido, a que o player usou ao tocar, a página, o site, o servidor do vídeo, nenhuma — e usa a primeira que devolve vídeo. Antes ia sempre a página e muitos servidores recusavam (HTTP 403).
+- **Falhas com diagnóstico**: na Fila → Falhas, cada falha mostra na tela o diagnóstico completo, pronto para copiar (um por um ou todos): rastro de cada tentativa, teste feito na hora com cada origem, lista HLS, lista da qualidade, chave AES, primeiro pedaço, servidor yt-dlp e a CAUSA PROVÁVEL. Sem nome de vídeo, sem link e sem nome de site (viram códigos).
+
 ## 1.9.32
 - **Corrigido: o app fechava ao tocar em Baixar.** A mescla dos vídeos escolhidos e a entrada na fila comparavam cada vídeo com todos os outros na thread da tela; com lista/fila grande a tela travava (ANR) e o Android fechava. Agora roda fora da tela e com índice de chaves (instantâneo).
 - **Menos memória**: as respostas de rede guardadas para o detetive ficaram bem menores (antes podiam passar de 100 MB e o Android fechava o app).

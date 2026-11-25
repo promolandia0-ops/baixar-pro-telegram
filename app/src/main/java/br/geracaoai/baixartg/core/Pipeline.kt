@@ -708,7 +708,7 @@ object Pipeline {
                 steps += "server" to { Downloader.viaServer(f.page, dir, Prefs.server, prog()) }
             if (f.kind != Kind.PHOTO && f.kind != Kind.MSE && (f.kind == Kind.DIRECT || f.url.contains(".m3u8", true) || f.url.contains(".mpd", true) || f.url.contains("video.twimg.com", true)))
                 steps += "hls" to {
-                    if (f.url.contains(".m3u8", true) || f.kind == Kind.HLS) Downloader.hls(f.url, f.ref ?: f.page, dir, t.title, prog(), maxHeight = 0)
+                    if (f.url.contains(".m3u8", true) || f.kind == Kind.HLS) Downloader.hls(f.url, Downloader.pickReferer(f.copy(kind = Kind.HLS))?.ifBlank { null } ?: f.ref ?: f.page, dir, t.title, prog(), maxHeight = 0)
                     else Downloader.download(f.copy(kind = Kind.HLS), dir, Prefs.server, 0, fast = true, prog())
                 }
             if (canMse && !mseFirst) steps += "navegador" to mseStep
