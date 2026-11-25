@@ -21,6 +21,8 @@ object Prefs {
     var photos: Boolean get() = mediaMode != 0; set(v) { mediaMode = if (v) 2 else 0 }
     /** Enviar legenda (título/link) junto com a mídia. Padrão: desligado (só a mídia). */
     var visualDedupe: Boolean get() = p.getBoolean("visual_dedupe2", false); set(v) = p.edit().putBoolean("visual_dedupe2", v).apply()
+    /** Só envia vídeo com pelo menos esta resolução (lado menor). 0 = qualquer. Padrão: 720p. */
+    var minHeight: Int get() = p.getInt("min_height", 720); set(v) = p.edit().putInt("min_height", v).apply()
     var replaceHigher: Boolean get() = p.getBoolean("replace_higher", false); set(v) = p.edit().putBoolean("replace_higher", v).apply()
     var sendCaption: Boolean get() = p.getBoolean("send_caption", false); set(v) = p.edit().putBoolean("send_caption", v).apply()
     var pipelineMigrated: Boolean get() = p.getBoolean("pipe_migrated", false); set(v) = p.edit().putBoolean("pipe_migrated", v).apply()

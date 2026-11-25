@@ -769,6 +769,8 @@ fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
                 Text("Os vídeos são enviados pela sua conta para as Mensagens Salvas (sem limite de 50 MB do bot). O token só é verificado no teste.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 SwitchRow("Envio automático", "Depois de encontrar, já baixa e envia (Início e Varrer tudo).", auto) { auto = it }
                 var visOn by remember { mutableStateOf(Prefs.visualDedupe) }
+                var hdOnly by remember { mutableStateOf(Prefs.minHeight > 0) }
+                SwitchRow("Só vídeos de 720p ou mais", "Vídeo abaixo de 720p não é enviado (confere a resolução real do arquivo). O app sempre procura a maior qualidade, mesmo com o player em 360p.", hdOnly) { hdOnly = it; Prefs.minHeight = if (it) 720 else 0 }
                 SwitchRow("Detectar repetidos pela imagem", "Antes de enviar, compara vários momentos do vídeo com os já enviados. Bem rigoroso: na dúvida, envia. Os pulados ficam na Fila com \"Enviar mesmo assim\".", visOn) { visOn = it; Prefs.visualDedupe = it }
                 var hiOn by remember { mutableStateOf(Prefs.replaceHigher) }
                 SwitchRow("Substituir por qualidade maior", "Se o repetido tiver resolução maior que o já enviado, envia mesmo assim (o antigo continua lá).", hiOn) { hiOn = it; Prefs.replaceHigher = it }

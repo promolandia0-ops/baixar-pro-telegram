@@ -338,7 +338,8 @@ object BrowserDetect {
         var n = 0
         for (d in bring) {
             if (list.none { it.key == d.key }) {
-                list += d.copy(sent = false, sel = true, force = true, badge = d.badge.ifBlank { "escondido antes" })
+                val rep = d.badge.startsWith("REPETIDO") || d.badge.startsWith("na fila") || d.badge.startsWith("qualidade baixa")
+                list += d.copy(sent = false, sel = !rep, force = false, badge = d.badge.ifBlank { "escondido antes" })
                 Trail.add(listOf(d.f.url, d.f.page), "você tocou em Mostrar escondidos", d.badge)
                 n++
             }
@@ -404,6 +405,27 @@ object BrowserDetect {
         val f = MediaIdentity.withQuality(f0)
         if (!isRealVideo(f) || TitleFix.isSubtitleUrl(f.url)) return
         val ks = (extraKeys + dedupeKeys(f)).distinct()
+        val minH = Prefs.minHeight
+        if (minH > 0 && f.quality in 1 until minH && (f.kind == Kind.HLS || f.kind == Kind.DIRECT)) {
+            val ck = MediaIdentity.canonicalMedia(f.url)
+            if (!boosted.add(ck)) return
+            scope.launch {
+                val nf = try { kotlinx.coroutines.withTimeoutOrNull(25_000) { QualityBoost.better(f) } } catch (e: Exception) { if (e is CancellationException) throw e; null }
+                withContext(Dispatchers.Main) {
+                    if (nf != null && nf.url != f.url && (nf.quality == 0 || nf.quality >= minH)) {
+                        boosted.add(MediaIdentity.canonicalMedia(nf.url))
+                        Trail.add(listOf(f.url, nf.url, f.page), "qualidade máxima", "o player pediu ${f.quality}p; achei ${if (nf.quality > 0) "${nf.quality}p" else "a lista principal"} e troquei")
+                        publish(nf.copy(title = f.title, extra = f.extra), ks)
+                    } else {
+                        val k = "low:$ck"
+                        val why = "qualidade baixa: ${if (nf != null && nf.quality > 0) nf.quality else f.quality}p (abaixo de ${minH}p)"
+                        Trail.addOnce(listOf(f.url, f.page), "escondido", why)
+                        if (suppressed.none { it.key == k }) { suppressed += Det(k, f, keys = ks, badge = why); alreadyHere.intValue = suppressed.size }
+                    }
+                }
+            }
+            return
+        }
         // qualidade máxima: o player começa baixo (360p); procura a lista principal / versão 1080 e troca este item por ela
         if ((f.kind == Kind.HLS || f.kind == Kind.DIRECT) && boosted.add(MediaIdentity.canonicalMedia(f.url))) scope.launch {
             try {
@@ -598,7 +620,8 @@ object BrowserDetect {
         val w = Pipeline.hideWhy(f, hk)
         if (w.canonical || w.keys.isEmpty() || !w.keys.all { k -> PAGE_KEYS.any { k.startsWith(it) } }) return false
         val others = w.items.mapNotNull { it.f?.url }.filter { it.startsWith("http") && Sent.norm(it) != Sent.norm(f.page) }
-        if (others.isEmpty()) return false
+        // só a página bateu e não há como comparar o vídeo: mostra (os repetidos de verdade são barrados antes de enviar)
+        if (others.isEmpty()) return true
         val mine = mediaIds(f.url)
         return others.none { o -> DetLearn.sameVideo(o, f.url) || mediaIds(o).intersect(mine).isNotEmpty() }
     }
@@ -624,7 +647,8 @@ object BrowserDetect {
             else -> k.substringBefore(':')
         } }.distinct() + (if (w.canonical) listOf("mesmo vídeo em outra qualidade/link") else emptyList())
         val who = w.items.firstOrNull()?.let { " de «" + it.title.take(50) + "» (" + (if (it.st == Pipeline.PS.DONE) "enviado" else "na fila") + ")" }.orEmpty()
-        return (if (active) "na fila agora" else "já enviado") + ": " + kinds.ifEmpty { listOf("marca de já enviado") }.joinToString(" + ") + who
+        val same = kinds.any { it.startsWith("mesmo link") || it.startsWith("mesmo nome") || it.startsWith("mesmo vídeo") }
+        return (if (active) "na fila agora" else if (same) "REPETIDO (já enviado)" else "já enviado?") + ": " + kinds.ifEmpty { listOf("marca de já enviado") }.joinToString(" + ") + who
     }
     /** Só esconde se está ATIVO na fila agora ou se o envio foi confirmado. FAIL/SKIP/CANCEL e queued_keys sozinhos não escondem. */
     private fun blocked(f: Found, ks: List<String>): Boolean = BrowserHide.shouldHide(hideReasonOf(f, ks))
@@ -1135,7 +1159,10 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onLoadAl
                 }
                 val hiddenN by BrowserDetect.alreadyHere
                 if (hiddenN > 0) OutlinedButton({ BrowserDetect.showHidden() }, Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                    Text("Mostrar os $hiddenN escondidos")
+                    val hs = BrowserDetect.suppressed.toList()
+                    val rep = hs.count { it.badge.startsWith("REPETIDO") }
+                    val low = hs.count { it.badge.startsWith("qualidade baixa") }
+                    Text("Mostrar os $hiddenN escondidos" + listOfNotNull(if (rep > 0) "$rep repetido(s)" else null, if (low > 0) "$low abaixo de ${Prefs.minHeight}p" else null).joinToString(", ").let { if (it.isNotBlank()) " ($it)" else "" }, maxLines = 2)
                 }
                 Button({
                     BrowserDetect.sendAsync(checked, onSent)
@@ -1145,9 +1172,10 @@ fun BrowserVideosSheet(onDismiss: () -> Unit, onSent: (String) -> Unit, onLoadAl
                         ListItem(
                             headlineContent = { Text(d.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis) },
                             supportingContent = { Text((when (d.state) { 1 -> "carregando…"; 2 -> "não achou vídeo"; else -> d.f.typeLabel + " • " + (when (d.f.kind) { Kind.SERVER -> "via servidor"; Kind.MSE -> "pelo navegador"; else -> "pronto" }) }) + (if (d.badge.isNotBlank()) " • " + d.badge else "") + if (d.sent) " • Já enviado" else "") },
-                            leadingContent = { Checkbox(d.sel && !d.sent, { v -> BrowserDetect.toggle(d.key, v) }, enabled = !d.sent) },
+                            leadingContent = { Checkbox(d.sel && !d.sent && !d.badge.startsWith("REPETIDO"), { v -> BrowserDetect.toggle(d.key, v) }, enabled = !d.sent && !d.badge.startsWith("REPETIDO")) },
                             trailingContent = {
-                                TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent) { Text(if (d.force || d.badge.isNotBlank()) "Baixar mesmo assim" else "Baixar") }
+                                val rep = d.badge.startsWith("REPETIDO")
+                                TextButton({ BrowserDetect.sendAsync(listOf(d), onSent) }, enabled = !d.sent && !rep) { Text(if (rep) "Repetido" else if (d.force || d.badge.isNotBlank()) "Baixar mesmo assim" else "Baixar") }
                             })
                     }
                 }

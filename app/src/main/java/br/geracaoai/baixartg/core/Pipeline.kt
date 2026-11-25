@@ -254,7 +254,7 @@ object Pipeline {
         History.clear()
         if (alsoSentMemory) {
             Sent.clear()
-            try { VisualHash.clear() } catch (_: Throwable) {}
+            try { VisualHash.clear() } catch (_: Throwable) {}; try { VideoQuality.clear() } catch (_: Throwable) {}
             try { Prefs.synced = false } catch (_: Throwable) {}
         }
         paused.value = false; saveAsync(); notifyCleared()
@@ -431,7 +431,7 @@ object Pipeline {
         userCancel.clear(); beat.clear(); itemJobs.clear()
         paused.value = false; running.value = false
         testMarkSent = false; testResolve = null; testDownload = null; testUpload = null
-        try { VisualHash.clear() } catch (_: Throwable) {}
+        try { VisualHash.clear() } catch (_: Throwable) {}; try { VideoQuality.clear() } catch (_: Throwable) {}
     }
 
     @Synchronized fun start() {
@@ -779,6 +779,21 @@ object Pipeline {
                 markSkipped(t, "mesmo arquivo já enviado antes (pulado)", ks)
                 return
             }
+            // Resolução real e repetido pela duração (lê só as informações do arquivo; funciona com o navegador aberto)
+            val meta = if (f.kind != Kind.PHOTO) VideoQuality.read(file) else null
+            val siteHost = Extract.host(t.page.ifBlank { f.page })
+            if (meta != null) {
+                Trail.add(listOf(f.url, t.page, f.page), "arquivo conferido", "${if (meta.w > 0) "${meta.w}x${meta.h}" else "resolução ?"} • ${meta.durMs / 1000}s")
+                val min = Prefs.minHeight
+                if (min > 0 && meta.short in 1 until min) {
+                    markSkipped(t, "qualidade ${meta.short}p (abaixo de ${min}p) — pulado", ks)
+                    return
+                }
+                if (!t.force) VideoQuality.repeatOf(siteHost, meta.durMs)?.let { prev ->
+                    markSkipped(t, "repetido: mesmo vídeo que «${prev.take(80)}» (mesma duração, mesmo site)", ks)
+                    return
+                }
+            }
             // Repetido pela imagem (muito rigoroso; na dúvida envia). Nunca apaga nada: só pula e deixa "Enviar mesmo assim".
             var vfp: VisualHash.Fp? = null
             // Leve e nunca trava: 1 por vez no app todo, 20 s no máximo; se ocupado, demorar ou o navegador estiver
@@ -823,6 +838,7 @@ object Pipeline {
                 stalled(t, ks, "envio"); return
             } finally { itemJobs.remove(t.id); beat.remove(t.id) }
             if (isPhoto(t)) Sent.markPhotoSent(sentKeys(t) + listOfNotNull(fk)) else Sent.markSent(f, sentKeys(t) + listOfNotNull(fk)); History.add(f, size)
+            if (meta != null) VideoQuality.markSent(siteHost, meta.durMs, t.title)
             Trail.add(listOf(f.url, t.page, f.page), "Telegram: enviado ✓", "marcas gravadas como já enviado: " + sentKeys(t).plus(Sent.keysOf(f)).map { it.substringBefore(':') }.distinct().joinToString())
             synchronized(claimed) { claimed.removeAll(claimKeys(t)) }
             if (vfp != null) VisualHash.markSent(t.id, vfp)
