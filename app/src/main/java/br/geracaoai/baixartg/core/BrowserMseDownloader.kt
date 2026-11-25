@@ -166,6 +166,118 @@ object BrowserMseDownloader {
 
         fun closeAll() { tracks.values.forEach { it.close() } }
         fun deleteAll() { closeAll(); tracks.values.forEach { it.file.delete() } }
+
+        // ---- Download feito pela própria página (fetch do navegador: mesmos cookies, cabeçalhos e "jeito" do player) ----
+        @Volatile private var fetchOut: BufferedOutputStream? = null
+        val fetchBytes = AtomicLong(0)
+        val fetchTotal = AtomicLong(-1)
+        val fetchDone = AtomicBoolean(false)
+        @Volatile var fetchErr: String? = null
+
+        @Synchronized fun startFetch(file: File) {
+            closeFetch()
+            fetchOut = BufferedOutputStream(FileOutputStream(file), 256 * 1024)
+            fetchBytes.set(0); fetchTotal.set(-1); fetchDone.set(false); fetchErr = null
+        }
+
+        @Synchronized fun closeFetch() {
+            try { fetchOut?.flush() } catch (_: Exception) {}
+            try { fetchOut?.close() } catch (_: Exception) {}
+            fetchOut = null
+        }
+
+        @JavascriptInterface
+        fun onFetchStart(total: String) {
+            onActivity()
+            fetchTotal.set(total.trim().toLongOrNull() ?: -1L)
+        }
+
+        @JavascriptInterface
+        fun onFetchChunk(b64: String) {
+            if (b64.isEmpty()) return
+            onActivity()
+            try {
+                val raw = Base64.decode(b64, Base64.DEFAULT)
+                synchronized(this) { fetchOut?.write(raw) }
+                fetchBytes.addAndGet(raw.size.toLong())
+            } catch (e: Exception) { fetchErr = "gravar: ${e.message}"; fetchDone.set(true) }
+        }
+
+        @JavascriptInterface
+        fun onFetchEnd(err: String) {
+            onActivity()
+            if (err.isNotBlank()) fetchErr = err.take(160)
+            fetchDone.set(true)
+        }
+    }
+
+    /** Pede à página (WebView) para baixar o arquivo com fetch() e manda os bytes ao app em pedaços. */
+    private fun fetchJs(url: String, cred: String): String {
+        val u = org.json.JSONObject.quote(url)
+        val c = org.json.JSONObject.quote(cred)
+        return """(function(u,cred){
+var B=window.__bptMse; if(!B) return 'nobridge';
+try{ if(window.__bptFetchAbort) window.__bptFetchAbort.abort(); }catch(e){}
+var ac=null; try{ ac=new AbortController(); window.__bptFetchAbort=ac; }catch(e){}
+try{ document.querySelectorAll('video,audio').forEach(function(v){ try{v.pause();}catch(e){} }); }catch(e){}
+var opt={credentials:cred,cache:'no-store',referrerPolicy:'unsafe-url'}; if(ac) opt.signal=ac.signal;
+fetch(u,opt).then(function(r){
+  if(!r.ok && r.status!==206){ B.onFetchEnd('HTTP '+r.status); return; }
+  var ct=r.headers.get('content-type')||'';
+  if(/text\/html|application\/json/i.test(ct)){ B.onFetchEnd('resposta '+ct.split(';')[0]); return; }
+  B.onFetchStart(String(r.headers.get('content-length')||-1));
+  if(!r.body||!r.body.getReader){ return r.arrayBuffer().then(function(ab){ var v=new Uint8Array(ab); for(var o=0;o<v.length;o+=524288){ var p=v.subarray(o,o+524288),s=''; for(var i=0;i<p.length;i+=32768){ s+=String.fromCharCode.apply(null,p.subarray(i,i+32768)); } B.onFetchChunk(btoa(s)); } B.onFetchEnd(''); }); }
+  var rd=r.body.getReader();
+  function pump(){ return rd.read().then(function(x){
+    if(x.done){ B.onFetchEnd(''); return; }
+    var v=x.value,s=''; for(var i=0;i<v.length;i+=32768){ s+=String.fromCharCode.apply(null,v.subarray(i,i+32768)); }
+    B.onFetchChunk(btoa(s)); return pump(); }); }
+  return pump();
+}).catch(function(e){ B.onFetchEnd('bloqueado: '+((e&&e.message)||e)); });
+return 'ok';
+})($u,$c)"""
+    }
+
+    /**
+     * Baixa pela própria página: o pedido sai do navegador (mesmo TLS, cookies, Sec-Fetch e token do player).
+     * Resolve servidores que recusam o app (HTTP 403) mas aceitam o player.
+     */
+    private suspend fun fetchInPage(
+        wv: WebView, bridge: Bridge, pageUrl: String, urls: List<String>, dir: File, title: String, progress: (Long, Long) -> Unit,
+    ): File? {
+        for (u in urls.filter { it.startsWith("http", true) }.distinct().take(4)) {
+            for (cred in listOf("include", "omit")) {
+                currentCoroutineContext().ensureActive()
+                val out = File(dir, Downloader.safe(title) + "_" + System.nanoTime() + ".mp4")
+                bridge.startFetch(out)
+                val started = withContext(Dispatchers.Main) { evalString(wv, fetchJs(u, cred)) }
+                if (started != "ok") { bridge.closeFetch(); out.delete(); return null }
+                var last = 0L
+                var lastAt = System.currentTimeMillis()
+                while (!bridge.fetchDone.get()) {
+                    currentCoroutineContext().ensureActive()
+                    delay(400)
+                    val got = bridge.fetchBytes.get()
+                    val now = System.currentTimeMillis()
+                    if (got > last) { last = got; lastAt = now; progress(got, bridge.fetchTotal.get()) }
+                    if (now - lastAt > 30_000L) { bridge.fetchErr = "sem dados por 30 s"; break }
+                }
+                if (!bridge.fetchDone.get()) withContext(Dispatchers.Main) {
+                    try { wv.evaluateJavascript("try{window.__bptFetchAbort&&window.__bptFetchAbort.abort()}catch(e){}") {} } catch (_: Exception) {}
+                }
+                bridge.closeFetch()
+                val err = bridge.fetchErr
+                val total = bridge.fetchTotal.get()
+                val kind = if (out.exists() && out.length() > 0) Downloader.sniffFile(out) else "unknown"
+                val ok = err == null && out.length() >= 64 * 1024 && kind != "html" && kind != "image" && (total <= 0 || out.length() >= total)
+                Trail.add(listOf(u, pageUrl), "navegador: baixar pela página", if (ok) "${out.length() / 1_000_000} MB" else "falhou: ${err ?: "arquivo $kind ${out.length()} bytes"} (credenciais: $cred)")
+                if (ok) return out
+                out.delete()
+                // Erro HTTP do servidor não muda trocando credenciais; bloqueio de CORS muda.
+                if (err != null && err.startsWith("HTTP")) break
+            }
+        }
+        return null
     }
 
     private class PassThrough(c: Context) : FrameLayout(c) {
@@ -389,18 +501,18 @@ object BrowserMseDownloader {
             // Prioridade 1: Manifest DASH (.mpd) ou HLS (.m3u8) com TODOS os cabeçalhos capturados
             val dash = hint.manifests.lastOrNull { MseCapture.isDash(it) }
             if (dash != null) {
-                destroyWeb()
+                pauseMedia(webView)
                 try {
-                    return MseDownloader.downloadDash(dash, pageUrl, dir, f.title, maxHeight, progress = progress)
+                    return MseDownloader.downloadDash(dash, pageUrl, dir, f.title, maxHeight, progress = progress).also { destroyWeb() }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
             }
             val hls = hint.manifests.lastOrNull { MseCapture.isHls(it) }
             if (hls != null) {
-                destroyWeb()
+                pauseMedia(webView)
                 try {
-                    return Downloader.hls(hls.url, pageUrl, dir, f.title, progress, maxHeight = maxHeight, headers = hls.headers)
+                    return Downloader.hls(hls.url, pageUrl, dir, f.title, progress, maxHeight = maxHeight, headers = hls.headers).also { destroyWeb() }
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
@@ -418,22 +530,38 @@ object BrowserMseDownloader {
                     it.url != bestReq.url && (it.contentType.startsWith("audio/", true) || it.url.contains("audio", true))
                 }
                 try {
-                    destroyWeb()
+                    pauseMedia(webView)
                     if (audioReq != null) {
                         val vTmp = MseDownloader.downloadRanges(bestReq, pageUrl, workDir, f.title + "_v") { g, t -> progress(g, t) }
                         val aTmp = MseDownloader.downloadRanges(audioReq, pageUrl, workDir, f.title + "_a") { _, _ -> }
                         val out = File(dir, Downloader.safe(f.title) + "_" + System.nanoTime() + ".mp4")
-                        return Remux.muxTracks(vTmp, aTmp, out)
+                        return Remux.muxTracks(vTmp, aTmp, out).also { destroyWeb() }
                     }
                     val out = MseDownloader.downloadRanges(bestReq, pageUrl, dir, f.title, progress = progress)
-                    if (out.length() >= 4096) return out
+                    if (out.length() >= 4096) { destroyWeb(); return out }
                     out.delete()
                 } catch (e: Exception) {
                     if (e is CancellationException) throw e
                 }
             }
 
+            // Prioridade 2b: o servidor recusou o app (ex.: HTTP 403). Baixa pela própria página, com o fetch do navegador.
+            if (!closed.get()) webView?.let { live ->
+                val src = withContext(Dispatchers.Main) {
+                    evalString(live, "(function(){try{var a=[];document.querySelectorAll('video').forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src]');for(var i=0;i<q.length;i++){if(q[i].src&&q[i].src.indexOf('http')===0)a.push(q[i].src);}});return a.join('\\n')}catch(e){return ''}})()")
+                }.orEmpty().split('\n').map { it.trim() }.filter { it.isNotBlank() }
+                val direct = src + ranged.map { it.url } + listOfNotNull(f.url.takeIf { Extract.mediaKindOf(it) == Kind.DIRECT || f.kind == Kind.DIRECT })
+                val viaPage = if (direct.isNotEmpty() && !(finalBridge.mseActive.get() && hint.segments.size >= 2))
+                    try { fetchInPage(live, finalBridge, pageUrl, direct.filter { !MediaPick.isAdUrl(it) && !Extract.isHls(it) }, dir, f.title, progress) }
+                    catch (e: Exception) { if (e is CancellationException) throw e; null }
+                else null
+                if (viaPage != null) { destroyWeb(); return viaPage }
+                // volta a tocar para a captura do player (prioridade 3)
+                withContext(Dispatchers.Main) { try { live.evaluateJavascript(JsRender.PLAY_JS_SCRIPT) {} } catch (_: Exception) {} }
+            }
+
             // Prioridade 3 (último recurso): captura bytes do appendBuffer por trilha via @JavascriptInterface
+            if (closed.get()) throw DlException("Navegador oculto foi fechado antes da captura")
             val wv = webView ?: throw DlException("Não foi possível capturar o vídeo pelo navegador")
             withContext(Dispatchers.Main) {
                 try {
@@ -500,6 +628,11 @@ object BrowserMseDownloader {
             workDir.deleteRecursively()
             releaseSlot()
         }
+    }
+
+    private fun pauseMedia(wv: WebView?) {
+        val w = wv ?: return
+        main.post { try { w.evaluateJavascript("try{document.querySelectorAll('video,audio').forEach(function(v){v.pause()})}catch(e){}") {} } catch (_: Exception) {} }
     }
 
     private fun File.readBytes(max: Int): ByteArray {

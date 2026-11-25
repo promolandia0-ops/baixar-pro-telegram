@@ -4,6 +4,10 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.35
+- **Baixar pela própria página**: quando o servidor do vídeo recusa o app (HTTP 403) mas toca no player, o navegador oculto agora baixa o arquivo de dentro da página (fetch do navegador, com os mesmos cookies, cabeçalhos e token do player) e manda os bytes ao app. Usa o endereço que o `<video>` está tocando naquela hora.
+- **Corrigido "Navegador não capturou dados do player MSE"**: se o download pelo link capturado falhava, o navegador oculto era fechado antes da última tentativa, que então nunca capturava nada. Agora ele só fecha quando o download dá certo.
+
 ## 1.9.34
 - **Link trancado (HTTP 423/403/410) não trava mais o download**: quando o site recusa o link guardado (token vencido), o app marca esse link como vencido, reabre a página e pega um link novo (até 3 vezes), testando também a lista HLS do link novo. Antes ele insistia no mesmo link morto em todas as tentativas.
 - **Corrigido "String must not be empty"**: um erro ao ler o HTML ou a resposta do site, ao reabrir a página, derrubava o item inteiro. Agora cada etapa é protegida e, se nada der certo, ainda tenta a gravação pelo navegador.
