@@ -96,6 +96,8 @@ object Extract {
         """/(?:watch|video|videos|v|embed|player|clip|filme|episodio|episodios|watchvideo)(?:/|$|\.)""",
         RegexOption.IGNORE_CASE,
     )
+    private val B64_LITERAL = Regex("""["'`]([A-Za-z0-9+/_-]{40,}={0,2})["'`]""")
+    private val B64_HINT = Regex("""(?i)\.(mp4|m3u8|webm|mpd|mov|m4v)\b|contentUrl|https?:\\?/\\?/""")
     private val LD_VIDEO = Regex(""""(?:contentUrl|embedUrl)"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
     private val LD_THUMB = Regex(""""(?:thumbnailUrl|thumbnail)"\s*:\s*"([^"]+)"""", RegexOption.IGNORE_CASE)
     private val SNIFF_PATH = Regex(
@@ -454,6 +456,19 @@ object Extract {
         PLAYER_URL.findAll(raw).forEach { m ->
             val u = m.groupValues[1]
             addVideo(u); addServer(u); if (isPhotoUrl(u)) addPhoto(u)
+        }
+        // Links escondidos em base64 no código (a página decodifica com atob() e só então monta o JSON-LD/player)
+        B64_LITERAL.findAll(html).take(600).forEach { m ->
+            val lit = m.groupValues[1]
+            val dec = try {
+                String(if (lit.contains('-') || lit.contains('_')) java.util.Base64.getUrlDecoder().decode(lit.trimEnd('='))
+                       else java.util.Base64.getDecoder().decode(lit), Charsets.UTF_8)
+            } catch (_: Exception) { null } ?: return@forEach
+            if (!B64_HINT.containsMatchIn(dec)) return@forEach
+            val d = dec.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/").replace("&amp;", "&")
+            URL_IN_TEXT.findAll(d).forEach { u -> if (!isPhotoUrl(u.value)) addVideo(u.value, ogTitle) }
+            LD_VIDEO.findAll(d).forEach { addVideo(it.groupValues[1], ogTitle) }
+            REL_MEDIA.findAll(d).forEach { u -> if (!isPhotoUrl(u.groupValues[1])) addVideo(u.groupValues[1], ogTitle) }
         }
 
         // JSON-LD: name/description só no contentUrl/embedUrl do mesmo objeto.

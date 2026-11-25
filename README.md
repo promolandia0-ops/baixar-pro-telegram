@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.42
+- **Link escondido em base64**: o leitor do app decodifica os trechos em base64 do código da página (o que o site faz com `atob()`) e procura o vídeo ali (link direto, `contentUrl`, caminhos). Sites que só montam o JSON-LD/player depois do JavaScript passam a ser achados sem navegador.
+- **Fila**: o navegador oculto lê a página montada (JSON-LD `contentUrl`, `<source>`, configs) com o mesmo leitor do app e baixa o link direto, sem depender de o vídeo tocar.
+- **Raio-X**: a ORIGEM DO LINK também procura no HTML decodificado de base64.
+
 ## 1.9.41
 - **Players escondidos**: o app e o Raio-X enxergam o `<video>` dentro de componentes fechados (shadow DOM) e de iframes do mesmo site (antes: "nenhum `<video>` na página" mesmo com o player pedindo o vídeo).
 - **Toque de verdade no player**: o navegador oculto rola até o player e toca em cima dele (antes tocava no meio da tela). Players que só recebem o link depois de um toque ("sem fonte") passam a carregar.

@@ -327,6 +327,9 @@ return JSON.stringify(o);
             progress.step("Procurando de onde vem o link…")
             val inStatic = locate(static(), main.url)
             sb.appendLine("  HTML sem navegador: $inStatic")
+            val b64 = static()?.let { h -> decodeB64(h) }.orEmpty()
+            val inB64 = if (b64.isBlank()) "nenhum texto em base64 com link" else locate(b64, main.url)
+            sb.appendLine("  HTML sem navegador, decodificando base64 (atob): $inB64")
             val dom = try { eval("(function(){try{return document.documentElement.outerHTML.slice(0,4000000)}catch(e){return ''}})()") } catch (e: Exception) { if (e is CancellationException) throw e; null }
             val inDom = locate(dom, main.url)
             sb.appendLine("  página depois de carregar (DOM): $inDom")
@@ -341,6 +344,7 @@ return JSON.stringify(o);
                 if (loc.startsWith("SIM")) inApi = true
             }
             when {
+                inB64.startsWith("SIM") && !inStatic.startsWith("SIM") -> verdict += "o link está no HTML ESCONDIDO em base64 (a página decodifica com atob): o app v1.9.42+ decodifica e acha sem navegador"
                 inStatic.startsWith("SIM") -> verdict += "o link do vídeo JÁ ESTÁ no HTML (${inStatic.substringAfter("em ").substringBefore(" (")}): o app tem que achar sem navegador — se não achou, é o leitor do app (mande este relatório)"
                 inApi -> verdict += "o link vem de uma API chamada pela página: o app pode chamar a mesma API"
                 inDom.startsWith("SIM") -> verdict += "o link só aparece depois que o JavaScript monta a página (${inDom.substringAfter("em ").substringBefore(" (")}): precisa do navegador, mas não precisa dar play"
@@ -479,6 +483,22 @@ return JSON.stringify(o);
             if (a.code !in 200..299) verdict += "as fotos não abrem fora da página (HTTP ${a.code})"
             else if (b.code !in 200..299) verdict += "as fotos exigem a página de origem/cookie (o app já manda)"
         }
+    }
+
+    private val B64 = Regex("""["'`]([A-Za-z0-9+/_-]{40,}={0,2})["'`]""")
+    /** Junta o texto de todos os trechos em base64 do código que decodificam para texto. */
+    private fun decodeB64(html: String): String {
+        val out = StringBuilder()
+        for (m in B64.findAll(html).take(800)) {
+            val lit = m.groupValues[1]
+            val d = try {
+                String(if (lit.contains('-') || lit.contains('_')) java.util.Base64.getUrlDecoder().decode(lit.trimEnd('=')) else java.util.Base64.getDecoder().decode(lit), Charsets.UTF_8)
+            } catch (_: Exception) { continue }
+            if (d.count { it.code < 9 || it == '\uFFFD' } > d.length / 20) continue
+            out.append(d.replace("\\/", "/")).append('\n')
+            if (out.length > 3_000_000) break
+        }
+        return out.toString()
     }
 
     /** O link (ou o nome do arquivo) está neste texto? Em que campo/atributo? Só nomes de campo, nunca valores. */

@@ -588,8 +588,15 @@ return ((b.left+b.width/2)*d)+','+((b.top+b.height/2)*d);
                     evalString(live, "(function(){function __bv(){var o=[];function w(r,d){if(!r||d>6)return;try{r.querySelectorAll('video').forEach(function(v){o.push(v)});r.querySelectorAll('*').forEach(function(e){if(e.shadowRoot)w(e.shadowRoot,d+1)});r.querySelectorAll('iframe').forEach(function(f){try{if(f.contentDocument)w(f.contentDocument,d+1)}catch(x){}})}catch(x){}}w(document,0);return o}try{var a=[];__bv().forEach(function(v){var s=v.currentSrc||v.src||'';if(s&&s.indexOf('http')===0)a.push(s);var q=v.querySelectorAll('source[src],source[data-src]');for(var i=0;i<q.length;i++){var x=q[i].src||q[i].getAttribute('data-src')||'';if(x.indexOf('//')===0)x=location.protocol+x;if(x.indexOf('http')===0)a.push(x);}var ds=v.getAttribute('data-src')||'';if(ds.indexOf('http')===0)a.push(ds);});return a.join('\\n')}catch(e){return ''}})()")
                 }.orEmpty().split('\n').map { it.trim() }.filter { it.isNotBlank() }
                 val direct = src + ranged.map { it.url } + listOfNotNull(f.url.takeIf { Extract.mediaKindOf(it) == Kind.DIRECT || f.kind == Kind.DIRECT })
+                // A página montada (depois do JavaScript) pode ter o link no JSON-LD (contentUrl), em <source> ou em configs:
+                // lê o HTML vivo com o mesmo leitor do app, sem precisar o vídeo tocar.
+                val domHtml = withContext(Dispatchers.Main) { evalString(live, "(function(){try{return document.documentElement.outerHTML.slice(0,6000000)}catch(e){return ''}})()") }
+                val fromDom = if (domHtml.isNullOrBlank()) emptyList() else try {
+                    withContext(Dispatchers.Default) { Extract.parse(pageUrl, domHtml).videos.filter { it.kind == Kind.DIRECT }.map { it.url } }
+                } catch (e: Exception) { if (e is CancellationException) throw e; emptyList() }
+                if (fromDom.isNotEmpty()) Trail.add(listOf(f.url, pageUrl), "navegador: página montada", "achei ${fromDom.size} link(s) de vídeo no código da página")
                 // O <video> da página já tem o link: tenta baixar DIRETO (sem gravar o player). Muitos servidores não exigem nada.
-                for (u in src.filter { !it.startsWith("blob:") && !MediaPick.isAdUrl(it) && !Extract.isPreviewVideo(it) && !Extract.isHls(it) && !Extract.isDash(it) }.distinct().take(3)) {
+                for (u in (src + fromDom).filter { !it.startsWith("blob:") && !MediaPick.isAdUrl(it) && !Extract.isPreviewVideo(it) && !Extract.isHls(it) && !Extract.isDash(it) }.distinct().take(4)) {
                     val got = try {
                         Downloader.download(Found(u, pageUrl, f.title, Kind.DIRECT, ref = pageUrl, extra = f.extra), dir, Prefs.server, maxHeight, fast = true, progress = progress)
                     } catch (e: Exception) { if (e is CancellationException) throw e; Trail.add(listOf(f.url, pageUrl), "navegador: link do <video> direto", "falhou: ${e.message?.take(100)}"); null }
