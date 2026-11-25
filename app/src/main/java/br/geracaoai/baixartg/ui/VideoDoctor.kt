@@ -196,6 +196,75 @@ fun VideoDoctorDialog(web: WebView?, page: String, tapPlay: () -> Unit, collect:
     )
 }
 
+/**
+ * "Estudar este site": recarrega a página, toca o vídeo (sem som, na maior qualidade) e grava por 30 s como o player
+ * busca o vídeo; depois testa cada pedido do jeito do app e mostra um CÓDIGO (sem nomes nem links) para colar no chat.
+ */
+@Composable
+fun SiteStudyDialog(web: WebView?, page: String, tapPlay: () -> Unit, onClose: () -> Unit) {
+    val ctx = LocalContext.current
+    var phase by remember { mutableIntStateOf(0) }   // 0 início, 1 gravando, 2 montando, 3 pronto
+    var left by remember { mutableIntStateOf(30) }
+    var nReq by remember { mutableIntStateOf(0) }
+    var status by remember { mutableStateOf("") }
+    var result by remember { mutableStateOf<SiteStudy.Result?>(null) }
+    var stopEarly by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { SiteStudy.stop() } }
+    LaunchedEffect(phase) {
+        val w = web ?: return@LaunchedEffect
+        if (phase == 1) {
+            SiteStudy.start()
+            w.reload()
+            kotlinx.coroutines.delay(4_000)
+            tapPlay()
+            try { DetBridge.ask(w, "play", 1_500); DetBridge.ask(w, "maxq", 800) } catch (_: Exception) {}
+            left = 30
+            while (left > 0 && !stopEarly) {
+                kotlinx.coroutines.delay(1_000); left--; nReq = SiteStudy.count()
+                if (left == 20 || left == 10) try { DetBridge.ask(w, "play", 800); DetBridge.ask(w, "maxq", 800) } catch (_: Exception) {}
+            }
+            SiteStudy.stop()
+            phase = 2
+        } else if (phase == 2) {
+            result = try { SiteStudy.build(w, w.url ?: page) { status = it } } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                CrashLog.write("estudo do site", e); SiteStudy.Result("", "Não consegui montar o código (${e.javaClass.simpleName}).")
+            }
+            phase = 3
+        }
+    }
+    when (phase) {
+        0 -> AlertDialog(onDismissRequest = onClose, icon = { Icon(Icons.Rounded.Science, null) }, title = { Text("Estudar este site") },
+            text = { Text("Abra a página de UM vídeo (já logado). Eu recarrego a página, dou play sem som na maior qualidade e gravo por 30 segundos como o player busca o vídeo. Depois testo cada pedido do jeito do app e mostro um código para você colar no chat.\n\nO código não tem nome de site, link, título nem valores: só a estrutura.") },
+            confirmButton = { TextButton({ phase = 1 }) { Text("Começar") } }, dismissButton = { TextButton(onClose) { Text("Fechar") } })
+        1 -> androidx.compose.ui.window.Popup(alignment = Alignment.TopCenter, properties = androidx.compose.ui.window.PopupProperties(focusable = false)) {
+            Surface(Modifier.padding(top = 56.dp, start = 12.dp, end = 12.dp), shape = MaterialTheme.shapes.large, tonalElevation = 6.dp, shadowElevation = 6.dp) {
+                Row(Modifier.padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
+                    Text("Estudando… $left s • $nReq pedidos. Se o vídeo não tocar, dê play.", style = MaterialTheme.typography.bodySmall, modifier = Modifier.weight(1f, fill = false))
+                    TextButton({ stopEarly = true }) { Text("Terminar") }
+                }
+            }
+        }
+        2 -> AlertDialog(onDismissRequest = {}, icon = { CircularProgressIndicator(Modifier.size(24.dp)) }, title = { Text("Montando o código") },
+            text = { Text(status.ifBlank { "…" }) }, confirmButton = {})
+        else -> AlertDialog(onDismissRequest = onClose, icon = { Icon(Icons.Rounded.Science, null) }, title = { Text("Código do estudo") },
+            text = {
+                Column(Modifier.heightIn(max = 460.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(result?.summary.orEmpty(), style = MaterialTheme.typography.bodySmall)
+                    val code = result?.code.orEmpty()
+                    if (code.isNotBlank()) {
+                        Text("${code.length} caracteres. Toque em Copiar e cole no chat.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(code.take(240) + "…", style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, maxLines = 4)
+                    }
+                }
+            },
+            confirmButton = { TextButton({ copy(ctx, result?.code.orEmpty(), "Código copiado. Cole no chat.") }, enabled = !result?.code.isNullOrBlank()) { Text("Copiar") } },
+            dismissButton = { TextButton(onClose) { Text("Fechar") } })
+    }
+}
+
 private fun iconOf(s: Detective.St): ImageVector = when (s) {
     Detective.St.OK -> Icons.Rounded.CheckCircle
     Detective.St.FIXED -> Icons.Rounded.Build

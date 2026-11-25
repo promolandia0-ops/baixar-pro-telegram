@@ -148,6 +148,7 @@ object BrowserRuntime {
                         val u = request.url?.toString().orEmpty()
                         if (!u.startsWith("http")) return null
                         val hdrs = request.requestHeaders ?: emptyMap()
+                        br.geracaoai.baixartg.core.SiteStudy.req(u, request.method, hdrs, request.isForMainFrame, "service worker")
                         BrowserDiag.media("sw", u)
                         if (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u)) MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-sw")
                         if (Extract.mediaKindOf(u) != null && !(Extract.isPhotoUrl(u) && !Extract.isVideoUrl(u)) && !br.geracaoai.baixartg.core.MediaPick.isAdUrl(u)) {
@@ -198,6 +199,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
     var ask by remember { mutableStateOf(false) }
     var analyze by remember { mutableStateOf(false) }
     var doctor by remember { mutableStateOf(false) }
+    var study by remember { mutableStateOf(false) }
     var doctorExample by remember { mutableStateOf<br.geracaoai.baixartg.core.HistEntry?>(null) }
     // depois de 10 s numa página sem vídeo, oferece o "Diagnosticar e corrigir"
     var offerDoctor by remember { mutableStateOf(false) }
@@ -458,6 +460,12 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                         }
                         DropdownMenu(moreMenu, { moreMenu = false }) {
                             DropdownMenuItem(
+                                text = { Text("Estudar este site (gera código)") },
+                                leadingIcon = { Icon(Icons.Rounded.Science, null) },
+                                enabled = current.startsWith("http"),
+                                onClick = { moreMenu = false; study = true },
+                            )
+                            DropdownMenuItem(
                                 text = { Text("Detetive: achar vídeos e fotos") },
                                 leadingIcon = { Icon(Icons.Rounded.Build, null) },
                                 enabled = current.startsWith("http"),
@@ -599,6 +607,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
                     if (br.geracaoai.baixartg.web.AdBlock.shouldBlock(u, current, request.isForMainFrame)) return br.geracaoai.baixartg.web.AdBlock.empty()
                     val hdrs = request.requestHeaders ?: emptyMap()
                     val pg = current
+                    br.geracaoai.baixartg.core.SiteStudy.req(u, request.method, hdrs, request.isForMainFrame, "navegador")
                     if (u.startsWith("http")) BrowserDiag.media("webview", u)
                     if (u.startsWith("http") && pg.startsWith("http") && (MseCapture.hasSpecialHeaders(hdrs) || Extract.isDash(u) || Extract.isHls(u) || Extract.isSegmentUrl(u) || hdrs.keys.any { it.equals("Range", true) })) {
                         MseCapture.recordRequest(pg, u, request.method ?: "GET", hdrs, source = "browser-tab")
@@ -684,6 +693,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
         confirmButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, false) }) { Text("Filtrar") } },
         dismissButton = { TextButton({ ask = false; CookieManager.getInstance().flush(); onUse(current, true) }) { Text("Varrer tudo") } })
     if (analyze) SiteAnalyzeDialog(current, web) { analyze = false }
+    if (study) SiteStudyDialog(web, current, tapPlay = { web?.evaluateJavascript(TapPlay.JS) { }; startNetPoll() }) { study = false }
     if (doctor) VideoDoctorDialog(web, current,
         tapPlay = { web?.evaluateJavascript(TapPlay.JS) { }; startNetPoll() },
         collect = { BrowserDetect.fullCollect = true; scheduleCollect(0) }, example = doctorExample) { doctor = false; doctorExample = null }

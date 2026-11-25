@@ -4,6 +4,9 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.34
+- **Estudar este site (gera código)** (menu ⋮): recarrega a página do vídeo, dá play sem som na maior qualidade e grava por 30 s como o player busca o vídeo — cada pedido (tipo, método, origem, cabeçalhos especiais, Range), as respostas lidas (lista HLS principal/da qualidade, chave, JSON com vídeos), players, quadros e `<video>`, nomes dos cookies — e testa cada pedido importante do jeito do app (igual ao navegador / origem = página / sem origem). Mostra um código `BPT1:…` para colar no chat. Sem nada pessoal: site e servidores viram rótulos (SITE, H1…), partes do endereço viram marcadores ({w#3}, {uuid#5}…; o mesmo valor = o mesmo marcador), só nomes de parâmetros/cabeçalhos/cookies, nenhum valor nem título.
+
 ## 1.9.33
 - **Download com a origem certa**: o app agora guarda a origem VERDADEIRA de cada pedido do player (muitas vezes o próprio player, não a página) e, antes de baixar, testa as origens — a do pedido, a que o player usou ao tocar, a página, o site, o servidor do vídeo, nenhuma — e usa a primeira que devolve vídeo. Antes ia sempre a página e muitos servidores recusavam (HTTP 403).
 - **Falhas com diagnóstico**: na Fila → Falhas, cada falha mostra na tela o diagnóstico completo, pronto para copiar (um por um ou todos): rastro de cada tentativa, teste feito na hora com cada origem, lista HLS, lista da qualidade, chave AES, primeiro pedaço, servidor yt-dlp e a CAUSA PROVÁVEL. Sem nome de vídeo, sem link e sem nome de site (viram códigos).
