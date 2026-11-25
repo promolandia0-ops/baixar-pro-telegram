@@ -53,7 +53,24 @@ object PlayCapture {
 
     fun hits(page: String): List<Hit> {
         val list = byPage[key(page)] ?: return emptyList()
-        return synchronized(list) { list.toList() }
+        return synchronized(list) { list.filter { it.url.substringBefore('#') !in dead }.toList() }
+    }
+
+    /** Links que o servidor recusou de vez (423/410/403/401: token vencido ou trancado). Não voltam a ser escolhidos. */
+    private val dead: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
+    fun markDead(url: String) {
+        if (url.isBlank()) return
+        dead += url.substringBefore('#')
+        if (dead.size > 2000) dead.clear()
+    }
+
+    fun isDead(url: String) = url.substringBefore('#') in dead
+
+    /** Erro de link vencido/trancado: vale pegar um link novo na página em vez de insistir. */
+    fun isExpiredError(e: Throwable?): Boolean {
+        val m = e?.message ?: return false
+        return Regex("""HTTP (401|403|404|410|423|451)\b""").containsMatchIn(m)
     }
 
     fun bestFor(f: Found): Hit? {

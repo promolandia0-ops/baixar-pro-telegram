@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.34
+- **Link trancado (HTTP 423/403/410) não trava mais o download**: quando o site recusa o link guardado (token vencido), o app marca esse link como vencido, reabre a página e pega um link novo (até 3 vezes), testando também a lista HLS do link novo. Antes ele insistia no mesmo link morto em todas as tentativas.
+- **Corrigido "String must not be empty"**: um erro ao ler o HTML ou a resposta do site, ao reabrir a página, derrubava o item inteiro. Agora cada etapa é protegida e, se nada der certo, ainda tenta a gravação pelo navegador.
+- Reabrir a página tem até 120 s (antes 60 s, que acabava antes do navegador oculto quando o servidor yt-dlp estava fora do ar).
+
 ## 1.9.33
 - **Download com a origem certa**: o app agora guarda a origem VERDADEIRA de cada pedido do player (muitas vezes o próprio player, não a página) e, antes de baixar, testa as origens — a do pedido, a que o player usou ao tocar, a página, o site, o servidor do vídeo, nenhuma — e usa a primeira que devolve vídeo. Antes ia sempre a página e muitos servidores recusavam (HTTP 403).
 - **Falhas com diagnóstico**: na Fila → Falhas, cada falha mostra na tela o diagnóstico completo, pronto para copiar (um por um ou todos): rastro de cada tentativa, teste feito na hora com cada origem, lista HLS, lista da qualidade, chave AES, primeiro pedaço, servidor yt-dlp e a CAUSA PROVÁVEL. Sem nome de vídeo, sem link e sem nome de site (viram códigos).

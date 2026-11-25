@@ -723,18 +723,49 @@ object Pipeline {
                     Trail.add(tu, "download: funcionou com \"${stepName(name)}\"", "${fmt(file!!.length())} • arquivo ${Downloader.sniffFile(file!!)}")
                     break
                 } catch (e: CancellationException) { throw e }
-                catch (e: Exception) { lastErr = e; file?.delete(); file = null; Trail.add(tu, "download: \"${stepName(name)}\" falhou", e.message?.take(160) ?: e.javaClass.simpleName) }
+                catch (e: Exception) {
+                    lastErr = e; file?.delete(); file = null
+                    Trail.add(tu, "download: \"${stepName(name)}\" falhou", e.message?.take(160) ?: e.javaClass.simpleName)
+                    // Link trancado/vencido (ex.: HTTP 423): não adianta insistir nele; o passo "reabrir a página" busca um novo.
+                    if (PlayCapture.isExpiredError(e) && name in setOf("hls", "direct", "play") && f.url != f.page) {
+                        PlayCapture.markDead(f.url)
+                        Trail.add(tu, "download: link vencido", "o servidor recusou o link guardado; vou pegar um novo na página")
+                    }
+                }
             }
             if (file == null && f.kind != Kind.PHOTO && f.page.isNotBlank() && !Extract.isVideoUrl(f.page) && !hasTried(tried, "resolve")) {
                 tried = markTried(tried, "resolve")
-                upd(t.id, persist = false) { it.copy(tried = tried, msg = "reabrindo página…") }
-                val nf = withTimeoutOrNull(60_000) { PageResolver.resolveFull(f.page, t.title, t.extra) }
-                Trail.add(listOf(f.url, t.page, f.page, nf?.url), "download: reabriu a página", if (nf != null) "achou link novo ${nf.kind} em ${Trail.host(nf.url)}" else "não achou link novo")
-                if (nf != null) {
+                // Até 3 links novos: se o primeiro também vier trancado, marca como vencido e reabre de novo.
+                var round = 0
+                while (file == null && round < 3) {
+                    round++
+                    currentCoroutineContext().ensureActive()
+                    upd(t.id, persist = false) { it.copy(tried = tried, msg = "reabrindo página…" + if (round > 1) " ($round)" else "") }
+                    val nf = try { withTimeoutOrNull(120_000) { PageResolver.resolveFull(f.page, t.title, t.extra) } }
+                        catch (e: CancellationException) { throw e }
+                        catch (e: Exception) { lastErr = e; Trail.add(tu, "download: reabrir a página falhou", e.message?.take(160) ?: e.javaClass.simpleName); null }
+                    Trail.add(listOf(f.url, t.page, f.page, nf?.url), "download: reabriu a página", if (nf != null) "achou link ${nf.kind} em ${Trail.host(nf.url)}" else "não achou link novo")
+                    if (nf == null || PlayCapture.isDead(nf.url)) break
+                    val prev = f
                     f = nf
                     upd(t.id) { it.copy(f = nf, title = TitleFix.pick(nf.title, it.title).ifBlank { it.title }, tried = tried) }
-                    try { file = finish(Downloader.download(nf, dir, Prefs.server, 0, fast = true, prog())) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
-                } else if (canMse && !hasTried(tried, "navegador")) {
+                    try {
+                        file = finish(Downloader.download(nf, dir, Prefs.server, 0, fast = true, prog()))
+                        Trail.add(tu, "download: funcionou com \"${stepName("resolve")}\"", "${fmt(file!!.length())} • arquivo ${Downloader.sniffFile(file!!)}")
+                    } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                        lastErr = e; file?.delete(); file = null
+                        Trail.add(tu, "download: link novo falhou", e.message?.take(160) ?: e.javaClass.simpleName)
+                        // HLS do link novo: tenta também a lista direto (com o Referer certo)
+                        if (nf.kind == Kind.HLS || nf.url.contains(".m3u8", true)) {
+                            try { file = finish(Downloader.hls(nf.url, nf.ref ?: nf.page, dir, t.title, prog(), maxHeight = 0)) }
+                            catch (e2: CancellationException) { throw e2 } catch (e2: Exception) { lastErr = e2; file?.delete(); file = null }
+                        }
+                        if (file == null) {
+                            if (PlayCapture.isExpiredError(lastErr) || nf.url == prev.url) PlayCapture.markDead(nf.url) else break
+                        }
+                    }
+                }
+                if (file == null && canMse && !hasTried(tried, "navegador")) {
                     tried = markTried(tried, "navegador")
                     upd(t.id, persist = false) { it.copy(tried = tried, msg = "baixando pelo navegador…") }
                     try { file = finish(mseStep()) } catch (e: CancellationException) { throw e } catch (e: Exception) { lastErr = e; file?.delete(); file = null }
