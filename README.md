@@ -4,6 +4,11 @@ App Android: cole o link de um site → o app percorre o site (mesmo domínio, p
 
 Build: `./gradlew assembleRelease` (keystore em `keystore/`, fora do git).
 
+## 1.9.44
+- **Vídeo vertical não é mais barrado pelos 720p**: a qualidade mínima media sempre o lado menor, então vídeo de rede social (404x720, 540x720, 608x1080…) era "pulado" mesmo sendo a maior qualidade que existe. Agora horizontal mede o lado menor (1280x720 = 720p) e vertical mede o lado maior.
+- **Link achado dentro de uma resposta do site só entra se abrir**: em alguns sites esse link é recusado (HTTP 423/403) até o player tocar; antes entrava na lista e falhava sempre. Agora é testado na hora e, se recusar, fica de fora (o link que o player pede quando você dá play continua entrando).
+- Diagnóstico das falhas mostra só o rastro DO vídeo (antes vinham os eventos de todos os vídeos da mesma página).
+
 ## 1.9.43
 - **Sites KVS** (Kernel Video Sharing, o sistema de milhares de sites de vídeo): o link `function/0/…` agora é desembaralhado com o `license_code` da página, como o player faz. Antes o app só cortava o prefixo e ficava com o link embaralhado (403/404).
 - **Padrões de players**: link montado juntando pedaços de texto em variáveis (com comentários no meio), chamadas `setVideoUrlHigh/Low/HLS`, `.src(...)`, `loadSource(...)`, `file:`/`videoUrl:`, listas de qualidades em JSON (`"720p":[…]`, `mediaDefinitions`). Testado com páginas de exemplo antes de entrar.

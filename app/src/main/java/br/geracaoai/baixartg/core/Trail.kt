@@ -65,13 +65,13 @@ object Trail {
     }
 
     /** Tudo o que aconteceu com estes endereços (vídeo, página…), em ordem. Segue as ligações (link novo do mesmo vídeo). */
-    fun of(urls: List<String?>): List<Ev> {
+    fun of(urls: List<String?>, expand: Boolean = false): List<Ev> {
         val want = urls.mapNotNull { key(it) }.toHashSet()
         if (want.isEmpty()) return emptyList()
         val out = ArrayList<Ev>()
         synchronized(lines) {
-            // duas passadas: eventos que ligam um endereço a outro (ex.: página → link do vídeo) entram as chaves novas
-            repeat(2) { lines.forEach { l -> if (l.keys.any { it in want }) want.addAll(l.keys) } }
+            // seguir as ligações só quando pedido: pela página entravam os eventos de TODOS os vídeos daquela página
+            if (expand) repeat(2) { lines.forEach { l -> if (l.keys.any { it in want }) want.addAll(l.keys) } }
             lines.forEach { l -> if (l.keys.any { it in want }) out += l.ev }
         }
         return out.sortedBy { it.t }.distinctBy { it.step + "|" + it.detail }

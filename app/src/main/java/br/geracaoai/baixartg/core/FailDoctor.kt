@@ -96,7 +96,8 @@ object FailDoctor {
         sb.appendLine("mensagem: " + anon(t.msg.ifBlank { "?" }, title))
 
         // o que aconteceu, passo a passo (rastro)
-        val ev = Trail.of(listOfNotNull(f?.url, t.page, f?.page))
+        // só o que é DESTE vídeo (pela página vinham os eventos de todos os vídeos dela)
+        val ev = (if (f != null) Trail.of(listOf(f.url)) else emptyList()).ifEmpty { Trail.of(listOf(t.page)) }
         if (ev.isNotEmpty()) {
             sb.appendLine("rastro:")
             val fmt = java.text.SimpleDateFormat("dd/MM HH:mm:ss", java.util.Locale("pt", "BR"))

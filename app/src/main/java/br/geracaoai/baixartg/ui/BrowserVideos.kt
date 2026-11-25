@@ -435,13 +435,34 @@ object BrowserDetect {
                 when (h.t) { DetScan.T.HLS -> hits += h.url to Kind.HLS; DetScan.T.DASH -> hits += h.url to Kind.SERVER; DetScan.T.FILE -> hits += h.url to null; else -> {} }
             }
             if (hits.isEmpty()) return@launch
+            // Link achado DENTRO de uma resposta (o player ainda não pediu): só entra se abrir de verdade. Em alguns sites
+            // ele é recusado (ex.: HTTP 423/403) até o player tocar — antes entrava na lista e falhava sempre.
+            val page0 = browsing.ifBlank { frame }
+            val checked = hits.take(25).map { (h, k) ->
+                async {
+                    if (h == u) Triple(h, k, true) else {
+                        val code = withTimeoutOrNull(8_000) { probeCode(h, page0) } ?: -1
+                        if (code !in 200..299) Trail.addOnce(listOf(h, page0), "visto e ignorado", "endereço dentro de uma resposta do site, mas o servidor recusa (${if (code > 0) "HTTP $code" else "sem resposta"}): só abre quando o player toca")
+                        Triple(h, k, code in 200..299)
+                    }
+                }
+            }.awaitAll().filter { it.third }
+            if (checked.isEmpty()) return@launch
             withContext(Dispatchers.Main) {
-                hits.take(25).forEach { (h, k) ->
+                checked.forEach { (h, k, _) ->
                     if (!MediaPick.isAdUrl(h)) intercepted(h, browsing.ifBlank { frame }, "", k,
                         src = if (h == u) "resposta de rede com a lista do vídeo (lida dentro do player)" else "endereço de vídeo dentro de uma resposta do site (${Trail.host(u)})")
                 }
             }
         }
+    }
+
+    private suspend fun probeCode(url: String, ref: String): Int = withContext(Dispatchers.IO) {
+        try {
+            val b = okhttp3.Request.Builder().url(url).header("Accept", "*/*").header("Range", "bytes=0-2047")
+            if (ref.startsWith("http")) b.header("Referer", ref)
+            Net.fast.newCall(b.build()).await().use { it.code }
+        } catch (e: Exception) { if (e is CancellationException) throw e; -1 }
     }
 
     /** Todas as listas HLS que o player pediu em cada página (a principal costuma estar entre elas). */

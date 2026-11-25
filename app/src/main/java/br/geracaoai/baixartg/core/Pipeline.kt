@@ -826,9 +826,14 @@ object Pipeline {
             val siteHost = Extract.host(t.page.ifBlank { f.page })
             if (meta != null) {
                 Trail.add(listOf(f.url, t.page, f.page), "arquivo conferido", "${if (meta.w > 0) "${meta.w}x${meta.h}" else "resolução ?"} • ${meta.durMs / 1000}s")
+                // Qualidade mínima: horizontal mede o lado menor (1280x720 = 720p); VERTICAL (rede social) mede o lado maior
+                // (720x1280, 404x720…). Antes media sempre o lado menor e barrava quase todo vídeo vertical, que já era a
+                // maior qualidade que existia.
                 val min = Prefs.minHeight
-                if (min > 0 && meta.short in 1 until min) {
-                    markSkipped(t, "qualidade ${meta.short}p (abaixo de ${min}p) — pulado", ks)
+                val vertical = meta.h > meta.w && meta.w > 0
+                val measured = if (vertical) maxOf(meta.w, meta.h) else meta.short
+                if (min > 0 && measured in 1 until min) {
+                    markSkipped(t, "qualidade ${meta.w}x${meta.h} (abaixo de ${min}p) — pulado", ks)
                     return
                 }
                 if (!t.force) VideoQuality.repeatOf(siteHost, meta.durMs)?.let { prev ->
