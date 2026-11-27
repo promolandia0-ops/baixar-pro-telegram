@@ -257,12 +257,8 @@ object JsRender {
         if (!available()) { lastUnavailable = true; return null }
         lastUnavailable = false
         if (!acquire(pool, slotWait)) return null
-        // Com o navegador na tela: no máximo 2 páginas ocultas de card ao mesmo tempo (antes 3, todas tocando vídeo
-        // junto com a página que você vê). Se a vaga demorar, segue mesmo assim: nenhum card deixa de ser aberto.
-        val vis = browserVisible && pool !== queueGate && acquire(visibleGate, 6_000)
-        // Com o navegador na tela, a fila abre 1 página oculta por vez (antes até 3 juntas disputavam o celular com
-        // a página que você está vendo e o navegador engasgava). Se a vaga demorar, segue mesmo assim (nada deixa de ser achado).
-        val solo = pool === queueGate && browserVisible && acquire(queueSoloGate, 8_000)
+        val vis = false
+        val solo = false
         return try {
             val act = activity?.get()?.takeIf { !it.isDestroyed && !it.isFinishing } ?: return null
             alive.incrementAndGet(); if (pool === queueGate) aliveQueue.incrementAndGet()
@@ -326,8 +322,6 @@ object JsRender {
         try { s.userAgentString = Net.userAgent } catch (_: Exception) {}
         wv.isFocusable = false
         wv.isClickable = false
-        // página oculta com prioridade baixa: a que você está vendo no navegador vem sempre primeiro
-        try { wv.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_WAIVED, true) } catch (_: Throwable) {}
         Quiet.hidden(wv)
         if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
             try { androidx.webkit.WebViewCompat.addDocumentStartJavaScript(wv, MseHookScript.SCRIPT, setOf("*")) } catch (_: Exception) {}
