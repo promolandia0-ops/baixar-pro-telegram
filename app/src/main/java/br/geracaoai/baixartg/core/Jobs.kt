@@ -26,7 +26,42 @@ object Jobs {
     val stopping = MutableStateFlow(false)
     @Volatile private var job: Job? = null
 
-    fun init(c: Context) { app = c.applicationContext; Sent.init(app.filesDir); History.init(app.filesDir) }
+    fun init(c: Context) {
+        app = c.applicationContext; Sent.init(app.filesDir); History.init(app.filesDir); QueueStore.init(app.filesDir)
+        // A fila volta se o Android fechou o app no meio.
+        QueueStore.carregar()?.let { r ->
+            if (r.itens.isNotEmpty()) {
+                items.value = r.itens; phase.value = Phase.LIST
+                val parados = r.itens.count { it.st == St.STOPPED && it.msg.startsWith("Interrompido") }
+                if (r.estavaRodando && parados > 0) {
+                    interrompidos = r.itens.filter { it.st == St.STOPPED && it.msg.startsWith("Interrompido") }.map { it.id }.toSet()
+                    val porque = QueueStore.motivoFechou(app, r.quando)
+                    status.value = "⚠ ${porque?.replaceFirstChar { it.uppercase() } ?: "O app foi fechado no meio"}. $parados vídeo(s) ficaram pela metade e vão continuar sozinhos."
+                }
+            }
+        }
+        // Salva a fila a cada mudança (no máximo a cada 1,5 s).
+        scope.launch {
+            var ultimo: List<Item>? = null; var ultimoRodando = false
+            while (true) {
+                delay(1500)
+                val l = items.value; val rod = job?.isActive == true && phase.value == Phase.RUNNING
+                if (l !== ultimo || rod != ultimoRodando) { ultimo = l; ultimoRodando = rod; QueueStore.salvar(l, rod) }
+            }
+        }
+    }
+
+    /** Itens que ficaram pela metade quando o app fechou. */
+    @Volatile private var interrompidos: Set<Int> = emptySet()
+    /** Pedidos que chegaram enquanto outra leva estava rodando: começam logo depois. */
+    private val pendentes = java.util.Collections.synchronizedSet(LinkedHashSet<Int>())
+
+    /** Chamado ao abrir o app: continua o que o Android interrompeu. */
+    fun retomarSeInterrompido() {
+        val ids = interrompidos; if (ids.isEmpty() || job?.isActive == true) return
+        interrompidos = emptySet()
+        startTransfer(ids)
+    }
 
     /** id == posição na lista, então a atualização é O(1) por índice (rápido com 5000 itens). */
     private fun set(id: Int, f: (Item) -> Item) = items.update { l -> if (id !in l.indices) l else l.toMutableList().also { it[id] = f(it[id]) } }
@@ -160,7 +195,18 @@ object Jobs {
 
     /** Itens vindos de fora da varredura (MEGA): entram na lista com o tamanho já conhecido. */
     fun addExternal(list: List<Pair<Found, Long>>, start: Boolean, label: String = "MEGA"): Boolean {
-        if (job?.isActive == true || list.isEmpty()) return false
+        if (list.isEmpty()) return false
+        if (job?.isActive == true) {
+            // Já tem download rodando: entra no fim da fila e começa assim que a leva atual terminar.
+            if (phase.value != Phase.RUNNING) return false
+            val have = items.value.map { it.f.url }.toHashSet()
+            val base = items.value.size
+            val add = list.filter { it.first.url !in have }.mapIndexed { i, (f, sz) -> Item(base + i, f, sel = true, sent = Sent.isSent(f), total = sz, msg = "Na fila: começa quando os atuais terminarem") }
+            if (add.isEmpty()) return true
+            items.update { it + add }
+            pendentes += add.map { it.id }
+            return true
+        }
         mode.value = Mode.LINKS
         val base = if (phase.value == Phase.LIST || phase.value == Phase.IDLE) items.value else emptyList()
         val have = base.map { it.f.url }.toHashSet()
@@ -215,7 +261,7 @@ object Jobs {
             val ok = AtomicInteger(); val fail = AtomicInteger()
             fun st() { status.value = "${ok.get() + fail.get()} de ${todo.size} concluídos • ${ok.get()} enviados" + (if (fail.get() > 0) " • ${fail.get()} com erro" else "") }
             try {
-                if (!Td.ready) throw IllegalStateException("Telegram não conectado")
+                if (!Td.ready && !Td.awaitReady(60_000)) throw IllegalStateException("Telegram não conectado")
                 Uploader.savedChat()
                 st()
                 coroutineScope {
@@ -231,9 +277,18 @@ object Jobs {
             } catch (e: CancellationException) {
                 items.update { l -> l.map { if (it.st == St.WAIT || it.st == St.DOWN || it.st == St.UP || it.st == St.READY) it.copy(st = St.STOPPED, msg = "Parado") else it } }
                 status.value = "Parado. ${ok.get()} enviados."
-            } catch (e: Exception) { status.value = "Erro: ${e.message}" }
+            } catch (e: Exception) {
+                status.value = "Erro: ${e.message}"
+                // nada fica "esperando" pra sempre: o que não andou vira erro com o motivo (dá pra reenviar)
+                items.update { l -> l.map { if (it.id in ids && (it.st == St.WAIT || it.st == St.DOWN || it.st == St.UP || it.st == St.READY)) it.copy(st = St.ERR, msg = e.message?.take(160) ?: "Erro") else it } }
+            }
             withContext(NonCancellable) { dir.listFiles()?.forEach { it.deleteRecursively() } }
             phase.value = Phase.LIST; stopping.value = false
+        }
+        job?.invokeOnCompletion { e ->
+            if (e != null) { pendentes.clear(); return@invokeOnCompletion }
+            val prox = synchronized(pendentes) { pendentes.toSet().also { pendentes.clear() } }
+            if (prox.isNotEmpty()) scope.launch { startTransfer(prox) }
         }
     }
 
@@ -317,6 +372,13 @@ object Jobs {
 
     fun clearHistory() { Sent.clear(); Prefs.synced = false; items.update { l -> l.map { if (it.sent) it.copy(sent = false) else it } }; syncStatus.value = "Histórico apagado." }
 
-    fun stop() { stopping.value = true; job?.cancel() }
+    fun stop() { stopping.value = true; pendentes.clear(); job?.cancel() }
+
+    /** O Android avisou que acabou o tempo de segundo plano (Android 15: 6 h por dia). Para sem perder a fila. */
+    fun pausarPorLimite() {
+        interrompidos = items.value.filter { it.sel && it.st in setOf(St.WAIT, St.DOWN, St.READY, St.UP) }.map { it.id }.toSet()
+        job?.cancel()
+        status.value = "⏸ O Android limita downloads em segundo plano (6 h por dia). Abra o app pra continuar os ${interrompidos.size} que faltam."
+    }
     val busy get() = job?.isActive == true
 }

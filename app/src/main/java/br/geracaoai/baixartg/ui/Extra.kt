@@ -162,9 +162,10 @@ fun BrowserScreen(onClose: () -> Unit, onUse: (url: String, site: Boolean) -> Un
         if (list.isEmpty()) { banner = "Não achei um vídeo nesta página."; return }
         if (list.any { PageVideos.blocked(it.url) || PageVideos.blocked(it.page) }) { banner = "Este site não é permitido."; return }
         WebCookies.persist()
+        val ocupado = Jobs.busy
         val ok = Jobs.addExternal(list.map { it to it.size.coerceAtLeast(-1) }, start = true, label = "Navegador")
         watching = list.map { it.url }.toSet()
-        banner = if (ok) "Baixando na melhor qualidade e enviando ao Telegram…" else "Há uma tarefa em andamento. Espere terminar."
+        banner = if (!ok) "Há uma busca em andamento. Espere terminar." else if (ocupado) "Adicionado à fila: baixa e envia assim que os atuais terminarem." else "Baixando na melhor qualidade e enviando ao Telegram…"
     }
     BackHandler { if (web?.canGoBack() == true) web?.goBack() else { WebCookies.persist(); onClose() } }
     fun go(t: String) { val u = t.trim().let { if (it.startsWith("http", true)) it else if (it.contains('.') && !it.contains(' ')) "https://$it" else "https://www.google.com/search?q=" + java.net.URLEncoder.encode(it, "UTF-8") }; web?.loadUrl(u) }

@@ -45,6 +45,7 @@ class MainActivity : ComponentActivity() {
     private val shared = mutableStateOf<String?>(null)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        br.geracaoai.baixartg.core.Jobs.retomarSeInterrompido()
         enableEdgeToEdge()
         handle(intent)
         setContent {

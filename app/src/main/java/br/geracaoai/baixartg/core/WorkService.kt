@@ -46,6 +46,12 @@ class WorkService : Service() {
             .addAction(Notification.Action.Builder(null, "Parar", stop).build()).build()
     }
 
+    /** Android 15: fim do tempo permitido em segundo plano. Para direitinho em vez de o Android fechar o app. */
+    override fun onTimeout(startId: Int, fgsType: Int) {
+        Jobs.pausarPorLimite()
+        stopForeground(STOP_FOREGROUND_REMOVE); stopSelf()
+    }
+
     override fun onDestroy() { scope.cancel(); wl?.let { if (it.isHeld) it.release() }; super.onDestroy() }
 
     companion object {
