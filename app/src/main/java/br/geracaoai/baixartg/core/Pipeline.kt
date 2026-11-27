@@ -295,12 +295,22 @@ object Pipeline {
     }
     private fun releaseQueue(t: PItem) { try { Sent.unqueue(keysToUnqueue(t)) } catch (_: Exception) {} }
 
+    /**
+     * Marcas de um item da fila, calculadas uma vez por versão do item. Antes eram recalculadas para CADA link da
+     * página contra CADA item da fila ao tocar em Procurar (milhares de decodificações de endereço) e a tela
+     * ficava parada até o Android fechar o app. O resultado é idêntico; só não é refeito à toa.
+     */
+    private val idKeyCache = java.util.concurrent.ConcurrentHashMap<Long, Pair<PItem, Set<String>>>()
     fun identityKeys(t: PItem): Set<String> {
+        idKeyCache[t.id]?.let { (src, ks) -> if (src === t) return ks }
         val k = LinkedHashSet<String>()
         k += keysToUnqueue(t)
         k += mediaKeysOf(t)
         k += t.keys
-        return k.filter { it.isNotBlank() }.toHashSet()
+        val r = k.filter { it.isNotBlank() }.toHashSet()
+        idKeyCache[t.id] = t to r
+        if (idKeyCache.size > items.value.size * 2 + 500) { val vivos = items.value.map { it.id }.toHashSet(); idKeyCache.keys.retainAll(vivos) }
+        return r
     }
     fun isActiveFor(keys: Collection<String>): Boolean {
         val ks = keys.filter { it.isNotBlank() }.toHashSet()
