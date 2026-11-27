@@ -100,7 +100,8 @@ object Pipeline {
     @Volatile private var saveJob: Job? = null
     private fun save() {
         if (saveJob?.isActive == true) return
-        saveJob = scope.launch { delay(1500); saveNow() }
+        // grava a fila inteira no máximo a cada 5 s (antes 1,5 s: com milhares de itens pesava junto com o navegador)
+        saveJob = scope.launch { delay(5000); saveNow() }
     }
     private val saveLock = Any()
     /** Grava sempre fora da thread principal. */
