@@ -13,6 +13,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
@@ -25,7 +26,6 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -46,7 +46,7 @@ import java.util.Date
 import java.util.Locale
 
 enum class Tab(val label: String, val icon: ImageVector) {
-    HOME("Início", Icons.Rounded.Home), BEST("4K", Icons.Rounded.HighQuality),
+    HOME("Início", Icons.Rounded.Home), BROWSER("Navegador", Icons.Rounded.Public),
     SITE("Varrer tudo", Icons.Rounded.TravelExplore), PAGE("Filtrar", Icons.Rounded.FilterAlt),
     QUEUE("Fila", Icons.Rounded.Downloading), HIST("Histórico", Icons.Rounded.History)
 }
@@ -55,9 +55,9 @@ enum class Tab(val label: String, val icon: ImageVector) {
 @Composable
 fun MainShell(shared: MutableState<String?>) {
     var tab by rememberSaveable { mutableStateOf(Tab.HOME) }
+    var prevTab by rememberSaveable { mutableStateOf(Tab.HOME) }
     var settings by rememberSaveable { mutableStateOf(false) }
-    var browser by rememberSaveable { mutableStateOf(false) }
-    var mega by rememberSaveable { mutableStateOf(false) }
+    fun goTab(t: Tab) { if (t != tab) { prevTab = tab; tab = t } }
     val homeText = rememberSaveable { mutableStateOf("") }
     val perms = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {}
     LaunchedEffect(Unit) { perms.launch(Manifest.permission.POST_NOTIFICATIONS) }
@@ -67,25 +67,24 @@ fun MainShell(shared: MutableState<String?>) {
     val items by Jobs.items.collectAsState()
     val active = items.count { it.st == St.DOWN || it.st == St.UP }
 
-    if (settings) { BackHandler { settings = false }; SettingsScreen { settings = false }; return }
-    if (browser) { BrowserScreen({ browser = false }) { u, site -> if (site) { Handoff.site.value = u; tab = Tab.SITE } else { Handoff.page.value = u; tab = Tab.PAGE }; browser = false }; return }
-    if (mega) { MegaScreen({ mega = false }) { mega = false; tab = Tab.QUEUE }; return }
+    var dedupe by rememberSaveable { mutableStateOf(false) }
+    if (dedupe) { BackHandler { dedupe = false }; DedupeScreen { dedupe = false }; return }
+    if (settings) { BackHandler { settings = false }; SettingsScreen({ settings = false }) { settings = false; dedupe = true }; return }
     Scaffold(
         topBar = {
-            TopAppBar(title = {
+            if (tab != Tab.BROWSER) TopAppBar(title = {
                 Column { Text(tab.label, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
                     Text("Baixar pro Telegram", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant) } },
-                actions = { IconButton({ mega = true }) { Icon(Icons.Rounded.Cloud, "MEGA") }
-                    IconButton({ browser = true }) { Icon(Icons.Rounded.Public, "Navegador") }
+                actions = { IconButton({ dedupe = true }) { Icon(Icons.Rounded.DeleteSweep, "Limpar repetidos") }
                     IconButton({ settings = true }) { Icon(Icons.Rounded.Settings, "Configurações") } },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background))
         },
         bottomBar = {
             Column {
-                ActivityBar(phase) { tab = Tab.QUEUE }
+                ActivityBar(phase) { goTab(Tab.QUEUE) }
                 NavigationBar {
                     Tab.entries.forEach { t ->
-                        NavigationBarItem(selected = tab == t, onClick = { tab = t }, label = { Text(t.label, maxLines = 1) },
+                        NavigationBarItem(selected = tab == t, onClick = { goTab(t) }, label = { Text(t.label, maxLines = 1) },
                             icon = { if (t == Tab.QUEUE && (items.isNotEmpty())) BadgedBox(badge = { Badge { Text(if (active > 0) "$active" else "${items.size}") } }) { Icon(t.icon, null) } else Icon(t.icon, null) })
                     }
                 }
@@ -93,14 +92,24 @@ fun MainShell(shared: MutableState<String?>) {
         }
     ) { pad ->
         Box(Modifier.fillMaxSize().padding(pad)) {
-            AnimatedContent(tab, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tab") { t ->
-                when (t) {
-                    Tab.HOME -> HomeTab(homeText) { tab = Tab.QUEUE }
-                    Tab.BEST -> QualityTab { tab = Tab.QUEUE }
-                    Tab.SITE -> SiteTab { tab = Tab.QUEUE }
-                    Tab.PAGE -> PageTab()
-                    Tab.QUEUE -> QueueTab()
-                    Tab.HIST -> HistoryTab { tab = Tab.QUEUE }
+            // Navegador sempre composto: trocar de aba só esconde, a mesma instância do WebView continua viva
+            Box(Modifier.fillMaxSize()) {
+                BrowserScreen(visible = tab == Tab.BROWSER, onLeaveTab = { tab = prevTab }) { u, site ->
+                    if (site) { Handoff.site.value = u; goTab(Tab.SITE) } else { Handoff.page.value = u; goTab(Tab.PAGE) }
+                }
+            }
+            if (tab != Tab.BROWSER) {
+                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                    AnimatedContent(tab, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "tab") { t ->
+                        when (t) {
+                            Tab.HOME -> HomeTab(homeText) { goTab(Tab.QUEUE) }
+                            Tab.BROWSER -> {}
+                            Tab.SITE -> SiteTab { goTab(Tab.QUEUE) }
+                            Tab.PAGE -> PageTab()
+                            Tab.QUEUE -> QueueTab()
+                            Tab.HIST -> HistoryTab { goTab(Tab.QUEUE) }
+                        }
+                    }
                 }
             }
         }
@@ -116,7 +125,7 @@ fun ActivityBar(phase: Phase, onOpen: () -> Unit) {
             Row(Modifier.fillMaxWidth().clickable(onClick = onOpen).padding(start = 16.dp, end = 8.dp, top = 6.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
                 CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 Spacer(Modifier.width(12.dp))
-                Text(if (phase == Phase.CRAWLING) "Procurando: ${crawl.pagesDone} páginas • ${crawl.found} vídeos" else status.ifBlank { "Baixando e enviando…" },
+                Text(if (phase == Phase.CRAWLING) "${crawl.method.ifBlank { "Procurando" }}: ${crawl.pagesDone} páginas • ${crawl.found} mídias" else status.ifBlank { "Baixando e enviando…" },
                     Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onPrimaryContainer)
                 TextButton({ Jobs.stop() }, enabled = !stopping) { Icon(Icons.Rounded.Stop, null, Modifier.size(18.dp)); Spacer(Modifier.width(4.dp)); Text(if (stopping) "Parando…" else "Parar") }
             }
@@ -154,6 +163,19 @@ fun BigButton(text: String, icon: ImageVector, enabled: Boolean, onClick: () -> 
         Icon(icon, null); Spacer(Modifier.width(10.dp)); Text(text, style = MaterialTheme.typography.titleSmall) }
 }
 
+/** Copia o relatório da última busca (sem links/domínios) para colar no chat. */
+@Composable
+fun DiagButton(always: Boolean = false) {
+    val rep by Jobs.diagReport.collectAsState(); val ctx = LocalContext.current
+    if (rep.isBlank() && !always) return
+    OutlinedButton(onClick = {
+        val cm = ctx.getSystemService(ClipboardManager::class.java)
+        val full = listOf(rep, BrowserDiag.report(), br.geracaoai.baixartg.core.CrashLog.report()).filter { it.isNotBlank() }.joinToString("\n")
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("diagnóstico", full))
+        Toast.makeText(ctx, "Diagnóstico copiado (sem links). Cole no chat.", Toast.LENGTH_SHORT).show()
+    }, modifier = Modifier.fillMaxWidth()) { Icon(Icons.Rounded.ContentCopy, null); Spacer(Modifier.width(8.dp)); Text("Copiar diagnóstico") }
+}
+
 @Composable
 fun InfoCard(text: String, icon: ImageVector = Icons.Rounded.Info, tone: Int = 0) {
     val (bg, fg) = when (tone) { 1 -> MaterialTheme.colorScheme.errorContainer to MaterialTheme.colorScheme.onErrorContainer
@@ -168,14 +190,26 @@ fun InfoCard(text: String, icon: ImageVector = Icons.Rounded.Info, tone: Int = 0
 fun ScanProgress() {
     val crawl by Jobs.crawl.collectAsState()
     OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp)) {
-        Text("Procurando vídeos…", style = MaterialTheme.typography.titleSmall)
+        Text(crawl.method.ifBlank { "Procurando…" }, style = MaterialTheme.typography.titleSmall)
         Spacer(Modifier.height(10.dp))
         val tot = (crawl.pagesDone + crawl.queued).coerceAtLeast(1)
         LinearProgressIndicator(progress = { crawl.pagesDone.toFloat() / tot }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
         Spacer(Modifier.height(10.dp))
-        Row { Stat("${crawl.pagesDone}", "páginas lidas", Modifier.weight(1f)); Stat("${crawl.queued}", "na fila", Modifier.weight(1f)); Stat("${crawl.found}", "vídeos", Modifier.weight(1f)) }
+        Row { Stat("${crawl.pagesDone}", "páginas lidas", Modifier.weight(1f)); Stat("${crawl.queued}", "na fila", Modifier.weight(1f)); Stat("${crawl.found}", "mídias", Modifier.weight(1f)) }
+        if (crawl.cards > 0 || crawl.searchPages > 0 || crawl.failed > 0) {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                listOfNotNull(
+                    crawl.searchPages.takeIf { it > 0 }?.let { "$it págs. de busca" },
+                    crawl.cards.takeIf { it > 0 }?.let { "$it cards" },
+                    crawl.resolved.takeIf { it > 0 }?.let { "$it resolvidos" },
+                    crawl.failed.takeIf { it > 0 }?.let { "$it sem stream" },
+                ).joinToString(" • "),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
         Spacer(Modifier.height(6.dp))
-        Text(crawl.current, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Text(crawl.detail.ifBlank { crawl.current }, style = MaterialTheme.typography.bodySmall, maxLines = 3, overflow = TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant)
     } }
 }
 
@@ -191,7 +225,7 @@ fun HomeTab(text: MutableState<String>, goQueue: () -> Unit) {
     val phase by Jobs.phase.collectAsState(); val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     val links = remember(text.value) { Jobs.parseLinks(text.value) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Baixar vídeos", "Cole um ou vários links (um por linha). Qualidade original, sem compressão.", Icons.Rounded.Download) }
+        item { Section("Baixar vídeos", "Cole um ou vários links (um por linha). Qualidade original, sem compressão. Se o link for uma listagem de vídeos, o app abre cada card e pega o vídeo (nunca a capa). Só vídeos — fotos não entram.", Icons.Rounded.Download) }
         item { LinkField(text.value, { text.value = it }, !busy, multi = true, label = "Links dos vídeos ou páginas") }
         item {
             BigButton(if (links.size > 1) "Baixar ${links.size} links" else "Baixar", Icons.Rounded.Download, !busy && links.isNotEmpty()) {
@@ -209,12 +243,11 @@ fun HomeTab(text: MutableState<String>, goQueue: () -> Unit) {
 fun HowTo() {
     OutlinedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Como funciona", style = MaterialTheme.typography.titleSmall)
-        Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados.")
-        Tip(Icons.Rounded.HighQuality, "Buscar 4K", "procura o mesmo vídeo (ou um tema) na melhor qualidade e deixa baixar ou enviar ao Telegram.")
-        Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "percorre o site inteiro e baixa todos os vídeos.")
-        Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega só os vídeos de uma página, sem abrir outras.")
-        Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta (YouTube etc.); a sessão fica só no aparelho e a busca/download reutilizam esses cookies, sem anúncios.")
-        Tip(Icons.Rounded.Cloud, "MEGA", "entre na sua conta MEGA ou cole um link público e envie os vídeos.")
+        Tip(Icons.Rounded.Download, "Início", "baixa os vídeos dos links colados; se for listagem, abre cada card e pega o vídeo real.")
+        Tip(Icons.Rounded.TravelExplore, "Varrer tudo", "com um nome tenta a busca do site, senão varre o domínio; mostra só os vídeos que batem no título para você confirmar.")
+        Tip(Icons.Rounded.FilterAlt, "Filtrar", "pega os vídeos desta página; se for uma listagem, abre cada vídeo e baixa o vídeo (não a miniatura).")
+        Tip(Icons.Rounded.Public, "Navegador", "entre na sua conta do site; os downloads usam essa sessão.")
+        Tip(Icons.Rounded.Cloud, "MEGA", "cole um link público do MEGA no Início e os vídeos vão para o Telegram.")
         Tip(Icons.Rounded.Lock, "Segundo plano", "pode bloquear a tela; “Parar” interrompe na hora.")
     } }
 }
@@ -232,15 +265,19 @@ fun SiteTab(goQueue: () -> Unit) {
     var name by rememberSaveable { mutableStateOf("") }
     LaunchedEffect(Handoff.site.value) { Handoff.site.value?.let { url = it; Handoff.site.value = null } }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Section("Buscar no site", "Cole o link do site e, se quiser, o nome de uma pessoa, canal ou título. A busca usa a pesquisa do próprio site (ou do YouTube) e só abre páginas relacionadas a esse nome.", Icons.Rounded.TravelExplore) }
+        item { Section("Varrer o site inteiro", "Cole o link do site e, embaixo, o nome ou título do vídeo (ex.: parte do título). Com um nome, o app tenta primeiro a busca do próprio site e só faz a varredura completa se a busca não achar nada. A lista aparece para você confirmar antes de enviar.", Icons.Rounded.TravelExplore) }
         item { LinkField(url, { url = it }, !busy, label = "Link do site") }
         item {
-            OutlinedTextField(name, { name = it }, label = { Text("Nome") }, placeholder = { Text("ex.: nome da pessoa, canal ou título") }, singleLine = true,
+            OutlinedTextField(name, { name = it }, label = { Text("Nome ou título") }, placeholder = { Text("ex.: parte do título ou do nome") }, singleLine = true,
                 enabled = !busy, leadingIcon = { Icon(Icons.Rounded.Search, null) }, shape = MaterialTheme.shapes.medium,
                 trailingIcon = { if (name.isNotEmpty()) IconButton({ name = "" }, enabled = !busy) { Icon(Icons.Rounded.Close, "Limpar") } },
                 modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(4.dp))
-            Text("O app tenta a busca do site, ou a busca do YouTube, ou só segue links cujo texto/endereço batem com o nome. Sem diferenciar maiúsculas ou acentos.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Com um nome, o app usa a busca do site e inclui todos os resultados (não só os que repetem o nome no texto ao lado). Na varredura completa, a palavra inteira é obrigatória (“vídeo” não traz “vídeos”). Nada é enviado até você conferir a lista.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            Text("Só vídeos. Capas e miniaturas dos players nunca entram.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Spacer(Modifier.height(8.dp))
+            PhotosToggle(!busy)
         }
         item {
             BigButton("Buscar", Icons.Rounded.Search, !busy && url.isNotBlank() && name.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.SITE, false, name) }
@@ -253,19 +290,30 @@ fun SiteTab(goQueue: () -> Unit) {
         }
         if (mode == Jobs.Mode.SITE) {
             if (phase == Phase.CRAWLING) item { ScanProgress() }
-            if (status.isNotBlank() && phase != Phase.CRAWLING) item { InfoCard(status) }
-            if (items.isNotEmpty() && phase != Phase.CRAWLING) {
-                item {
-                    val sel = items.count { it.sel && it.st != St.DONE }
-                    BigButton(if (sel == 0) "Tudo enviado ✓" else "Baixar todos ($sel)", Icons.AutoMirrored.Rounded.Send, sel > 0 && phase == Phase.LIST) {
-                        Jobs.selectAll(true); Jobs.startTransfer(); goQueue()
+            if (status.isNotBlank() && phase != Phase.CRAWLING) { item { InfoCard(status) }; item { DiagButton() } }
+            val onlyPhotos = BrowserDetect.mode.intValue == 1
+            if (items.isNotEmpty()) {
+                if (phase != Phase.CRAWLING && !onlyPhotos) item {
+                    val sel = items.count { it.sel && it.st != St.DONE && it.f.kind != Kind.PHOTO }
+                    val named = name.isNotBlank()
+                    BigButton(
+                        if (sel == 0) "Tudo enviado ✓" else if (named) "Baixar e enviar ($sel)" else "Baixar todos ($sel)",
+                        Icons.AutoMirrored.Rounded.Send, sel > 0 && (phase == Phase.LIST || phase == Phase.IDLE)
+                    ) {
+                        if (!named) Jobs.selectAll(true)
+                        Jobs.sendVideos(); goQueue()
                     }
                     Spacer(Modifier.height(8.dp))
                     FilledTonalButton(goQueue, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.Downloading, null); Spacer(Modifier.width(8.dp)); Text("Ver na Fila") }
                     Spacer(Modifier.height(8.dp))
                 }
-                items(items.take(400), key = { it.id }) { it -> ItemRow(it, phase == Phase.LIST || phase == Phase.IDLE) }
-                if (items.size > 400) item { Text("Mostrando 400 de ${items.size}. Abra a Fila para o restante.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                // enviados / na fila somem daqui (acompanhe na Fila); só fica o que ainda não foi mandado
+                val open = if (onlyPhotos) emptyList() else items.filter { it.f.kind != Kind.PHOTO && !it.sent && it.st != St.DONE && it.st !in setOf(St.DOWN, St.READY, St.UP) && !(phase == Phase.RUNNING && it.sel) }
+                val gone = if (onlyPhotos) 0 else items.count { it.f.kind != Kind.PHOTO } - open.size
+                if (gone > 0) item { Text("$gone vídeo(s) já enviados ou na fila — veja na Fila.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                items(open.take(400), key = { it.id }) { it -> ItemRow(it, phase == Phase.LIST || phase == Phase.IDLE) }
+                if (open.size > 400) item { Text("Mostrando 400 de ${open.size}. Abra a Fila para o restante.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                photosSection(phase)
             }
         }
     }
@@ -281,13 +329,46 @@ fun PageTab() {
     LaunchedEffect(Handoff.page.value) { Handoff.page.value?.let { url = it; Handoff.page.value = null } }
     val query = rememberSaveable { mutableStateOf("") }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        item { Section("Só os vídeos desta página", "Cole o link de uma página. O app lista apenas os vídeos dela (não abre outras páginas), todos já marcados.", Icons.Rounded.FilterAlt) }
+        item { Section("Só os vídeos desta página", "Cole o link de uma página ou de uma listagem. Se for uma grade de vídeos, o app abre cada card e pega o vídeo real — nunca a capa. Se for a página de um único vídeo, tenta o HTML, o servidor yt-dlp e o player na WebView. Só vídeos.", Icons.Rounded.FilterAlt) }
         item { LinkField(url, { url = it }, !busy, label = "Link da página") }
+        item { PhotosToggle(!busy) }
         item { BigButton("Buscar vídeos desta página", Icons.Rounded.Search, !busy && url.isNotBlank()) { Jobs.startScan(listOf(url), Jobs.Mode.PAGE, false) } }
         if (mode == Jobs.Mode.PAGE) {
             if (phase == Phase.CRAWLING) item { ScanProgress() }
-            if (status.isNotBlank() && phase != Phase.CRAWLING) item { InfoCard(status) }
-            itemsPanel(query, showSend = true)
+            if (status.isNotBlank() && phase != Phase.CRAWLING) { item { InfoCard(status) }; item { DiagButton() } }
+            if (BrowserDetect.mode.intValue != 1) itemsPanel(query, showSend = true, videosOnly = true)
+            photosSection(phase)
+        }
+    }
+}
+
+@Composable
+fun PhotosToggle(enabled: Boolean) {
+    val mm by BrowserDetect.mode
+    Column {
+        Text("O que baixar", style = MaterialTheme.typography.bodyLarge)
+        MediaModeSelector(mm) { if (enabled) BrowserDetect.setMode(it) }
+        Text("Fotos = fotos de verdade postadas na página (ex.: diagramas). Nunca capas ou miniaturas de vídeo.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Seção "Fotos" (separada dos vídeos): marcar todos, desmarcar e baixar só as fotos. */
+fun LazyListScope.photosSection(phase: Phase) {
+    item(key = "photos") {
+        val items by Jobs.items.collectAsState()
+        val ph = items.filter { it.f.kind == Kind.PHOTO && !it.sent && it.st != St.DONE && it.st !in setOf(St.DOWN, St.READY, St.UP) && !(phase == Phase.RUNNING && it.sel) }
+        if (ph.isEmpty()) return@item
+        val editable = phase == Phase.LIST || phase == Phase.IDLE
+        val sel = ph.count { it.sel }
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            HorizontalDivider()
+            Text("Fotos (${ph.size}) • $sel marcadas", style = MaterialTheme.typography.titleMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilledTonalButton({ Jobs.selectPhotos(true) }, enabled = editable && sel < ph.size, modifier = Modifier.weight(1f)) { Text("Marcar todos", maxLines = 1) }
+                OutlinedButton({ Jobs.selectPhotos(false) }, enabled = editable && sel > 0, modifier = Modifier.weight(1f)) { Text("Desmarcar todos", maxLines = 1) }
+            }
+            Button({ Jobs.sendPhotos() }, Modifier.fillMaxWidth(), enabled = editable && sel > 0) { Icon(Icons.Rounded.Download, null); Spacer(Modifier.width(8.dp)); Text("Baixar marcados ($sel)") }
+            ph.take(300).forEach { key("ph" + it.id) { ItemRow(it, editable) } }
         }
     }
 }
@@ -298,20 +379,252 @@ fun PageTab() {
 fun QueueTab() {
     val items by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState(); val status by Jobs.status.collectAsState()
     val query = rememberSaveable { mutableStateOf("") }
+    val pItems by Pipeline.items.collectAsState()
+    val pFilter = rememberSaveable { mutableStateOf(0) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        if (pItems.isNotEmpty()) pipelinePanel(pItems, pFilter)
         if (items.isEmpty()) {
-            item { if (phase == Phase.CRAWLING) ScanProgress() else EmptyState(Icons.Rounded.Downloading, "Fila vazia", "Cole um link em Início, Varrer tudo ou Filtrar.") }
+            if (pItems.isEmpty()) item { if (phase == Phase.CRAWLING) ScanProgress() else EmptyState(Icons.Rounded.Downloading, "Fila vazia", "Cole um link em Início, Varrer tudo ou Filtrar.") }
         } else {
             item { QueueSummary(items, phase) }
             if (phase == Phase.CRAWLING) item { ScanProgress() }
-            if (status.isNotBlank() && phase == Phase.LIST) item { InfoCard(status) }
+            if (status.isNotBlank() && phase == Phase.LIST) { item { InfoCard(status) }; item { DiagButton() } }
             itemsPanel(query, showSend = true)
         }
     }
 }
 
+/** Fila de envio do Navegador (persistente, em segundo plano). */
+private fun pipeGroup(st: Pipeline.PS) = when (st) {
+    Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP -> 1
+    Pipeline.PS.WAIT, Pipeline.PS.READY -> 2
+    Pipeline.PS.DONE -> 3
+    Pipeline.PS.FAIL -> 4
+    Pipeline.PS.SKIP -> 7
+    Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING -> 8
+    Pipeline.PS.CANCEL -> 9
+}
+
+private fun isPhotoItem(t: Pipeline.PItem) = t.photo || t.f?.kind == Kind.PHOTO
+
+fun LazyListScope.pipelinePanel(l: List<Pipeline.PItem>, filter: MutableState<Int>) {
+    item(key = "pipe-head") {
+        val paused by Pipeline.paused.collectAsState(); val running by Pipeline.running.collectAsState()
+        val done = l.count { it.st == Pipeline.PS.DONE }; val fail = l.count { it.st == Pipeline.PS.FAIL }
+        val waiting = l.count { it.st == Pipeline.PS.WAIT || it.st == Pipeline.PS.READY }
+        val resolving = l.count { it.st == Pipeline.PS.RESOLVING }
+        val downs = l.count { it.st == Pipeline.PS.DOWN }; val ups = l.count { it.st == Pipeline.PS.UP }
+        val analyzing = l.count { it.st == Pipeline.PS.ANALYZE || it.st == Pipeline.PS.ANALYZING }
+        val skip = l.count { it.st == Pipeline.PS.SKIP }; val cancel = l.count { it.st == Pipeline.PS.CANCEL }
+        val activeNow = resolving + downs + ups
+        val active = l.any { !Pipeline.isFinal(it.st) }
+        val nPhotos = l.count { isPhotoItem(it) }; val nVideos = l.size - nPhotos
+        var confirm by remember { mutableStateOf(false) }
+        var clearWhich by remember { mutableStateOf("") }
+        ElevatedCard(Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Fila de envio do Navegador", style = MaterialTheme.typography.titleMedium)
+            Row { Stat("$done", "enviados", Modifier.weight(1f)); Stat("${waiting + activeNow}", "ativos/fila", Modifier.weight(1f)); Stat("${fail + analyzing}", "falharam", Modifier.weight(1f))
+                if (skip > 0) Stat("$skip", "repetidos", Modifier.weight(1f).clickable { filter.value = 7 }) }
+            if (skip > 0) Text("Repetidos = baixados mas não enviados porque parecem um vídeo já enviado. Toque em \"repetidos\" pra ver; se não forem, use \"Baixar repetidos mesmo assim\".",
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("$nVideos vídeo${if (nVideos == 1) "" else "s"} • $nPhotos foto${if (nPhotos == 1) "" else "s"}", style = MaterialTheme.typography.bodyMedium)
+            LinearProgressIndicator(progress = { if (l.isEmpty()) 0f else (done + fail + skip + cancel).toFloat() / l.size }, Modifier.fillMaxWidth().height(6.dp), strokeCap = androidx.compose.ui.graphics.StrokeCap.Round)
+            Text("$done de ${l.size} enviados" +
+                (if (resolving > 0) " • abrindo $resolving" else "") +
+                (if (downs > 0) " • baixando $downs" else "") +
+                (if (ups > 0) " • enviando $ups" else "") +
+                (if (waiting > 0) " • $waiting na fila" else "") +
+                (if (analyzing > 0) " • $analyzing em análise" else "") +
+                (if (fail > 0) " • $fail falharam" else "") +
+                (if (skip > 0) " • $skip repetidos" else "") +
+                (if (cancel > 0) " • $cancel cancelados" else "") +
+                (if (paused) " • PAUSADO" else if (running) " • ativo" else ""),
+                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (paused) Button({ Pipeline.resume() }, Modifier.weight(1f), enabled = active) { Text("Retomar") }
+                else FilledTonalButton({ Pipeline.pause() }, Modifier.weight(1f), enabled = active) { Text("Pausar") }
+                OutlinedButton({ confirm = true }, Modifier.weight(1f), enabled = active) { Text("Cancelar tudo", maxLines = 1) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (fail + analyzing > 0) FilledTonalButton({ Pipeline.retryFailed() }, Modifier.weight(1f)) { Text("Reenviar falhas", maxLines = 1) }
+                OutlinedButton({ clearWhich = "menu" }, Modifier.weight(1f)) { Text("Limpar", maxLines = 1) }
+            }
+            if (skip > 0) {
+                FilledTonalButton({ Pipeline.forceSendAllSkipped() }, Modifier.fillMaxWidth()) { Text("Baixar repetidos mesmo assim", maxLines = 1) }
+            }
+        } }
+        if (confirm) AlertDialog(onDismissRequest = { confirm = false }, title = { Text("Cancelar tudo?") },
+            text = { Text("Os vídeos que ainda não foram enviados saem da fila e voltam a aparecer no navegador.") },
+            confirmButton = { TextButton({ confirm = false; Pipeline.cancelAll() }) { Text("Cancelar tudo") } },
+            dismissButton = { TextButton({ confirm = false }) { Text("Voltar") } })
+        if (clearWhich.isNotEmpty()) ClearQueueDialog(clearWhich, l, { clearWhich = it }, { clearWhich = "" })
+    }
+    // contagem por grupo numa passada só (rápido com milhares de itens)
+    val cnt = IntArray(10); for (t in l) { cnt[pipeGroup(t.st)]++; if (isPhotoItem(t)) cnt[6]++ else cnt[5]++ }
+    cnt[0] = l.size
+    item(key = "pipe-chips") { PipeChips(filter, cnt) }
+    val f = filter.value
+    val shown = if (f == 0) {
+        // Todos: o que está andando primeiro, depois a ordem da fila
+        val a = ArrayList<Pipeline.PItem>(l.size); l.filterTo(a) { pipeGroup(it.st) == 1 }; l.filterTo(a) { pipeGroup(it.st) != 1 }; a
+    } else if (f == 5) l.filter { !isPhotoItem(it) } else if (f == 6) l.filter { isPhotoItem(it) } else l.filter { pipeGroup(it.st) == f }
+    if (shown.isEmpty()) item(key = "pipe-empty") { Text("Nada aqui.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+    // Falhas: o diagnóstico de cada uma aparece na tela, pronto para copiar (sem nomes nem links)
+    if (f == 4 && shown.isNotEmpty()) item(key = "fail-diag") { FailDiagPanel(shown) }
+    else items(shown, key = { "pq" + it.id }, contentType = { "pipe" }) { t -> PipeRow(t) }
+}
+
+@Composable
+private fun FailDiagPanel(items: List<Pipeline.PItem>) {
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val todo = remember(items.map { it.id }) { items.take(20) }
+    val reports = remember(todo.map { it.id }) { mutableStateMapOf<Long, String>() }
+    var left by remember(todo.map { it.id }) { mutableStateOf(todo.size) }
+    LaunchedEffect(todo.map { it.id }) {
+        val gate = kotlinx.coroutines.sync.Semaphore(3)
+        kotlinx.coroutines.coroutineScope {
+            todo.forEachIndexed { i, t ->
+                launch {
+                    gate.acquire()
+                    try {
+                        reports[t.id] = "analisando (testando o link agora)…"
+                        reports[t.id] = try { FailDoctor.diagnose(t, i + 1) } catch (e: Exception) {
+                            if (e is kotlinx.coroutines.CancellationException) throw e
+                            "— falha ${i + 1} —\nnão consegui analisar: ${e.javaClass.simpleName}"
+                        }
+                    } finally { gate.release(); left-- }
+                }
+            }
+        }
+    }
+    val cs = MaterialTheme.colorScheme
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Diagnóstico de cada falha", style = MaterialTheme.typography.titleSmall)
+                Text(if (left > 0) "Testando agora… faltam $left" else "Pronto. Sem nomes nem links (sites viram códigos).", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+            }
+            if (left > 0) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+            TextButton({ copy(ctx, todo.joinToString("\n\n") { reports[it.id] ?: "" }, "${todo.size} diagnóstico(s) copiado(s). Cole no chat.") }) { Text("Copiar todos") }
+        }
+        if (items.size > todo.size) Text("Mostrando as ${todo.size} falhas mais recentes de ${items.size}.", style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+        todo.forEach { t ->
+            Surface(color = cs.surfaceContainerLow, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(12.dp)) {
+                    Text(reports[t.id] ?: "esperando para analisar…", style = MaterialTheme.typography.bodySmall, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                    Row {
+                        TextButton({ copy(ctx, reports[t.id] ?: "", "Diagnóstico copiado. Cole no chat.") }) { Text("Copiar") }
+                        TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PipeChips(filter: MutableState<Int>, cnt: IntArray) {
+    val names = listOf("Todos", "Em andamento", "Na fila", "Enviados", "Falhas", "Vídeos", "Fotos", "Repetidos", "Em análise", "Cancelados")
+    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        names.forEachIndexed { i, n ->
+            FilterChip(selected = filter.value == i, onClick = { filter.value = i }, label = { Text("$n (${cnt[i]})", maxLines = 1) })
+        }
+    }
+}
+
+private fun speedTxt(b: Long): String = if (b <= 0) "" else if (b >= 1 shl 20) " (%.1f MB/s)".format(b / 1048576.0) else " (%.0f KB/s)".format(b / 1024.0)
+
+@Composable
+fun PipeRow(t: Pipeline.PItem) {
+    val cs = MaterialTheme.colorScheme
+    Surface(color = cs.surfaceContainerLow, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth()) {
+        Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(t.title.ifBlank { t.page }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyMedium)
+                val pct = (t.prog * 100).toInt().coerceIn(0, 100)
+                Text(when (t.st) {
+                    Pipeline.PS.WAIT -> "aguardando" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.RESOLVING -> "abrindo página…" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.READY -> "aguardando (vídeo já encontrado)" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.DOWN -> if (t.prog >= 1f) (t.msg.ifBlank { "baixado, esperando envio" }) else "baixando " + (if (t.prog > 0f) "$pct%" else "") + speedTxt(t.speed) + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.UP -> if (t.msg.startsWith("Esperando")) t.msg else "enviando $pct%" + speedTxt(t.speed)
+                    Pipeline.PS.DONE -> "enviado" + (if (t.msg.isNotBlank()) " • " + t.msg else "")
+                    Pipeline.PS.FAIL -> "falhou: " + t.msg.ifBlank { "erro" }
+                    Pipeline.PS.SKIP -> "repetido (não enviado) • " + t.msg
+                    Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING -> "em análise: " + t.msg.ifBlank { "tentando de outro jeito" }
+                    Pipeline.PS.CANCEL -> "cancelado" + (if (t.msg.isNotBlank() && t.msg != "cancelado") " • " + t.msg else "")
+                }, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall,
+                    color = when (t.st) { Pipeline.PS.FAIL, Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING -> cs.error; Pipeline.PS.DONE -> cs.primary; Pipeline.PS.CANCEL -> cs.onSurfaceVariant; else -> cs.onSurfaceVariant })
+                if ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog > 0f) {
+                    Spacer(Modifier.height(4.dp)); LinearProgressIndicator(progress = { t.prog }, Modifier.fillMaxWidth())
+                } else if (t.st == Pipeline.PS.RESOLVING || t.st == Pipeline.PS.ANALYZING || ((t.st == Pipeline.PS.DOWN || t.st == Pipeline.PS.UP) && t.prog <= 0f)) {
+                    Spacer(Modifier.height(4.dp)); LinearProgressIndicator(Modifier.fillMaxWidth())
+                }
+            }
+            if (t.st == Pipeline.PS.FAIL || t.st == Pipeline.PS.ANALYZE) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+            if (t.st == Pipeline.PS.SKIP) TextButton({ Pipeline.forceSend(t.id) }) { Text("Baixar mesmo assim") }
+            if (t.st == Pipeline.PS.CANCEL) TextButton({ Pipeline.retry(t.id) }) { Text("Reenviar") }
+            if (t.st in setOf(Pipeline.PS.WAIT, Pipeline.PS.READY, Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP, Pipeline.PS.ANALYZE, Pipeline.PS.ANALYZING))
+                TextButton({ Pipeline.cancel(t.id) }) { Text("Cancelar") }
+        }
+    }
+}
+
+@Composable
+private fun ClearQueueDialog(which: String, l: List<Pipeline.PItem>, setWhich: (String) -> Unit, close: () -> Unit) {
+    val failN = l.count { it.st == Pipeline.PS.FAIL || it.st == Pipeline.PS.ANALYZE }
+    val queueN = l.count { it.st in setOf(Pipeline.PS.WAIT, Pipeline.PS.READY, Pipeline.PS.RESOLVING, Pipeline.PS.DOWN, Pipeline.PS.UP) }
+    val doneN = l.count { it.st == Pipeline.PS.DONE }
+    val histN = History.list.value.size
+    if (which == "menu") {
+        AlertDialog(onDismissRequest = close, title = { Text("Limpar") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Cada botão pede confirmação. O que falhou volta a aparecer no navegador. O histórico e a memória de “já enviado” são coisas diferentes.")
+                    OutlinedButton({ setWhich("falhas") }, Modifier.fillMaxWidth(), enabled = failN > 0) { Text("Apagar falhas ($failN)", maxLines = 1) }
+                    OutlinedButton({ setWhich("fila") }, Modifier.fillMaxWidth(), enabled = queueN > 0) { Text("Apagar fila ($queueN)", maxLines = 1) }
+                    OutlinedButton({ setWhich("enviados") }, Modifier.fillMaxWidth(), enabled = doneN > 0) { Text("Apagar baixados/enviados ($doneN)", maxLines = 1) }
+                    OutlinedButton({ setWhich("historico") }, Modifier.fillMaxWidth(), enabled = histN > 0) { Text("Apagar histórico ($histN)", maxLines = 1) }
+                    Button({ setWhich("tudo") }, Modifier.fillMaxWidth(), colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)) { Text("Apagar tudo") }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(close) { Text("Fechar") } })
+        return
+    }
+    val (title, body, act) = when (which) {
+        "falhas" -> Triple("Apagar falhas?", "Saiem da fila as falhas e o que está em análise. Voltam a aparecer no navegador para baixar de novo.", { Pipeline.clearFailed() })
+        "fila" -> Triple("Apagar fila?", "Sai o que ainda não foi enviado (incluindo o que está baixando). O que já foi enviado e o histórico ficam.", { Pipeline.clearQueue() })
+        "enviados" -> Triple("Apagar baixados/enviados?", "Tira da fila só os que já foram enviados. O histórico e a memória de “já enviado” continuam (eles não voltam a aparecer no navegador).", { Pipeline.clearDone() })
+        "historico" -> Triple("Apagar histórico?", "Apaga a lista do Histórico (os envios feitos). A memória de “já enviado” — que esconde no navegador o que já foi mandado — é outra coisa: você escolhe abaixo.", { })
+        "tudo" -> Triple("Apagar tudo?", "Limpa a fila inteira (falhas, pendentes e enviados) e a lista do Histórico. A memória de “já enviado” você escolhe abaixo.", { })
+        else -> Triple("", "", { })
+    }
+    var alsoMem by remember(which) { mutableStateOf(which == "tudo") }
+    AlertDialog(onDismissRequest = close, title = { Text(title) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(body)
+                if (which == "historico" || which == "tudo") {
+                    SwitchRow("Também apagar a memória de já enviado", "Se ligar, os itens já mandados voltam a aparecer no navegador para baixar de novo.", alsoMem) { alsoMem = it }
+                }
+            }
+        },
+        confirmButton = { TextButton({
+            when (which) {
+                "historico" -> { Jobs.clearHistoryList(); if (alsoMem) Jobs.clearSentMemory() }
+                "tudo" -> { Pipeline.clearAll(alsoSentMemory = alsoMem); if (alsoMem) Jobs.clearSentMemory() }
+                else -> act()
+            }
+            close()
+        }) { Text("Apagar") } },
+        dismissButton = { TextButton(close) { Text("Cancelar") } })
+}
+
 @Composable
 fun QueueSummary(items: List<Item>, phase: Phase) {
+
     val sel = items.filter { it.sel || it.st != St.WAIT }
     val done = sel.count { it.st == St.DONE }; val err = sel.count { it.st == St.ERR }
     val prog = if (sel.isEmpty()) 0f else sel.sumOf { (when (it.st) { St.DONE, St.ERR -> 1f; St.DOWN -> it.prog * 0.5f; St.READY -> 0.5f; St.UP -> 0.5f + it.prog * 0.5f; else -> 0f }).toDouble() }.toFloat() / sel.size
@@ -331,9 +644,9 @@ fun EmptyState(icon: ImageVector, title: String, sub: String) {
 }
 
 /** Lista de vídeos com seleção em massa, filtro por nome e envio. Usada na Fila e no Filtrar. */
-fun LazyListScope.itemsPanel(query: MutableState<String>, showSend: Boolean) {
+fun LazyListScope.itemsPanel(query: MutableState<String>, showSend: Boolean, videosOnly: Boolean = false) {
     item(key = "tools") { SelectionTools(query, showSend) }
-    item(key = "list") { ItemsList(query.value) }
+    item(key = "list") { ItemsList(query.value, videosOnly) }
 }
 
 @Composable
@@ -370,7 +683,7 @@ fun SelectionTools(query: MutableState<String>, showSend: Boolean) {
         }
         if (showSend && editable) {
             val pend = items.count { it.sel && it.st != St.DONE }
-            BigButton(if (pend == 0) "Tudo enviado ✓" else "Baixar e enviar $pend vídeo(s)", Icons.AutoMirrored.Rounded.Send, pend > 0) { Jobs.startTransfer() }
+            BigButton(if (pend == 0) "Tudo enviado ✓" else "Baixar e enviar $pend", Icons.AutoMirrored.Rounded.Send, pend > 0) { Jobs.startTransfer() }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             TextButton({ copy(ctx, items.joinToString("\n") { linkOf(it.f) }, "${items.size} links copiados") }) { Icon(Icons.Rounded.ContentCopy, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Copiar links") }
@@ -382,8 +695,9 @@ fun SelectionTools(query: MutableState<String>, showSend: Boolean) {
 
 /** Lista renderizada dentro de um item (até 400 de cada vez para manter fluido; filtro por nome restringe). */
 @Composable
-fun ItemsList(q: String) {
-    val items by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState()
+fun ItemsList(q: String, videosOnly: Boolean = false) {
+    val all by Jobs.items.collectAsState(); val phase by Jobs.phase.collectAsState()
+    val items = remember(all, videosOnly) { if (videosOnly) all.filter { it.f.kind != Kind.PHOTO && !it.sent && it.st != St.DONE } else all }
     val qWords = remember(q) { NameFilter.words(q) }
     val shown = remember(items, qWords) { if (qWords.isEmpty()) items else items.filter { NameFilter.matches(it.f, qWords) } }
     var limit by remember { mutableIntStateOf(200) }
@@ -400,12 +714,12 @@ fun ItemRow(it: Item, editable: Boolean) {
     Surface(color = cs.surfaceContainerLow, shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
         Row(Modifier.clickable(enabled = editable) { Jobs.toggle(it.id) }.padding(start = 4.dp, end = 4.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Checkbox(it.sel, { _ -> Jobs.toggle(it.id) }, enabled = editable)
-            Thumb(it.f.thumb, Modifier.padding(end = 8.dp).size(72.dp).clip(MaterialTheme.shapes.small))
             Column(Modifier.weight(1f)) {
                 Text(it.f.title, maxLines = 2, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium)
-                Text(it.f.url, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
+                Text(it.f.page.ifBlank { it.f.url }, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodySmall, color = cs.onSurfaceVariant)
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Chip(it.f.typeLabel, if (it.f.kind == Kind.PHOTO) cs.tertiaryContainer else cs.secondaryContainer, if (it.f.kind == Kind.PHOTO) cs.onTertiaryContainer else cs.onSecondaryContainer)
                     if (it.sent) Chip("Já enviado", cs.tertiaryContainer, cs.onTertiaryContainer)
                     if (it.st == St.WAIT) Chip(if (it.total > 0) fmtBytes(it.total) else "Tamanho ?", cs.secondaryContainer, cs.onSecondaryContainer)
                     val (txt, color) = when (it.st) {
@@ -443,12 +757,14 @@ fun HistoryTab(goQueue: () -> Unit) {
     val busy = phase == Phase.CRAWLING || phase == Phase.RUNNING
     val df = remember { SimpleDateFormat("dd/MM/yyyy HH:mm", Locale("pt", "BR")) }
     var confirm by remember { mutableStateOf(false) }
+    var alsoMem by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = listPad, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${hist.size} vídeos enviados", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
+                Text("${hist.size} envios no histórico", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
                 TextButton({ Jobs.syncTelegram() }) { Icon(Icons.Rounded.Sync, null, Modifier.size(18.dp)); Spacer(Modifier.width(6.dp)); Text("Sincronizar") }
             }
+            Text("Esta lista é o histórico dos envios. A memória de “já enviado” (que esconde no navegador o que já foi mandado) é outra coisa, e você escolhe se apaga junto.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (sync.isNotBlank()) Text(sync, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
         if (hist.isEmpty()) item { EmptyState(Icons.Rounded.History, "Nenhum envio ainda", "Os vídeos enviados ao Telegram aparecem aqui.") }
@@ -465,20 +781,24 @@ fun HistoryTab(goQueue: () -> Unit) {
                 }
             }
         }
-        if (hist.isNotEmpty()) item { TextButton({ confirm = true }, Modifier.fillMaxWidth()) { Text("Limpar histórico", color = MaterialTheme.colorScheme.error) } }
+        if (hist.isNotEmpty()) item { TextButton({ confirm = true }, Modifier.fillMaxWidth()) { Text("Apagar histórico inteiro", color = MaterialTheme.colorScheme.error) } }
     }
-    if (confirm) AlertDialog({ confirm = false }, confirmButton = { TextButton({ History.clear(); Jobs.clearHistory(); confirm = false }) { Text("Limpar") } },
-        dismissButton = { TextButton({ confirm = false }) { Text("Cancelar") } }, title = { Text("Limpar histórico?") },
-        text = { Text("Os vídeos já enviados deixarão de ser desmarcados automaticamente (até sincronizar de novo).") })
+    if (confirm) AlertDialog({ confirm = false; alsoMem = false }, confirmButton = { TextButton({ Jobs.clearHistoryList(); if (alsoMem) Jobs.clearSentMemory(); confirm = false; alsoMem = false }) { Text("Apagar") } },
+        dismissButton = { TextButton({ confirm = false; alsoMem = false }) { Text("Cancelar") } }, title = { Text("Apagar histórico?") },
+        text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("Apaga de vez a lista do Histórico (não fica guardada em outro lugar).")
+            SwitchRow("Também apagar a memória de já enviado", "Se ligar, o que já foi mandado volta a aparecer no navegador. Se não ligar, eles continuam escondidos como já enviados.", alsoMem) { alsoMem = it }
+        } })
 }
 
 // ---------------- Configurações ----------------
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onClose: () -> Unit) {
+fun SettingsScreen(onClose: () -> Unit, onDedupe: () -> Unit = {}) {
     var depth by remember { mutableFloatStateOf(Prefs.depth.toFloat()) }
     var pages by remember { mutableStateOf(Prefs.maxPages.toString()) }
+    var loadAllPages by remember { mutableStateOf(Prefs.loadAllMaxPages.toString()) }
     var probe by remember { mutableStateOf(Prefs.probe) }
     var server by remember { mutableStateOf(Prefs.server) }
     var pd by remember { mutableFloatStateOf(Prefs.parDown.toFloat()) }
@@ -489,7 +809,7 @@ fun SettingsScreen(onClose: () -> Unit) {
     var auto by remember { mutableStateOf(Prefs.autoSend) }
     var test by remember { mutableStateOf("") }; var testing by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
-    fun save() { Prefs.depth = depth.toInt(); Prefs.maxPages = pages.toIntOrNull()?.coerceIn(1, 5000) ?: 500; Prefs.probe = probe; Prefs.parDown = pd.toInt(); Prefs.parUp = pu.toInt()
+    fun save() { Prefs.depth = depth.toInt(); Prefs.maxPages = pages.toIntOrNull()?.coerceIn(1, 5000) ?: 500; Prefs.loadAllMaxPages = loadAllPages.toIntOrNull()?.coerceIn(1, 100) ?: 20; Prefs.probe = probe; Prefs.parDown = pd.toInt(); Prefs.parUp = pu.toInt()
         Prefs.server = server.trim().ifBlank { Downloader.DEFAULT_SERVER }; Prefs.botToken = token.trim(); Prefs.quality = quality; Prefs.autoSend = auto }
     DisposableEffect(Unit) { onDispose { save() } }
     Scaffold(topBar = { TopAppBar(title = { Text("Configurações", fontWeight = FontWeight.SemiBold) }, navigationIcon = { IconButton(onClose) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Voltar") } },
@@ -501,6 +821,15 @@ fun SettingsScreen(onClose: () -> Unit) {
                     trailingIcon = { IconButton({ showTok = !showTok }) { Icon(if (showTok) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility, "Mostrar") } }, modifier = Modifier.fillMaxWidth())
                 Text("Os vídeos são enviados pela sua conta para as Mensagens Salvas (sem limite de 50 MB do bot). O token só é verificado no teste.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 SwitchRow("Envio automático", "Depois de encontrar, já baixa e envia (Início e Varrer tudo).", auto) { auto = it }
+                var visOn by remember { mutableStateOf(Prefs.visualDedupe) }
+                var hdOnly by remember { mutableStateOf(Prefs.minHeight > 0) }
+                SwitchRow("Só vídeos de 720p ou mais", "Vídeo abaixo de 720p não é enviado (confere a resolução real do arquivo). O app sempre procura a maior qualidade, mesmo com o player em 360p.", hdOnly) { hdOnly = it; Prefs.minHeight = if (it) 720 else 0 }
+                SwitchRow("Detectar repetidos pela imagem", "Antes de enviar, compara vários momentos do vídeo com os já enviados. Bem rigoroso: na dúvida, envia. Os pulados ficam na Fila com \"Enviar mesmo assim\".", visOn) { visOn = it; Prefs.visualDedupe = it }
+                var hiOn by remember { mutableStateOf(Prefs.replaceHigher) }
+                SwitchRow("Substituir por qualidade maior", "Se o repetido tiver resolução maior que o já enviado, envia mesmo assim (o antigo continua lá).", hiOn) { hiOn = it; Prefs.replaceHigher = it }
+                var capOn by remember { mutableStateOf(Prefs.sendCaption) }
+                SwitchRow("Enviar legenda (título/link)", "Desligado: vai só o vídeo/foto, sem título, link ou texto.", capOn) { capOn = it; Prefs.sendCaption = it }
+                Text("Fotos vão sempre como imagem no Telegram (nunca figurinha nem arquivo). Vídeos vão sempre como vídeo, para assistir direto.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 FilledTonalButton({ save(); testing = true; test = ""; scope.launch { test = Jobs.testConnection(); testing = false } }, enabled = !testing, modifier = Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) {
                     if (testing) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp) else Icon(Icons.Rounded.NetworkCheck, null); Spacer(Modifier.width(8.dp)); Text("Testar conexão") }
                 if (test.isNotBlank()) InfoCard(test, if (test.contains("✗")) Icons.Rounded.ErrorOutline else Icons.Rounded.CheckCircle, if (test.contains("✗")) 1 else 2)
@@ -514,26 +843,45 @@ fun SettingsScreen(onClose: () -> Unit) {
                 Text("Profundidade dos links: ${depth.toInt()}")
                 Slider(depth, { depth = it }, valueRange = 0f..20f, steps = 19)
                 OutlinedTextField(pages, { pages = it.filter(Char::isDigit) }, label = { Text("Máximo de páginas") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(loadAllPages, { loadAllPages = it.filter(Char::isDigit) }, label = { Text("Limite de páginas ao Carregar tudo") }, singleLine = true, shape = MaterialTheme.shapes.medium, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.fillMaxWidth())
                 SwitchRow("Usar servidor (yt-dlp) em todas as páginas", "Acha vídeos de players difíceis. Mais lento.", probe) { probe = it }
+                var strong by remember { mutableStateOf(Prefs.strongBlock) }
+                SwitchRow("Bloqueador forte", "No Navegador: bloqueia anúncios, pop-ups e redirecionamentos. Nunca bloqueia os vídeos.", strong) { strong = it; Prefs.strongBlock = it; br.geracaoai.baixartg.web.AdBlock.enabled = it }
             }
             SettingsGroup("Desempenho", Icons.Rounded.Speed) {
                 Text("Downloads ao mesmo tempo: ${pd.toInt()}")
-                Slider(pd, { pd = it }, valueRange = 1f..6f, steps = 4)
+                Slider(pd, { pd = it }, valueRange = 1f..10f, steps = 8)
                 Text("Envios ao Telegram ao mesmo tempo: ${pu.toInt()}")
-                Slider(pu, { pu = it }, valueRange = 1f..3f, steps = 1)
-                Text("Conta restrita? Deixe envios em 1.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Slider(pu, { pu = it }, valueRange = 1f..5f, steps = 3)
+                Text("O padrão agora é 10 downloads e 5 envios. Conta restrita? Deixe envios em 1.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedTextField(server, { server = it }, label = { Text("Servidor yt-dlp") }, singleLine = true, shape = MaterialTheme.shapes.medium, modifier = Modifier.fillMaxWidth())
             }
+            SettingsGroup("Limpar repetidos", Icons.Rounded.DeleteSweep) {
+                Text("Acha vídeos repetidos nas Mensagens Salvas e apaga as cópias, mantendo a mais recente. Só apaga depois de você confirmar.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Button(onDedupe, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.DeleteSweep, null); Spacer(Modifier.width(8.dp)); Text("Limpar repetidos das Mensagens Salvas") }
+            }
             LoggedAccountsGroup()
-            SettingsGroup("Histórico de enviados", Icons.Rounded.History) {
+            SettingsGroup("Histórico", Icons.Rounded.History) {
                 val sync by Jobs.syncStatus.collectAsState()
-                var hist by remember { mutableIntStateOf(Sent.size) }
-                Text("$hist chaves • vídeos já enviados aparecem desmarcados com “Já enviado”.", style = MaterialTheme.typography.bodyMedium)
+                var keysN by remember { mutableIntStateOf(Sent.size) }
+                val histN = History.list.collectAsState().value.size
+                var confirmH by remember { mutableStateOf("") }
+                var alsoMem by remember { mutableStateOf(false) }
+                Text("A lista do Histórico (aba Histórico, $histN itens) mostra o que foi enviado. A memória de já enviado ($keysN chaves) é o que esconde esses itens no navegador. São coisas diferentes.")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     FilledTonalButton({ Jobs.syncTelegram() }, Modifier.weight(1f)) { Icon(Icons.Rounded.Sync, null); Spacer(Modifier.width(6.dp)); Text("Sincronizar", maxLines = 1) }
-                    OutlinedButton({ Jobs.clearHistory(); hist = 0 }, Modifier.weight(1f)) { Text("Limpar chaves", maxLines = 1) }
                 }
-                if (sync.isNotBlank()) { Text(sync, style = MaterialTheme.typography.bodySmall); LaunchedEffect(sync) { hist = Sent.size } }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton({ confirmH = "list" }, Modifier.weight(1f), enabled = histN > 0) { Text("Apagar histórico", maxLines = 1) }
+                    OutlinedButton({ confirmH = "mem" }, Modifier.weight(1f), enabled = keysN > 0) { Text("Apagar já enviado", maxLines = 1) }
+                }
+                if (sync.isNotBlank()) { Text(sync, style = MaterialTheme.typography.bodySmall); LaunchedEffect(sync) { keysN = Sent.size } }
+                if (confirmH == "list") AlertDialog({ confirmH = ""; alsoMem = false }, confirmButton = { TextButton({ Jobs.clearHistoryList(); if (alsoMem) { Jobs.clearSentMemory(); keysN = Sent.size }; confirmH = "" }) { Text("Apagar") } },
+                    dismissButton = { TextButton({ confirmH = ""; alsoMem = false }) { Text("Cancelar") } }, title = { Text("Apagar histórico?") },
+                    text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) { Text("Apaga de vez a lista do Histórico."); SwitchRow("Também apagar a memória de já enviado", "Se ligar, o que já foi mandado volta a aparecer no navegador.", alsoMem) { alsoMem = it } } })
+                if (confirmH == "mem") AlertDialog({ confirmH = "" }, confirmButton = { TextButton({ Jobs.clearSentMemory(); keysN = Sent.size; confirmH = "" }) { Text("Apagar") } },
+                    dismissButton = { TextButton({ confirmH = "" }) { Text("Cancelar") } }, title = { Text("Apagar memória de já enviado?") },
+                    text = { Text("Os itens já mandados voltam a aparecer no navegador. A lista do Histórico continua.") })
             }
             OutlinedButton({ scope.launch { try { Td.send(TdApi.LogOut()) } catch (_: Exception) {} }; onClose() }, Modifier.fillMaxWidth(), shape = MaterialTheme.shapes.medium,
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)) { Icon(Icons.AutoMirrored.Rounded.Logout, null); Spacer(Modifier.width(8.dp)); Text("Sair do Telegram") }

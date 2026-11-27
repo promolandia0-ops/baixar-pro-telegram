@@ -6,12 +6,30 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
   <uses-permission android:name="android.permission.WAKE_LOCK"/>
-  <application android:name=".App" android:label="Baixar pro Telegram" android:icon="@drawable/ic_launcher" android:roundIcon="@drawable/ic_launcher"
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
+  <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+  <application android:largeHeap="true" android:name=".App" android:label="Baixar pro Telegram" android:icon="@drawable/ic_launcher" android:roundIcon="@drawable/ic_launcher"
       android:theme="@style/Theme.App" android:allowBackup="false" android:usesCleartextTraffic="true">
     <activity android:name=".ui.MainActivity" android:exported="true" android:windowSoftInputMode="adjustResize" android:launchMode="singleTop">
       <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
       <intent-filter><action android:name="android.intent.action.SEND"/><category android:name="android.intent.category.DEFAULT"/><data android:mimeType="text/plain"/></intent-filter>
     </activity>
-    <service android:name=".core.WorkService" android:foregroundServiceType="dataSync" android:exported="false"/>
+    <service android:name=".core.WorkService" android:foregroundServiceType="dataSync|specialUse" android:exported="false">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Varredura de site e download escolhidos pelo usuário (continua com a tela apagada)."/>
+    </service>
+    <service android:name=".core.PipeService" android:foregroundServiceType="dataSync|specialUse" android:exported="false">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Fila longa de envio de arquivos para o Telegram escolhida pelo usuário (continua com a tela apagada)."/>
+    </service>
+    <service android:name=".core.DedupeService" android:foregroundServiceType="dataSync|specialUse" android:exported="false">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Apagar mensagens repetidas confirmadas pelo usuário."/>
+    </service>
+    <receiver android:name=".core.BootReceiver" android:exported="true">
+      <intent-filter>
+        <action android:name="android.intent.action.BOOT_COMPLETED"/>
+        <action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>

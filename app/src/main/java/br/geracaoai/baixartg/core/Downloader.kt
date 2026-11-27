@@ -1,8 +1,9 @@
 package br.geracaoai.baixartg.core
 
+import br.geracaoai.baixartg.Prefs
+
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.Dispatchers
 import okhttp3.MediaType.Companion.toMediaType
@@ -22,26 +23,102 @@ class DlException(msg: String) : IOException(msg)
 
 /** Baixa vídeos para o celular. progress(baixado, total ou -1). */
 object Downloader {
+    @Volatile var lastProbeError: String? = null
     const val DEFAULT_SERVER = "https://baixar-video-ezck.onrender.com"
 
-    private fun req(url: String, referer: String?) = Request.Builder().url(url).header("Accept", "*/*").apply {
-        val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
-        if (ref != null) header("Referer", ref)
-    }.build()
-
-    suspend fun download(f: Found, dir: File, server: String, maxHeight: Int = 0, progress: (Long, Long) -> Unit): File {
-        val ref = f.ref ?: f.page
-        if (f.kind == Kind.MEGA) return Mega.download(f, dir, progress)
-        return if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
-            Kind.DIRECT -> try { retry { direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                // Fallback: o servidor abre a página com a mesma sessão (tokens presos a cookie/IP)
-                if (f.page != f.url) viaServer(f.page, dir, server, f.bestQuality, progress) else throw e
+    private fun req(url: String, referer: String?, headers: Map<String, String> = emptyMap()): Request {
+        if (headers.isNotEmpty()) return MseDownloader.buildRequest(url, headers, referer)
+        return Request.Builder().url(url).header("Accept", "*/*").apply {
+            val ref = if (referer != null && referer != url) referer else try { java.net.URI(url).let { "${it.scheme}://${it.authority}/" } } catch (_: Exception) { null }
+            if (ref != null) {
+                header("Referer", ref)
+                try {
+                    val o = java.net.URI(ref)
+                    if (o.scheme != null && o.authority != null) header("Origin", "${o.scheme}://${o.authority}")
+                } catch (_: Exception) {}
             }
-            Kind.HLS -> hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight)
-            Kind.SERVER -> viaServer(f.url, dir, server, f.bestQuality, progress)
-            Kind.MEGA -> Mega.download(f, dir, progress)
+        }.build()
+    }
+
+    fun sniffFile(file: File): String = file.inputStream().use { ins ->
+        val buf = ByteArray(64)
+        val n = ins.read(buf)
+        if (n <= 0) "unknown" else Extract.sniffMagic(if (n == buf.size) buf else buf.copyOf(n))
+    }
+
+    /**
+     * Origem (Referer) que o servidor do vídeo aceita: testa a do pedido original, a que o player usou ao tocar, a página,
+     * o endereço do site, a do próprio servidor e nenhuma; fica a primeira que devolve vídeo (não página/erro).
+     */
+    suspend fun pickReferer(f: Found): String? {
+        if (f.kind != Kind.HLS && f.kind != Kind.DIRECT) return null
+        val play = try { PlayCapture.bestFor(f)?.takeIf { Trail.key(it.url) == Trail.key(f.url) }?.referer } catch (_: Exception) { null }
+        val pageO = Net.originOf(f.page); val urlO = Net.originOf(f.url)
+        val cands = listOf(f.ref, play, f.page.ifBlank { null }, pageO, urlO, "").distinct()
+        for (r in cands) {
+            val res = kotlinx.coroutines.withTimeoutOrNull(10_000) {
+                try {
+                    val b = Request.Builder().url(f.url).header("Accept", "*/*").header("Range", "bytes=0-4095")
+                    if (!r.isNullOrBlank()) { b.header("Referer", r); Net.originOf(r)?.let { b.header("Origin", it.trimEnd('/')) } }
+                    Net.fast.newCall(b.build()).await().use { resp ->
+                        val head = resp.body?.byteStream()?.use { s -> val buf = ByteArray(4096); val n = s.read(buf); if (n > 0) buf.copyOf(n) else ByteArray(0) } ?: ByteArray(0)
+                        resp.code to DetScan.sniff(head, resp.header("Content-Type"))
+                    }
+                } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+            } ?: continue
+            if (res.first in 200..299 && (DetScan.isVideoSniff(res.second) || res.second == "text" && f.kind == Kind.HLS)) {
+                if (r != f.ref) Trail.here("origem certa", "o vídeo só abriu com a origem: ${when (r) { "" -> "nenhuma"; f.page -> "a página"; pageO -> "o endereço do site"; urlO -> "o próprio servidor do vídeo"; play -> "a do player (" + Trail.host(r) + ")"; else -> Trail.host(r) }}")
+                return r
+            }
         }
+        return null
+    }
+
+    suspend fun download(f: Found, dir: File, server: String, maxHeight: Int = 0, fast: Boolean = false, progress: (Long, Long) -> Unit): File {
+        val picked = try { pickReferer(f) } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+        val ref = picked?.ifBlank { null } ?: f.ref ?: f.page
+        if (f.kind == Kind.MEGA) return Mega.download(f, dir, progress)
+        val raw = if (Bunkr.applies(f)) bunkr(f, dir, progress) else when (f.kind) {
+            Kind.DIRECT -> try { retry { if (fast) directFast(f.url, ref, dir, f.title, progress) else direct(f.url, ref, dir, f.title, progress) } } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (f.page != f.url) viaServer(f.page, dir, server, progress) else throw e
+            }
+            Kind.PHOTO -> try { retry { photo(f.url, ref, dir, f.title, progress, pageUrl = f.page) } } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                val fb = PhotoGrab.fallback(f.url) ?: throw e
+                photo(fb, ref, dir, f.title, progress, pageUrl = f.page)
+            }
+            // stream falhou: tenta a página pelo servidor yt-dlp (antes o item falhava direto)
+            Kind.HLS -> try { hls(f.url, ref, dir, f.title, progress, maxHeight = maxHeight) } catch (e: Exception) {
+                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (f.page.isNotBlank() && f.page != f.url && !Extract.isVideoUrl(f.page)) viaServer(f.page, dir, server, progress) else throw e
+            }
+            Kind.SERVER -> viaServer(f.url, dir, server, progress)
+            Kind.MEGA -> Mega.download(f, dir, progress)
+            Kind.MSE -> BrowserMseDownloader.download(f, dir, maxHeight, progress)
+        }
+        if (f.kind == Kind.PHOTO) return raw
+        val k = sniffFile(raw)
+        if (k == "image" || k == "html") {
+            raw.delete()
+            val page = f.page.ifBlank { f.url }
+            var recovered: File? = null
+            if (page.isNotBlank() && (page != f.url || f.kind != Kind.SERVER)) {
+                try { recovered = viaServer(page, dir, server, progress) } catch (e: Exception) {
+                    if (e is kotlinx.coroutines.CancellationException) throw e
+                }
+            }
+            if (recovered != null) {
+                val k2 = sniffFile(recovered)
+                if (k2 == "image" || k2 == "html") {
+                    recovered.delete()
+                    throw DlException("O arquivo não é um vídeo (veio ${if (k2 == "image") "uma imagem (capa)" else "uma página"}).")
+                }
+                return recovered
+            }
+            throw DlException("O arquivo não é um vídeo (veio ${if (k == "image") "uma imagem (capa)" else "uma página"}).")
+        }
+        return raw
     }
 
     /** Arquivo vindo de HLS precisa ser remuxado (.ts/fMP4 -> MP4) sem recodificar. Áudio separado fica em "<arquivo>.audio". */
@@ -67,153 +144,185 @@ object Downloader {
         throw last ?: DlException("Bunkr: falhou")
     }
 
-    fun safe(t: String) = t.replace(Regex("""\.(mp4|webm|mov|mkv|m4v|ts|m3u8)$""", RegexOption.IGNORE_CASE), "").replace(Regex("""[^\p{L}\p{N}\-_. ]+"""), "").trim().take(60).ifBlank { "video" }
+    fun safe(t: String) = t.replace(Regex("""\.(mp4|webm|mov|mkv|m4v|ts|m3u8|mpd|jpe?g|png|webp|gif|avif|bmp)$""", RegexOption.IGNORE_CASE), "").replace(Regex("""[^\p{L}\p{N}\-_. ]+"""), "").trim().take(60).ifBlank { "arquivo" }
 
     private fun extOf(url: String, ct: String?): String {
-        val e = Regex("""\.(mp4|webm|mov|m4v|mkv)(?:$|[?#/])""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.lowercase()
-        return e ?: when { ct?.contains("webm") == true -> "webm"; ct?.contains("quicktime") == true -> "mov"; else -> "mp4" }
+        val e = Regex("""\.(mp4|webm|mov|m4v|mkv|jpe?g|png|webp|gif|avif|bmp)(?:$|[?#/])""", RegexOption.IGNORE_CASE).find(url)?.groupValues?.get(1)?.lowercase()
+        val ext = e?.let { if (it == "jpeg") "jpg" else it }
+        if (ext != null) return ext
+        val c = (ct ?: "").lowercase()
+        return when {
+            c.contains("jpeg") || c.contains("jpg") -> "jpg"
+            c.contains("png") -> "png"
+            c.contains("webp") -> "webp"
+            c.contains("gif") -> "gif"
+            c.contains("avif") -> "avif"
+            c.contains("webm") -> "webm"
+            c.contains("quicktime") -> "mov"
+            else -> "mp4"
+        }
     }
 
-    /** Partes em paralelo quando o servidor aceita HTTP Range; abaixo disso (ou sem Range) baixa em uma conexão, com retomada. */
-    const val RANGE_PARTS = 8
-    const val RANGE_MIN = 1_000_000L
+    /** HEAD ou GET Range 0-0 para descobrir o Content-Type de URLs de player/API sem extensão. */
+    suspend fun sniffType(url: String, referer: String? = null): String? {
+        return try {
+            val r0 = req(url, referer)
+            val head = Net.http.newCall(r0.newBuilder().head().build()).await().use { r ->
+                val ct = r.header("Content-Type")
+                if ((r.isSuccessful || r.code == 405 || r.code == 403) && !ct.isNullOrBlank() && !ct.contains("text/html", true)) ct else null
+            }
+            if (head != null) return head
+            Net.http.newCall(r0.newBuilder().header("Range", "bytes=0-0").build()).await().use { r ->
+                val ct = r.header("Content-Type")
+                if ((r.isSuccessful || r.code == 206) && !ct.isNullOrBlank() && !ct.contains("text/html", true)) ct else null
+            }
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+    }
 
-    /** Fatias inclusivas [start, end] para um arquivo de `size` bytes. */
-    fun planRanges(size: Long, parts: Int = RANGE_PARTS): List<LongArray> {
-        val n = parts.coerceIn(1, 8)
-        if (size <= 0L) return emptyList()
-        val chunk = (size + n - 1) / n
-        val out = ArrayList<LongArray>()
-        var a = 0L
-        while (a < size) {
-            val b = minOf(a + chunk, size) - 1
-            out += longArrayOf(a, b)
-            a = b + 1
+    /** Foto: bytes originais, com cookies/UA do navegador e Referer da página; confere pelo conteúdo que é imagem e acerta a extensão. */
+    suspend fun photo(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, pageUrl: String = ""): File {
+        val resolved = PhotoResolve.resolveAndFetch(
+            url = url,
+            pageUrl = pageUrl,
+            referer = referer,
+            fetchHtml = { u, ref -> PageResolver.fetch(u, ref) },
+            fetchBytes = { u, ref -> fetchPhotoBytes(u, ref) }
+        )
+        if (resolved != null) {
+            val out = File(dir, safe(title) + "_" + System.nanoTime() + "." + resolved.ext)
+            kotlinx.coroutines.withContext(Dispatchers.IO) { out.writeBytes(resolved.bytes) }
+            progress(resolved.bytes.size.toLong(), resolved.bytes.size.toLong())
+            return out
         }
-        return out
+        val first = photoOnce(url, referer, dir, title, progress)
+        val long = photoLongSide(first)
+        if (long in 1 until 400) {
+            val alts = (PhotoGrab.upgradeVariants(url) + listOfNotNull(PhotoGrab.fallback(url))).distinct().filter { it != url }
+            for (alt in alts) {
+                try {
+                    val second = photoOnce(alt, referer, dir, title, progress)
+                    if (photoLongSide(second) > long) { first.delete(); return second }
+                    second.delete()
+                } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) { first.delete(); throw e } }
+            }
+        }
+        return first
+    }
+    private suspend fun fetchPhotoBytes(url: String, referer: String?): ByteArray? = kotlinx.coroutines.withContext(Dispatchers.IO) {
+        val rq = req(url, referer).newBuilder().header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8").build()
+        try {
+            Net.http.newCall(rq).await().use { r ->
+                if (!r.isSuccessful) return@withContext null
+                val ct = r.header("Content-Type").orEmpty()
+                if (ct.contains("text/html", true)) return@withContext null
+                val bytes = r.body?.bytes() ?: return@withContext null
+                if (PhotoGrab.imageExt(bytes) == null) null else bytes
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            null
+        }
+    }
+    fun photoLongSide(file: File): Int = try {
+        val o = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        android.graphics.BitmapFactory.decodeFile(file.absolutePath, o)
+        maxOf(o.outWidth, o.outHeight).coerceAtLeast(0)
+    } catch (_: Exception) { 0 }
+    private suspend fun photoOnce(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
+        val rq = req(url, referer).newBuilder().header("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8").build()
+        Net.http.newCall(rq).await().use { r ->
+            if (!r.isSuccessful) throw DlException("HTTP ${r.code} ao baixar a foto")
+            val tmp = File(dir, safe(title) + "_" + System.nanoTime() + ".part")
+            save(r, tmp, progress)
+            val head = tmp.inputStream().use { val b = ByteArray(32); val n = it.read(b); if (n <= 0) ByteArray(0) else b.copyOf(n) }
+            val ext = PhotoGrab.imageExt(head)
+            if (ext == null) { val k = Extract.sniffMagic(head); tmp.delete(); throw DlException(if (k == "html") "O link devolveu uma página, não uma foto" else "O arquivo não é uma imagem") }
+            val out = File(dir, tmp.name.removeSuffix(".part") + "." + ext)
+            if (!tmp.renameTo(out)) { tmp.copyTo(out, true); tmp.delete() }
+            return out
+        }
     }
 
     suspend fun direct(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
-        var size = -1L; var accept = false; var ext = extOf(url, null)
-        try {
-            Net.http.newCall(req(url, referer).newBuilder().header("Range", "bytes=0-0").build()).await().use { r ->
-                if (!r.isSuccessful && r.code != 206) throw DlException("HTTP ${r.code} ao baixar")
+        Net.http.newCall(req(url, referer)).await().use { r ->
+            Trail.here("arquivo direto", "HTTP ${r.code} • ${r.header("Content-Type") ?: "?"} • ${Trail.host(url)} • origem ${Trail.host(referer).ifBlank { "nenhuma" }}")
+            if (!r.isSuccessful) throw DlException("HTTP ${r.code} ao baixar")
+            val ct = r.header("Content-Type")
+            if (ct != null && ct.contains("text/html", true)) throw DlException("O link devolveu uma página, não um vídeo")
+            val out = File(dir, safe(title) + "_" + System.nanoTime() + "." + extOf(url, ct))
+            save(r, out, progress); return out
+        }
+    }
+
+    /**
+     * Arquivo grande com suporte a Range: baixa em 4 conexões ao mesmo tempo (partes gravadas no lugar certo).
+     * Sem Range ou arquivo pequeno: download normal.
+     */
+    suspend fun directFast(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit): File {
+        val probeReq = req(url, referer).newBuilder().header("Range", "bytes=0-0").build()
+        val info = try {
+            Net.http.newCall(probeReq).await().use { r ->
                 val ct = r.header("Content-Type")
-                if (ct != null && ct.contains("text/html", true)) throw DlException("O link devolveu uma página, não um vídeo")
-                ext = extOf(url, ct)
-                size = r.header("Content-Range")?.substringAfter('/')?.toLongOrNull()
-                    ?: if (r.code == 200) r.header("Content-Length")?.toLongOrNull() ?: -1L else -1L
-                accept = r.code == 206 || (r.header("Accept-Ranges")?.contains("bytes", true) == true)
+                val total = r.header("Content-Range")?.substringAfter('/')?.trim()?.toLongOrNull() ?: -1L
+                if (r.code == 206 && total > 0 && !(ct?.contains("text/html", true) ?: false)) total to ct else null
             }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException || e is DlException) throw e
-        }
-        val out = File(dir, safe(title) + "_" + System.nanoTime() + "." + ext)
-        if (accept && size >= RANGE_MIN) {
-            try { return ranged(url, referer, out, size, progress) }
-            catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                out.delete()
-            }
-        }
-        return single(url, referer, out, progress, size)
-    }
-
-    private suspend fun ranged(url: String, referer: String?, out: File, size: Long, progress: (Long, Long) -> Unit): File = coroutineScope {
-        val parts = planRanges(size, RANGE_PARTS)
-        val files = parts.mapIndexed { i, _ -> File(out.path + ".part$i") }
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e; null }
+        if (info == null || info.first < 24L * 1024 * 1024) return direct(url, referer, dir, title, progress)
+        val (total, ct) = info
+        val out = File(dir, safe(title) + "_" + System.nanoTime() + "." + extOf(url, ct))
+        val parts = 4
+        val chunk = (total + parts - 1) / parts
+        val got = java.util.concurrent.atomic.AtomicLong(0)
+        var last = 0L
         try {
-            val got = LongArray(parts.size)
-            parts.mapIndexed { i, r ->
-                async(Dispatchers.IO) {
-                    downloadRange(url, referer, files[i], r[0], r[1]) { n ->
-                        synchronized(got) { got[i] = n; progress(got.sum(), size) }
-                    }
-                }
-            }.awaitAll()
-            java.io.FileOutputStream(out).use { os -> files.forEach { it.inputStream().use { ins -> ins.copyTo(os, 256 * 1024) } } }
-            files.forEach { it.delete() }
-            if (out.length() == 0L) { out.delete(); throw DlException("Arquivo vazio") }
-            progress(out.length(), size); out
-        } catch (e: Throwable) {
-            files.forEach { it.delete() }; out.delete(); throw e
-        }
-    }
-
-    private suspend fun downloadRange(url: String, referer: String?, part: File, start: Long, end: Long, onProg: (Long) -> Unit) {
-        val want = end - start + 1
-        var got = if (part.exists()) part.length() else 0L
-        if (got > want) { part.delete(); got = 0L }
-        if (got == want) { onProg(got); return }
-        var last: Exception? = null
-        repeat(3) {
-            try {
-                val from = start + got
-                val r = Net.http.newCall(req(url, referer).newBuilder().header("Range", "bytes=$from-$end").build()).await()
-                r.use { resp ->
-                    if (resp.code == 200 && got == 0L && start == 0L) throw DlException("Range não suportado")
-                    if (resp.code != 206) throw DlException("HTTP ${resp.code} no pedaço")
-                    val body = resp.body ?: throw DlException("Resposta vazia")
-                    java.io.FileOutputStream(part, got > 0).use { os ->
-                        val buf = ByteArray(256 * 1024)
-                        val ins = body.byteStream()
-                        while (got < want) {
-                            kotlin.coroutines.coroutineContext.ensureActive()
-                            val n = ins.read(buf, 0, minOf(buf.size.toLong(), want - got).toInt()); if (n < 0) break
-                            os.write(buf, 0, n); got += n; onProg(got)
+            java.io.RandomAccessFile(out, "rw").use { it.setLength(total) }
+            coroutineScope {
+                (0 until parts).map { i ->
+                    async(Dispatchers.IO) {
+                        val from = i * chunk; val to = minOf(total - 1, from + chunk - 1)
+                        var pos = from
+                        retry {
+                            if (pos > to) return@retry
+                            val rq = req(url, referer).newBuilder().header("Range", "bytes=$pos-$to").build()
+                            Net.http.newCall(rq).await().use { r ->
+                                if (r.code != 206) throw DlException("Servidor recusou download em partes (HTTP ${r.code})")
+                                val ins = r.body?.byteStream() ?: throw DlException("Resposta vazia")
+                                java.io.RandomAccessFile(out, "rw").use { raf ->
+                                    raf.seek(pos)
+                                    val buf = ByteArray(256 * 1024)
+                                    while (pos <= to) {
+                                        coroutineContext.ensureActive()
+                                        val n = ins.read(buf, 0, minOf(buf.size.toLong(), to - pos + 1).toInt()); if (n < 0) break
+                                        raf.write(buf, 0, n); pos += n
+                                        val g = got.addAndGet(n.toLong())
+                                        val now = System.currentTimeMillis()
+                                        if (now - last > 300) { last = now; progress(g, total) }
+                                    }
+                                }
+                                if (pos <= to) throw DlException("Download incompleto")
+                            }
                         }
                     }
-                }
-                if (got >= want) return
-                last = DlException("Pedaço incompleto")
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                last = e; kotlinx.coroutines.delay(1000)
+                }.forEach { it.await() }
             }
+        } catch (e: Throwable) {
+            out.delete()
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            return direct(url, referer, dir, title, progress)   // qualquer problema com partes: modo normal
         }
-        throw last ?: DlException("Falha no pedaço")
-    }
-
-    private suspend fun single(url: String, referer: String?, out: File, progress: (Long, Long) -> Unit, known: Long): File {
-        var got = if (out.exists()) out.length() else 0L
-        var last: Exception? = null
-        repeat(3) {
-            try {
-                val b = req(url, referer).newBuilder()
-                if (got > 0) b.header("Range", "bytes=$got-")
-                Net.http.newCall(b.build()).await().use { r ->
-                    if (got > 0 && r.code == 200) { got = 0; out.delete() } // servidor ignorou o Range: começa de novo
-                    if (!r.isSuccessful && r.code != 206) throw DlException("HTTP ${r.code} ao baixar")
-                    val ct = r.header("Content-Type")
-                    if (ct != null && ct.contains("text/html", true)) throw DlException("O link devolveu uma página, não um vídeo")
-                    val total = when {
-                        known > 0 -> known
-                        r.code == 206 -> r.header("Content-Range")?.substringAfter('/')?.toLongOrNull() ?: -1
-                        else -> r.body?.contentLength() ?: -1
-                    }
-                    save(r, out, progress, startAt = got, total = total)
-                    got = out.length()
-                    if (total > 0 && got < total) throw DlException("Download incompleto")
-                    if (got == 0L) throw DlException("Arquivo vazio")
-                    return out
-                }
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                last = e; kotlinx.coroutines.delay(1000)
-                got = if (out.exists()) out.length() else 0L
-            }
-        }
-        if (out.exists() && out.length() == 0L) out.delete()
-        throw last ?: DlException("Falha no download")
+        progress(total, total)
+        return out
     }
 
     private suspend fun save(r: Response, out: File, progress: (Long, Long) -> Unit, startAt: Long = 0, total: Long = -1) {
         val body = r.body ?: throw DlException("Resposta vazia")
-        val len = if (total > 0) total else if (startAt > 0 && body.contentLength() > 0) startAt + body.contentLength() else body.contentLength()
+        val len = if (total > 0) total else body.contentLength()
         var got = startAt
-        java.io.FileOutputStream(out, startAt > 0).use { os -> got = copy(body.byteStream(), os, got, len, progress) }
-        if (got - startAt == 0L && startAt == 0L) { out.delete(); throw DlException("Arquivo vazio") }
-        if (len > 0 && got < len) throw DlException("Download incompleto")
+        try {
+            out.outputStream().use { os -> got = copy(body.byteStream(), os, got, len, progress) }
+        } catch (e: Throwable) { out.delete(); throw e }
+        if (got - startAt == 0L) { out.delete(); throw DlException("Arquivo vazio") }
+        if (len > 0 && got < len) { out.delete(); throw DlException("Download incompleto") }
     }
 
     private suspend fun copy(ins: java.io.InputStream, os: OutputStream, start: Long, len: Long, progress: (Long, Long) -> Unit): Long {
@@ -228,10 +337,10 @@ object Downloader {
     }
 
     /** Usa o backend baixar-video (yt-dlp + fallback HTML/KVS). */
-    suspend fun viaServer(pageUrl: String, dir: File, server: String, best: Boolean = false, progress: (Long, Long) -> Unit): File {
+    suspend fun viaServer(pageUrl: String, dir: File, server: String, progress: (Long, Long) -> Unit): File {
         val base = server.trimEnd('/')
         val json = "application/json".toMediaType()
-        val body = session(JSONObject().put("url", pageUrl).put("mode", "video").also { if (best) it.put("quality", "best") }, pageUrl).toString().toRequestBody(json)
+        val body = session(JSONObject().put("url", pageUrl).put("mode", "video"), pageUrl).toString().toRequestBody(json)
         val r = Net.slow.newCall(Request.Builder().url("$base/api/download").post(body).build()).await()
         r.use {
             val ct = r.header("Content-Type") ?: ""
@@ -239,6 +348,7 @@ object Downloader {
                 val j = JSONObject(r.body?.string() ?: "{}")
                 if (!j.optBoolean("ok")) throw DlException(j.optString("error", "Servidor não conseguiu").take(200))
                 val title = j.optString("title", "video")
+                Trail.here("servidor yt-dlp", "reconheceu (${j.optString("extractor").ifBlank { "?" }}) • entrega: ${j.optString("method")} • origem enviada ${Trail.host(RefererHints.get(pageUrl) ?: pageUrl)}")
                 return when (j.optString("method")) {
                     "redirect" -> direct(j.getString("url"), pageUrl, dir, title, progress)
                     "proxy" -> {
@@ -258,10 +368,10 @@ object Downloader {
         }
     }
 
-    private suspend fun text(url: String, referer: String?): String = Net.http.newCall(req(url, referer)).await().use { r ->
+    private suspend fun text(url: String, referer: String?, headers: Map<String, String> = emptyMap()): String = Net.http.newCall(req(url, referer, headers)).await().use { r ->
         if (!r.isSuccessful) throw DlException("HTTP ${r.code} na playlist"); r.body!!.string()
     }
-    private suspend fun bytes(url: String, referer: String?): ByteArray = Net.http.newCall(req(url, referer)).await().use { r ->
+    private suspend fun bytes(url: String, referer: String?, headers: Map<String, String> = emptyMap()): ByteArray = Net.http.newCall(req(url, referer, headers)).await().use { r ->
         if (!r.isSuccessful) throw DlException("HTTP ${r.code} no segmento"); r.body!!.bytes()
     }
 
@@ -298,18 +408,26 @@ object Downloader {
     }
 
     /** HLS: maior qualidade, segmentos em paralelo (ordem preservada), AES-128 e EXT-X-MAP. Sem recodificar. */
-    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8, maxHeight: Int = 0): File {
-        var plUrl = url; var pl = text(plUrl, referer)
+    suspend fun hls(url: String, referer: String?, dir: File, title: String, progress: (Long, Long) -> Unit, parallel: Int = 8, maxHeight: Int = 0, headers: Map<String, String> = emptyMap()): File {
+        var plUrl = url; var pl = text(plUrl, referer, headers)
+        // link de uma qualidade só (o player começou em 360p): procura a lista principal e baixa a maior
+        if (maxHeight == 0 && headers.isEmpty() && !pl.contains("#EXT-X-STREAM-INF")) try {
+            QualityBoost.masterFor(url, referer, pl)?.let { (m, h) ->
+                Trail.here("qualidade máxima", "o link era de uma qualidade só (${QualityUp.heightIn(url).takeIf { it > 0 }?.let { "${it}p" } ?: "?"}); achei a lista principal até ${h}p")
+                plUrl = m; pl = text(plUrl, referer, headers)
+            }
+        } catch (e: Exception) { if (e is kotlinx.coroutines.CancellationException) throw e }
         var audioUrl: String? = null
         if (pl.contains("#EXT-X-STREAM-INF")) {
             val v = pickVariant(plUrl, pl, maxHeight) ?: throw DlException("Playlist sem variantes")
             audioUrl = audioRendition(plUrl, pl, v.audio)
-            plUrl = v.url; pl = text(plUrl, referer)
+            Trail.here("HLS: qualidade", "lista com ${Regex("#EXT-X-STREAM-INF").findAll(pl).count()} qualidade(s) → escolhida ${if (v.height > 0) "${v.height}p" else "a maior"}${if (audioUrl != null) " + áudio separado" else ""}")
+            plUrl = v.url; pl = text(plUrl, referer, headers)
         }
         val base = File(dir, safe(title) + "_" + System.nanoTime())
-        val video = media(plUrl, pl, referer, base.path + ".hls", parallel, progress)
+        val video = media(plUrl, pl, referer, base.path + ".hls", parallel, progress, headers)
         if (audioUrl != null) {
-            val a = media(audioUrl, text(audioUrl, referer), referer, base.path + ".a.hls", parallel) { _, _ -> }
+            val a = media(audioUrl, text(audioUrl, referer, headers), referer, base.path + ".a.hls", parallel, { _, _ -> }, headers)
             if (!a.renameTo(audioOf(video))) { a.copyTo(audioOf(video), true); a.delete() }
         }
         return video
@@ -317,7 +435,7 @@ object Downloader {
 
     private class Seg(val url: String, val key: String?, val iv: ByteArray?, val seq: Long)
 
-    private suspend fun media(plUrl: String, pl: String, referer: String?, outBase: String, parallel: Int, progress: (Long, Long) -> Unit): File = coroutineScope {
+    private suspend fun media(plUrl: String, pl: String, referer: String?, outBase: String, parallel: Int, progress: (Long, Long) -> Unit, headers: Map<String, String> = emptyMap()): File = coroutineScope {
         if (Regex("""METHOD=SAMPLE-AES""").containsMatchIn(pl)) throw DlException("Vídeo protegido (DRM)")
         val segs = ArrayList<Seg>(); var key: String? = null; var iv: ByteArray? = null; var seq = 0L; var mapUrl: String? = null
         for (l in pl.lines().map { it.trim() }) when {
@@ -333,32 +451,40 @@ object Downloader {
             l.isNotEmpty() && !l.startsWith("#") -> { segs += Seg(Extract.abs(plUrl, l) ?: l, key, iv, seq); seq++ }
         }
         if (segs.isEmpty()) throw DlException("Playlist vazia")
+        Trail.here("HLS: pedaços", "${segs.size} pedaço(s)${if (mapUrl != null) " fMP4" else " TS"}${if (segs.any { it.key != null }) " com criptografia AES-128 (chave baixada com a mesma origem)" else ""} • de ${Trail.host(segs.first().url)} • origem ${Trail.host(referer).ifBlank { "nenhuma" }}")
         val keys = HashMap<String, ByteArray>()
-        segs.mapNotNull { it.key }.distinct().forEach { keys[it] = retry { bytes(it, referer) } }
+        segs.mapNotNull { it.key }.distinct().forEach { keys[it] = retry { bytes(it, referer, headers) } }
         val out = File(outBase + if (mapUrl != null) ".mp4" else ".ts")
         try {
             out.outputStream().buffered(1 shl 20).use { os ->
-                mapUrl?.let { os.write(retry { bytes(it, referer) }) }
+                mapUrl?.let { os.write(retry { bytes(it, referer, headers) }) }
                 var total = 0L; var n = 0
-                // janela deslizante: até `parallel` segmentos em voo, gravados na ordem
+                // janela deslizante: até `parallel` segmentos em voo, gravados na ordem (com freio de memória global)
                 val window = ArrayDeque<kotlinx.coroutines.Deferred<ByteArray>>()
                 val it = segs.iterator()
-                fun launchNext() { if (it.hasNext()) { val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer) } } }
-                repeat(parallel.coerceAtLeast(1)) { launchNext() }
-                while (window.isNotEmpty()) {
-                    coroutineContext.ensureActive()
-                    val data = window.removeFirst().await()
-                    launchNext()
-                    os.write(data); total += data.size; n++
-                    progress(total, total / n * segs.size)
+                var held = 0
+                suspend fun launchNext() { if (it.hasNext()) { MemGate.acquire(held); held++; val s = it.next(); window += async(Dispatchers.IO) { fetchSeg(s, keys, referer, headers) } } }
+                try {
+                    repeat(parallel.coerceAtLeast(1)) { launchNext() }
+                    while (window.isNotEmpty()) {
+                        coroutineContext.ensureActive()
+                        var data: ByteArray? = window.removeFirst().await()
+                        os.write(data!!); total += data.size; n++
+                        data = null; MemGate.release(); held--
+                        launchNext()
+                        progress(total, total / n * segs.size)
+                    }
+                } finally {
+                    window.forEach { d -> d.cancel() }
+                    repeat(held) { MemGate.release() }; held = 0
                 }
             }
         } catch (e: Throwable) { out.delete(); throw e }
         out
     }
 
-    private suspend fun fetchSeg(s: Seg, keys: Map<String, ByteArray>, referer: String?): ByteArray {
-        var data = retry { bytes(s.url, referer) }
+    private suspend fun fetchSeg(s: Seg, keys: Map<String, ByteArray>, referer: String?, headers: Map<String, String> = emptyMap()): ByteArray {
+        var data = retry { bytes(s.url, referer, headers) }
         if (s.key != null) {
             val k = keys[s.key]!!
             val ivb = s.iv ?: ByteArray(16).also { b -> var v = s.seq; for (j in 15 downTo 8) { b[j] = (v and 0xff).toByte(); v = v shr 8 } }
@@ -373,157 +499,70 @@ object Downloader {
         throw last!!
     }
 
-    /** Envia a sessão do navegador ao servidor (campos "cookies"/"user_agent"/"referer").
-     *  O backend passa esses campos ao yt-dlp (cookies da sessão do navegador). */
-    fun session(j: JSONObject, pageUrl: String, withJar: Boolean = false): JSONObject {
-        val c = try { Net.cookies?.cookieFor(pageUrl) } catch (_: Exception) { null }
-        if (!c.isNullOrBlank()) j.put("cookies", c)
-        j.put("user_agent", Net.userAgent).put("referer", Net.originOf(pageUrl) ?: pageUrl)
-        if (withJar) cookieJar()?.let { j.put("cookie_jar", it) }
-        return j
-    }
-
-    /** Cookies da sessão do aparelho, por host. Só viaja no JSON desta requisição; o servidor não guarda. */
-    fun cookieJar(): JSONObject? {
-        val src = Net.cookies ?: return null
-        val j = JSONObject()
-        for (h in src.knownHosts()) {
-            val c = try { src.cookieFor("https://$h/") } catch (_: Exception) { null }
-            if (!c.isNullOrBlank()) j.put(h, c)
-            if (j.length() >= 32) break
+    /** Envia a sessão do navegador ao servidor (cookies/UA/Referer). No X junta cookies de x.com e twitter.com. */
+    fun session(j: JSONObject, pageUrl: String): JSONObject {
+        val urls = LinkedHashSet<String>()
+        urls += pageUrl
+        val host = try { java.net.URI(pageUrl).host?.lowercase()?.removePrefix("www.") } catch (_: Exception) { null }
+        if (host == "x.com" || host == "twitter.com" || host?.endsWith(".x.com") == true || host?.endsWith(".twitter.com") == true) {
+            urls += listOf("https://x.com/", "https://www.x.com/", "https://twitter.com/", "https://www.twitter.com/", "https://mobile.twitter.com/")
         }
-        return if (j.length() == 0) null else j
+        val cookies = urls.mapNotNull { u -> try { Net.cookies?.cookieFor(u)?.trim()?.ifBlank { null } } catch (_: Exception) { null } }.distinct()
+        if (cookies.isNotEmpty()) j.put("cookies", cookies.joinToString("; "))
+        if (Prefs.quality == 0) j.put("quality", "best")
+        // detetive: alguns players (Vimeo privado, Panda…) só abrem com a página da aula como origem
+        return j.put("user_agent", Net.userAgent).put("referer", RefererHints.get(pageUrl) ?: Net.originOf(pageUrl) ?: pageUrl)
     }
 
-    /** Último erro do /api/info (para mostrar no lugar de “Nenhum vídeo encontrado”). */
-    @Volatile var lastProbeError: String? = null
+    @Volatile private var warmedAt = 0L
+    /** Acorda o servidor do Render (plano grátis dorme): GET simples com timeout longo, no máx. 1x a cada 5 min. */
+    suspend fun warmUp(server: String = DEFAULT_SERVER) {
+        val now = System.currentTimeMillis()
+        if (now - warmedAt < 300_000) return
+        warmedAt = now
+        try { Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/").build()).await().use { } } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            warmedAt = 0L
+        }
+    }
 
     /** Pergunta ao servidor se ele (yt-dlp) acha vídeo na página. Retorna o título ou null. */
-    suspend fun probe(server: String, pageUrl: String): String? {
-        lastProbeError = null
+    suspend fun probe(server: String, pageUrl: String, client: okhttp3.OkHttpClient = Net.slow): String? {
         val body = session(JSONObject().put("url", pageUrl), pageUrl).toString().toRequestBody("application/json".toMediaType())
         return try {
-            Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/info").post(body).build()).await().use { r ->
+            client.newCall(Request.Builder().url(server.trimEnd('/') + "/api/info").post(body).build()).await().use { r ->
                 val raw = r.body?.string() ?: ""
                 val j = try { JSONObject(raw) } catch (_: Exception) {
-                    lastProbeError = "Servidor yt-dlp: resposta inválida (HTTP ${r.code})"; return null
+                    if (!r.isSuccessful) lastProbeError = "Servidor yt-dlp: HTTP ${r.code}"
+                    return null
                 }
                 if (!j.optBoolean("ok")) {
-                    lastProbeError = j.optString("error").ifBlank { "Servidor yt-dlp não achou vídeo (HTTP ${r.code})" }.take(300)
+                    val err = j.optString("error").ifBlank { "Servidor não conseguiu ler o link (HTTP ${r.code})" }
+                    lastProbeError = err.take(200)
                     return null
                 }
                 val ex = j.optString("extractor")
-                if (ex.equals("generic", true)) return null // genérico já foi coberto pelo rastreador
-                j.optString("title", pageUrl)
+                if (ex.equals("generic", true)) {
+                    val u = j.optString("url")
+                    val ext = j.optString("ext").lowercase()
+                    val formats = j.optJSONArray("formats")
+                    val hasVideo = Extract.isVideoUrl(u) || ext in setOf("mp4", "webm", "m3u8", "mpd", "mkv", "mov", "m4v") ||
+                        (formats != null && formats.length() > 0)
+                    if (!hasVideo) return null
+                }
+                lastProbeError = null
+                return j.optString("title", pageUrl).ifBlank { pageUrl }
             }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
-            lastProbeError = "Não falei com o servidor yt-dlp: ${e.message}".take(300)
+            lastProbeError = (e.message ?: "Falha ao falar com o servidor yt-dlp").take(200)
             null
         }
     }
 
-    /** Busca no YouTube (ytsearch / busca do canal) via backend. */
-    suspend fun search(server: String, pageUrl: String, query: String): List<Found> {
-        lastProbeError = null
-        val body = session(JSONObject().put("url", pageUrl).put("query", query), pageUrl).toString().toRequestBody("application/json".toMediaType())
-        return try {
-            Net.slow.newCall(Request.Builder().url(server.trimEnd('/') + "/api/search").post(body).build()).await().use { r ->
-                val raw = r.body?.string() ?: ""
-                val j = try { JSONObject(raw) } catch (_: Exception) {
-                    lastProbeError = if (r.code == 404) "O servidor ainda não tem a busca por nome (atualize o baixar-video)." else "Servidor yt-dlp: resposta inválida (HTTP ${r.code})"
-                    return emptyList()
-                }
-                if (!j.optBoolean("ok")) {
-                    lastProbeError = j.optString("error").ifBlank { "Busca no YouTube falhou (HTTP ${r.code})" }.take(300)
-                    return emptyList()
-                }
-                val arr = j.optJSONArray("results") ?: return emptyList()
-                val out = ArrayList<Found>()
-                for (i in 0 until arr.length()) {
-                    val e = arr.optJSONObject(i) ?: continue
-                    val u = e.optString("url")
-                    if (u.isBlank()) continue
-                    val title = e.optString("title", u)
-                    val thumb = e.optString("thumbnail").ifBlank { SiteSearch.youtubeThumb(u) }
-                    out += Found(u, u, title, Kind.SERVER, thumb = thumb)
-                }
-                out
-            }
-        } catch (e: Exception) {
-            if (e is kotlinx.coroutines.CancellationException) throw e
-            lastProbeError = "Não falei com o servidor de busca: ${e.message}".take(300)
-            emptyList()
-        }
-    }
-
-
-    data class QualityPage(val ok: Boolean, val error: String = "", val query: String = "", val page: Int = 1, val hasMore: Boolean = false, val pending: Boolean = false, val results: List<Found> = emptyList())
-
-    /** Busca ampla em melhor qualidade (/api/quality). Envia cookies só nesta requisição. */
-    fun parseQuality(raw: String, code: Int, query: String, page: Int): QualityPage {
-        val j = try { JSONObject(raw) } catch (_: Exception) {
-            val msg = when (code) {
-                404 -> "O servidor ainda não tem a busca em 4K (atualize o baixar-video)."
-                502, 503, 429 -> "O servidor está acordando ou ocupado (HTTP $code). Tente de novo em instantes."
-                0 -> "Servidor: resposta vazia ou inválida."
-                else -> "Servidor: resposta inválida (HTTP $code)."
-            }
-            return QualityPage(false, msg)
-        }
-        if (!j.optBoolean("ok")) {
-            return QualityPage(false, j.optString("error").ifBlank { "Busca em qualidade falhou (HTTP $code)" }.take(300), query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), pending = j.optBoolean("pending"))
-        }
-        val arr = j.optJSONArray("results")
-        val out = ArrayList<Found>()
-        if (arr != null) for (i in 0 until arr.length()) {
-            val e = arr.optJSONObject(i) ?: continue
-            val u = e.optString("url")
-            if (u.isBlank()) continue
-            val title = e.optString("title", u)
-            val thumb = e.optString("thumbnail").ifBlank { null }
-            val prev = e.optString("preview").ifBlank { null }
-            val dur = e.optDouble("duration", 0.0)
-            out += Found(
-                u, u, title, Kind.SERVER, thumb = thumb,
-                height = e.optInt("height"), duration = if (dur.isNaN()) 0 else dur.toInt(),
-                size = e.optLong("filesize", -1), site = e.optString("site"),
-                preview = prev, bestQuality = true
-            )
-        }
-        return QualityPage(true, query = j.optString("query", query), page = j.optInt("page", page), hasMore = j.optBoolean("has_more"), pending = j.optBoolean("pending"), results = out)
-    }
-
-    suspend fun qualitySearch(server: String, query: String, url: String = "", page: Int = 1, site: String = ""): QualityPage {
-        lastProbeError = null
-        val pageUrl = url.ifBlank { "https://www.youtube.com/" }
-        val payload = JSONObject().put("query", query).put("url", url).put("page", page).put("site", site)
-        val body = session(payload, pageUrl, withJar = true).toString().toRequestBody("application/json".toMediaType())
-        val endpoint = server.trimEnd('/') + "/api/quality"
-        var last = QualityPage(false, "Falha na busca.")
-        repeat(2) { attempt ->
-            try {
-                val pageRes = Net.slow.newCall(Request.Builder().url(endpoint).post(body).build()).await().use { r ->
-                    parseQuality(r.body?.string() ?: "", r.code, query, page)
-                }
-                last = pageRes
-                lastProbeError = if (pageRes.ok) null else pageRes.error
-                val retryable = !pageRes.ok && (pageRes.error.contains("HTTP 502") || pageRes.error.contains("HTTP 503") || pageRes.error.contains("HTTP 429") || pageRes.error.contains("acordando"))
-                if (pageRes.ok || !retryable || attempt == 1) return pageRes
-            } catch (e: Exception) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
-                lastProbeError = "Não falei com o servidor de qualidade: ${e.message}".take(300)
-                last = QualityPage(false, lastProbeError ?: "")
-                if (attempt == 1) return last
-            }
-            kotlinx.coroutines.delay(2500)
-        }
-        return last
-    }
-
-        /** Tamanho do arquivo antes de baixar (HEAD, ou GET Range 0-0). -1 = desconhecido (HLS/servidor/sem cabeçalho). */
+    /** Tamanho do arquivo antes de baixar (HEAD, ou GET Range 0-0). -1 = desconhecido (HLS/servidor/sem cabeçalho). */
     suspend fun sizeOf(f: Found): Long {
-        if (f.kind != Kind.DIRECT || Bunkr.applies(f)) return -1
+        if ((f.kind != Kind.DIRECT && f.kind != Kind.PHOTO) || Bunkr.applies(f)) return -1
         val ref = f.ref ?: f.page
         return try {
             val r0 = req(f.url, ref)

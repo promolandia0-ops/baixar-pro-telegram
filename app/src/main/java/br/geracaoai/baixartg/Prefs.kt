@@ -13,9 +13,32 @@ object Prefs {
     var server: String get() = p.getString("server", Downloader.DEFAULT_SERVER)!!; set(v) = p.edit().putString("server", v).apply()
     var depth: Int get() = p.getInt("depth", 10); set(v) = p.edit().putInt("depth", v).apply()
     var maxPages: Int get() = p.getInt("pages", 500); set(v) = p.edit().putInt("pages", v).apply()
+    var loadAllMaxPages: Int get() = p.getInt("load_all_pages", 20); set(v) = p.edit().putInt("load_all_pages", v).apply()
+    var strongBlock: Boolean get() = p.getBoolean("strong_block", true); set(v) = p.edit().putBoolean("strong_block", v).apply()
+    /** "Fotos também": coleta fotos de verdade (nunca capas/miniaturas) numa seção separada. Desligado por padrão. */
+    /** 0 = Só vídeos (padrão), 1 = Só fotos, 2 = Vídeos e fotos. (Antes: chave "photos" ligada = 2.) */
+    var mediaMode: Int get() = p.getInt("media_mode", if (p.getBoolean("photos", false)) 2 else 0); set(v) = p.edit().putInt("media_mode", v).apply()
+    var photos: Boolean get() = mediaMode != 0; set(v) { mediaMode = if (v) 2 else 0 }
+    /** Enviar legenda (título/link) junto com a mídia. Padrão: desligado (só a mídia). */
+    var visualDedupe: Boolean get() = p.getBoolean("visual_dedupe2", false); set(v) = p.edit().putBoolean("visual_dedupe2", v).apply()
+    /** Só envia vídeo com pelo menos esta resolução (lado menor). 0 = qualquer. Padrão: 720p. */
+    var minHeight: Int get() = p.getInt("min_height", 720); set(v) = p.edit().putInt("min_height", v).apply()
+    var replaceHigher: Boolean get() = p.getBoolean("replace_higher", false); set(v) = p.edit().putBoolean("replace_higher", v).apply()
+    var sendCaption: Boolean get() = p.getBoolean("send_caption", false); set(v) = p.edit().putBoolean("send_caption", v).apply()
+    var pipelineMigrated: Boolean get() = p.getBoolean("pipe_migrated", false); set(v) = p.edit().putBoolean("pipe_migrated", v).apply()
+    var askedBattery: Boolean get() = p.getBoolean("asked_battery", false); set(v) = p.edit().putBoolean("asked_battery", v).apply()
+    /** Última página aberta no Navegador do app. */
+    var browserUrl: String get() = p.getString("browser_url", "")!!; set(v) = p.edit().putString("browser_url", v).apply()
     var probe: Boolean get() = p.getBoolean("probe", false); set(v) = p.edit().putBoolean("probe", v).apply()
-    var parDown: Int get() = p.getInt("pdown", 3); set(v) = p.edit().putInt("pdown", v).apply()
-    var parUp: Int get() = p.getInt("pup", 2); set(v) = p.edit().putInt("pup", v).apply()
+    var parDown: Int get() = p.getInt("pdown2", 10); set(v) = p.edit().putInt("pdown2", v).apply()
+    var parUp: Int get() = p.getInt("pup2", 5); set(v) = p.edit().putInt("pup2", v).apply()
+    /** Legado 1.9.9. Fotos agora vão sempre como imagem; valor antigo "arquivo" é migrado para foto. */
+    var photosAsFile: Boolean
+        get() {
+            if (!p.contains("photos_as_file_v1911")) p.edit().putBoolean("photos_as_file_v1911", false).apply()
+            return p.getBoolean("photos_as_file_v1911", false)
+        }
+        set(v) { p.edit().putBoolean("photos_as_file_v1911", v).apply() }
     var synced: Boolean get() = p.getBoolean("synced", false); set(v) = p.edit().putBoolean("synced", v).apply()
     var botToken: String get() = p.getString("bot", "")!!; set(v) = p.edit().putString("bot", v).apply()
     /** 0 = original (máxima). Senão altura máxima (só afeta streams HLS com várias qualidades). */

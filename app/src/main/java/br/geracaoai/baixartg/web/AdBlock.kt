@@ -2,335 +2,164 @@ package br.geracaoai.baixartg.web
 
 import android.content.Context
 import android.webkit.WebResourceResponse
-import br.geracaoai.baixartg.core.Net
-import java.io.BufferedReader
+import br.geracaoai.baixartg.core.Extract
 import java.io.ByteArrayInputStream
-import java.io.File
-import java.io.InputStream
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.GZIPInputStream
 
+// expressões fixas compiladas uma vez (antes: recompiladas a cada chamada)
+private val RX_ADBLOCK_1 = Regex("""(?i)/(popunder|pu\.js|pop\.js|adserver|prebid)""")
+
+
 /**
- * Bloqueio de anúncios e rastreadores no estilo EasyList + EasyPrivacy:
- * conjunto de hosts em HashSet (rápido), regras host+caminho, e CSS cosmético.
- * Lista empacotada nos assets; atualização periódica a partir das listas oficiais.
- * EasyList/EasyPrivacy © EasyList authors, CC BY-SA 3.0 / GPLv3 — https://easylist.to/
+ * Bloqueador forte do Navegador: lista de domínios (StevenBlack/hosts, MIT) por sufixo + padrões de URL de anúncios,
+ * pop-ups/popunders e filtro cosmético. Nunca bloqueia o próprio site, streams de vídeo nem o servidor yt-dlp.
  */
 object AdBlock {
-    private val hosts = HashSet<String>(131072)
-    private val hostPaths = HashMap<String, ArrayList<String>>(8192)
-    private val paths = ArrayList<String>(512)
-    @Volatile var cosmeticCss: String = DEFAULT_CSS
-        private set
-    @Volatile var ready = false
-        private set
-    private val loading = AtomicBoolean(false)
-    private val updating = AtomicBoolean(false)
+    @Volatile private var hosts: Set<String> = emptySet()
+    @Volatile var enabled = true
 
-    /** Domínios de primeira parte: nunca bloqueamos o host inteiro (só caminhos de anúncio/rastreador). */
-    private val firstParty = setOf(
-        "google.com", "youtube.com", "youtu.be", "googlevideo.com", "gstatic.com", "googleapis.com",
-        "ytimg.com", "ggpht.com", "googleusercontent.com", "accounts.google.com", "gmail.com",
-        "twitter.com", "x.com", "twimg.com", "t.co", "facebook.com", "instagram.com", "fbcdn.net",
-        "cdninstagram.com", "telegram.org", "t.me", "tdesktop.com", "mega.nz", "mega.io", "mega.app",
-        "wikipedia.org", "wikimedia.org", "github.com", "githubusercontent.com",
-        "apple.com", "vimeo.com", "vimeocdn.com", "dailymotion.com", "reddit.com", "redditmedia.com",
-        "redd.it", "duckduckgo.com", "bing.com", "microsoft.com", "live.com", "microsoftonline.com",
-        "office.com", "archive.org", "render.com", "onrender.com"
+    private val EXTRA = setOf(
+        "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com", "pagead2.googlesyndication.com",
+        "adnxs.com", "taboola.com", "outbrain.com", "criteo.com", "criteo.net", "pubmatic.com", "rubiconproject.com", "openx.net",
+        "popads.net", "popcash.net", "propellerads.com", "adsterra.com", "exoclick.com", "juicyads.com", "trafficjunky.net",
+        "hilltopads.net", "clickadu.com", "adcash.com", "mgid.com", "revcontent.com", "onclickads.net", "a-ads.com",
+        "admaven.com", "monetag.com", "richpartners.com", "galaksion.com", "trafficstars.com", "tsyndicate.com", "zeropark.com",
+        "imasdk.googleapis.com", "googletagservices.com", "2mdn.net", "serving-sys.com", "moatads.com", "adform.net",
+        "spotxchange.com", "stickyadstv.com", "adsafeprotected.com", "exosrv.com", "realsrv.com", "trafficjunky.com",
     )
-    private val cdnApex = setOf("cloudfront.net", "amazonaws.com", "akamaihd.net", "akamaized.net", "cloudflare.com", "amazon.com")
-    private val trackLabels = setOf(
-        "ad", "ads", "adsdk", "adserver", "adsense", "adsystem", "adservice", "adapis", "ogads", "pagead",
-        "doubleclick", "analytics", "telemetry", "tracking", "tracker", "pixel", "metrics", "metric",
-        "smetric", "measure", "diagnostics", "logging", "log", "fcmatch", "imasdk", "prebid", "sponsor",
-        "advertising", "advert", "adn", "adx"
-    )
+    private val URL_PAT = Regex(
+        """(?i)(?:/ads?/|/adserver|/adsbygoogle|/advert|/banners?/|/popunder|/popup[s_-]|/pop\.js|prebid|/pagead/|googlesyndication|doubleclick|/ad[sx]?\.js|/ad_?banner|/adframe|/adview|/vast[./?]|/vpaid|/sponsor|/tracking/|/beacon[./?]|/pixel[./?]|/interstitial|clickunder|onclick(?:ads|mega)|/afr\.php|/ajs\.php|/pu\.js|/tag\.min\.js\?|/sw-ads)""")
+    private val NEVER = Regex("""(?i)(onrender\.com|telegram\.org|mega\.nz|mega\.co\.nz)""")
 
-    private const val UPDATE_MS = 4L * 24 * 60 * 60 * 1000
-    private val listUrls = listOf(
-        "https://easylist.to/easylist/easylist.txt",
-        "https://easylist.to/easylist/easyprivacy.txt"
-    )
-
-    val emptyResponse: WebResourceResponse
-        get() = try {
-            WebResourceResponse("text/plain", "utf-8", 403, "Blocked", hashMapOf<String, String>(), ByteArrayInputStream(ByteArray(0)))
-        } catch (_: Exception) {
-            WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
-        }
-
-    fun warm(ctx: Context) {
-        if (ready || !loading.compareAndSet(false, true)) {
-            maybeUpdate(ctx); return
-        }
-        Thread({
-            try { loadBundled(ctx); loadOverlay(ctx) } catch (_: Exception) {}
-            ready = true
-            loading.set(false)
-            maybeUpdate(ctx)
-        }, "adblock-load").start()
+    fun init(c: Context) {
+        Thread {
+            try {
+                val set = HashSet<String>(90_000)
+                // o empacotador do Android pode guardar o .gz já descomprimido como "adhosts.txt"
+                val ins = try { c.assets.open("adhosts.txt") } catch (_: Exception) { GZIPInputStream(c.assets.open("adhosts.txt.gz")) }
+                ins.bufferedReader().useLines { ls -> ls.forEach { if (it.isNotBlank()) set += it.trim() } }
+                set += EXTRA
+                hosts = set
+            } catch (_: Exception) { hosts = EXTRA }
+        }.start()
     }
 
-    /** Para testes unitários, sem Android assets. */
-    fun loadForTest(hostList: List<String>, pathList: List<String> = emptyList(), hostPathList: List<Pair<String, String>> = emptyList()) {
-        synchronized(hosts) {
-            hosts.clear(); hostPaths.clear(); paths.clear()
-            hosts.addAll(hostList.map { it.lowercase() })
-            paths.addAll(pathList)
-            for ((h, p) in hostPathList) hostPaths.getOrPut(h.lowercase()) { ArrayList() }.add(p.lowercase())
-        }
-        ready = true
-    }
+    fun base(h: String): String = WebCookies.baseDomain(h.lowercase().removePrefix("www."))
 
-    fun shouldBlock(url: String, mainFrame: Boolean = false, pageUrl: String? = null): Boolean {
-        return try {
-        val u = try { java.net.URI(url) } catch (_: Exception) { return false }
-        val scheme = (u.scheme ?: "").lowercase()
-        if (scheme !in setOf("http", "https")) return false
-        val host = (u.host ?: "").lowercase().trimEnd('.')
-        if (host.isEmpty()) return false
-        val path = ((u.path ?: "/") + (u.query?.let { "?$it" } ?: "")).lowercase()
-        if (mainFrame && isProtectedHost(host)) return false
-        if (blockedHost(host) && !isProtectedHost(host)) return true
-        if (matchHostPath(host, path)) return true
-        if (matchGenericPath(path)) {
-            // em sites de primeira parte, só caminhos claramente de anúncio/rastreador
-            if (isProtectedHost(host) && !looksLikeAdPath(path)) return false
-            return true
-        }
-        return false
-        } catch (_: Exception) { false }
-    }
-
-    fun isProtectedHost(host: String): Boolean {
-        val h = host.lowercase().trimEnd('.')
-        if (h in firstParty || h in cdnApex) return true
-        for (a in firstParty) {
-            if (h.endsWith(".$a")) {
-                val sub = h.substring(0, h.length - a.length - 1)
-                val labels = sub.split('.', '-')
-                return labels.none { isTrackLabel(it) }
-            }
-        }
-        return false
-    }
-
-    fun sameSite(a: String?, b: String?): Boolean {
-        val ha = registrable(hostOf(a) ?: return false)
-        val hb = registrable(hostOf(b) ?: return false)
-        return ha.isNotEmpty() && ha == hb
-    }
-
-    fun injectScript(css: String = cosmeticCss): String {
-        val safe = css.replace("\\", "\\\\").replace("`", "\\`").replace("\$", "\\$").replace("</", "<\\/")
-        return """
-            (function(){
-              if (window.__bptShield) return; window.__bptShield=1;
-              try {
-                var s=document.createElement('style'); s.id='bpt-adhide';
-                s.textContent=`$safe`;
-                (document.documentElement||document.head||document.body).appendChild(s);
-              } catch(e) {}
-              try { window.open = function(){ return null; }; } catch(e) {}
-              document.addEventListener('click', function(ev){
-                var a = ev.target && ev.target.closest ? ev.target.closest('a[href]') : null;
-                if (!a) return;
-                var href = a.getAttribute('href')||'';
-                if (/^\s*(javascript:|data:)/i.test(href)) { ev.stopPropagation(); ev.preventDefault(); }
-              }, true);
-            })();
-        """.trimIndent()
-    }
-
-    private fun blockedHost(host: String): Boolean {
-        var h = host
-        synchronized(hosts) {
-            while (h.contains('.')) {
-                if (hosts.contains(h)) return true
-                h = h.substringAfter('.')
-            }
-        }
-        return false
-    }
-
-    private fun matchHostPath(host: String, path: String): Boolean {
-        var h = host
-        synchronized(hosts) {
-            while (true) {
-                val rules = hostPaths[h]
-                if (rules != null) for (p in rules) if (path.startsWith(p)) return true
-                if (!h.contains('.')) break
-                h = h.substringAfter('.')
-            }
-        }
-        return false
-    }
-
-    private fun matchGenericPath(path: String): Boolean {
-        synchronized(hosts) { for (p in paths) if (path.contains(p)) return true }
-        return looksLikeAdPath(path)
-    }
-
-    fun looksLikeAdPath(path: String): Boolean {
-        val p = path.lowercase()
-        return p.contains("/pagead") || p.contains("googlesyndication") || p.contains("googleadservices") ||
-            p.contains("/ptracking") || p.contains("doubleclick") || p.contains("/adsense") ||
-            p.contains("/ads?") || p.contains("/ads/") || p.contains("/ad-") || p.contains("/adserver") ||
-            p.contains("/adsystem") || p.contains("prebid") || p.contains("/pixel") && (p.contains("track") || p.contains("ad"))
-    }
-
-    private fun isTrackLabel(l: String): Boolean {
-        if (l in trackLabels) return true
-        return l.startsWith("ads") || l.endsWith("ads") || l.endsWith("-ad") || l.startsWith("ad-") ||
-            "analytics" in l || "telemetry" in l || "doubleclick" in l || "pagead" in l
-    }
-
-    private fun hostOf(url: String?): String? = try { url?.let { java.net.URI(it).host?.lowercase() } } catch (_: Exception) { null }
-    private fun registrable(host: String): String {
-        val parts = host.removePrefix("www.").split('.')
-        if (parts.size <= 2) return parts.joinToString(".")
-        val sld = parts[parts.size - 2]
-        val n = if (sld.length <= 3 && parts.last().length == 2) 3 else 2
-        return parts.takeLast(n).joinToString(".")
-    }
-
-    private fun openAsset(ctx: Context, name: String): InputStream {
-        // O aapt descompacta assets *.gz e publica o arquivo sem o .gz no APK.
-        return try { GZIPInputStream(ctx.assets.open("$name.gz")) } catch (_: Exception) { ctx.assets.open(name) }
-    }
-
-    private fun loadBundled(ctx: Context) {
-        openAsset(ctx, "adblock/hosts.txt").use { loadHosts(it) }
-        try { openAsset(ctx, "adblock/hostpaths.txt").use { loadHostPaths(it) } } catch (_: Exception) {}
-        try { ctx.assets.open("adblock/paths.txt").use { loadPaths(it) } } catch (_: Exception) {}
-        try { ctx.assets.open("adblock/cosmetic.css.txt").bufferedReader().use { cosmeticCss = DEFAULT_CSS + "\n" + it.readText() } } catch (_: Exception) {}
-    }
-
-    private fun loadOverlay(ctx: Context) {
-        val dir = File(ctx.filesDir, "adblock")
-        val hf = File(dir, "hosts.txt")
-        if (hf.isFile) hf.inputStream().use { loadHosts(it) }
-        val pf = File(dir, "hostpaths.txt")
-        if (pf.isFile) pf.inputStream().use { loadHostPaths(it) }
-    }
-
-    private fun loadHosts(ins: InputStream) {
-        BufferedReader(ins.reader()).use { br ->
-            synchronized(hosts) {
-                var line: String?
-                while (true) {
-                    line = br.readLine() ?: break
-                    val h = line.trim().lowercase()
-                    if (h.isEmpty() || h.startsWith("#") || isProtectedApex(h) && !isTrackyFirstParty(h)) continue
-                    if (!isProtectedApex(h) || isTrackyFirstParty(h)) hosts.add(h)
-                }
-            }
+    fun isAdHost(host0: String): Boolean {
+        val h = host0.lowercase().trimEnd('.')
+        val set = hosts.ifEmpty { EXTRA }
+        var i = 0; var cur = h
+        while (true) {
+            if (cur in set) return true
+            i = cur.indexOf('.'); if (i < 0) return false
+            cur = cur.substring(i + 1)
+            if (!cur.contains('.')) return false
         }
     }
 
-    private fun loadHostPaths(ins: InputStream) {
-        BufferedReader(ins.reader()).use { br ->
-            synchronized(hosts) {
-                var line: String?
-                while (true) {
-                    line = br.readLine() ?: break
-                    val t = line.trim()
-                    if (t.isEmpty() || t.startsWith("#")) continue
-                    val i = t.indexOf('\t')
-                    if (i <= 0) continue
-                    val h = t.substring(0, i).lowercase()
-                    val p = t.substring(i + 1).lowercase()
-                    hostPaths.getOrPut(h) { ArrayList() }.add(p)
-                }
-            }
-        }
+    /** true = bloquear este subrecurso. */
+    fun shouldBlock(url: String, pageUrl: String?, mainFrame: Boolean): Boolean {
+        if (!enabled || mainFrame) return false
+        if (!url.startsWith("http", true)) return false
+        if (NEVER.containsMatchIn(url)) return false
+        if (Extract.mediaKindOf(url) != null || Extract.isVideoUrl(url)) return false   // nunca bloqueia stream de vídeo
+        val host = try { android.net.Uri.parse(url).host ?: return false } catch (_: Exception) { return false }
+        val pageHost = pageUrl?.let { try { android.net.Uri.parse(it).host } catch (_: Exception) { null } }
+        val firstParty = pageHost != null && base(host) == base(pageHost)
+        if (!firstParty && isAdHost(host)) return true
+        val path = url.substringAfter(host)
+        return URL_PAT.containsMatchIn(path) && !firstParty || (firstParty && RX_ADBLOCK_1.containsMatchIn(path))
     }
 
-    private fun loadPaths(ins: InputStream) {
-        BufferedReader(ins.reader()).use { br ->
-            synchronized(hosts) {
-                var line: String?
-                while (true) {
-                    line = br.readLine() ?: break
-                    val p = line.trim().lowercase()
-                    if (p.isNotEmpty() && !p.startsWith("#")) paths.add(p)
-                }
-            }
-        }
+    fun empty(): WebResourceResponse = WebResourceResponse("text/plain", "utf-8", ByteArrayInputStream(ByteArray(0)))
+
+    /**
+     * Navegação da página principal. Toque do usuário em http(s): sempre libera (mesma aba). Mesmo site: sempre libera.
+     * Bloqueia só esquemas de app/loja (intent://, market://...) e redirecionamento automático para OUTRO site sem toque.
+     */
+    fun blockNavigation(target: String, currentPage: String?, hasGesture: Boolean, isRedirect: Boolean): Boolean {
+        val sch = target.substringBefore(':').lowercase()
+        if (sch != "http" && sch != "https") return sch == "intent" || sch == "market" || enabled && sch !in setOf("about", "data", "blob", "javascript")
+        if (!enabled || hasGesture) return false
+        val host = try { android.net.Uri.parse(target).host ?: return false } catch (_: Exception) { return false }
+        val cur = currentPage?.let { try { android.net.Uri.parse(it).host } catch (_: Exception) { null } } ?: return false
+        if (base(host) == base(cur)) return false
+        if (isRedirect) return isAdHost(host)
+        return true
     }
 
-    private fun isProtectedApex(h: String): Boolean {
-        if (h in firstParty || h in cdnApex) return true
-        return firstParty.any { h.endsWith(".$it") } && !isTrackyFirstParty(h)
-    }
-
-    private fun isTrackyFirstParty(h: String): Boolean {
-        for (a in firstParty) if (h.endsWith(".$a")) {
-            return h.substring(0, h.length - a.length - 1).split('.', '-').any { isTrackLabel(it) }
-        }
-        return false
-    }
-
-    private fun maybeUpdate(ctx: Context) {
-        val dir = File(ctx.filesDir, "adblock")
-        val stamp = File(dir, "updated")
-        val last = stamp.let { if (it.isFile) it.lastModified() else 0L }
-        if (System.currentTimeMillis() - last < UPDATE_MS) return
-        if (!updating.compareAndSet(false, true)) return
-        Thread({
-            try { updateFromNetwork(ctx) } catch (_: Exception) {}
-            updating.set(false)
-        }, "adblock-update").start()
-    }
-
-    private fun updateFromNetwork(ctx: Context) {
-        val newHosts = LinkedHashSet<String>()
-        val newHp = ArrayList<Pair<String, String>>()
-        for (u in listUrls) {
-            val body = try {
-                Net.http.newCall(okhttp3.Request.Builder().url(u).header("Accept", "text/plain").build()).execute().use { r ->
-                    if (!r.isSuccessful) return@use null
-                    r.body?.string()
-                }
-            } catch (_: Exception) { null } ?: continue
-            parseFilterList(body, newHosts, newHp)
-        }
-        if (newHosts.size < 1000) return
-        val dir = File(ctx.filesDir, "adblock"); dir.mkdirs()
-        File(dir, "hosts.txt").writeText(newHosts.sorted().joinToString("\n", postfix = "\n"))
-        File(dir, "hostpaths.txt").writeText(newHp.joinToString("") { "${it.first}\t${it.second}\n" })
-        File(dir, "updated").writeText(System.currentTimeMillis().toString())
-        synchronized(hosts) { hosts.addAll(newHosts) }
-        synchronized(hosts) { for ((h, p) in newHp) hostPaths.getOrPut(h) { ArrayList() }.add(p) }
-    }
-
-    /** Parser simples de EasyList: só ||host^ (host inteiro) e ||host/caminho. */
-    fun parseFilterList(text: String, outHosts: MutableSet<String>, outHp: MutableList<Pair<String, String>>) {
-        for (raw in text.lineSequence()) {
-            val line = raw.trim()
-            if (line.isEmpty() || line[0] == '!' || line[0] == '[' || line.startsWith("@@") || "##" in line) continue
-            val full = Regex("""^\|\|([a-zA-Z0-9.-]+)\^(?:\$.*)?$""").matchEntire(line)
-            if (full != null) {
-                val h = full.groupValues[1].lowercase().trimStart('.')
-                if (h.contains('.') && !h.contains('*') && (!isProtectedApex(h) || isTrackyFirstParty(h))) outHosts.add(h)
-                continue
-            }
-            val hp = Regex("""^\|\|([a-zA-Z0-9.-]+)(?:\^)?(/[^\s^$*]{1,80})""").find(line)
-            if (hp != null) {
-                val h = hp.groupValues[1].lowercase().trimStart('.')
-                val p = hp.groupValues[2].substringBefore('$').substringBefore('^').lowercase()
-                if (h.contains('.') && p.startsWith("/")) outHp.add(h to p)
-            }
-        }
-    }
-
-    const val DEFAULT_CSS = """
-#ad,#ads,#ad-banner,#ad-container,#advertisement,#adsense,#ad_holder,
-.ad,.ads,.adsbox,.adsbygoogle,.ad-banner,.ad-container,.ad-slot,.adbox,
-.advert,.advertisement,.advertising,.adunit,.ad-unit,.ad_unit,.ad-wrapper,.ads-wrapper,
-.sponsored,.sponsor,.promo-ad,.popup-ad,.pop-ad,.dfp-ad,.gpt-ad,
-[id*="google_ads"],[class*="adsbygoogle"],[id^="div-gpt-ad"],
-iframe[src*="doubleclick"],iframe[src*="googlesyndication"]
-{display:none!important;visibility:hidden!important;height:0!important;width:0!important;overflow:hidden!important;}
-"""
+    /** Pop-ups bloqueados (window.open devolve janela falsa) + CSS cosmético + remoção de overlays reinseridos. */
+    const val COSMETIC_JS = """(function(){
+      if(window.__bptAB)return 'ok';window.__bptAB=1;
+      var lastTap=0;
+      ['touchstart','touchend','mousedown','click','pointerdown'].forEach(function(ev){try{document.addEventListener(ev,function(){lastTap=Date.now()},true)}catch(e){}});
+      try{
+        var fake={closed:false,close:function(){},focus:function(){},blur:function(){},postMessage:function(){},location:{href:''},document:{write:function(){},close:function(){}}};
+        var nOpen=function(u){
+          // aberto por toque: segue na mesma aba; sem toque (pop-up/popunder): ignora
+          if(u&&Date.now()-lastTap<1200){try{var a=new URL(u,location.href);if(/^https?:$/.test(a.protocol)){location.href=a.href;return window}}catch(e){}}
+          return fake};
+        try{Object.defineProperty(window,'open',{value:nOpen,writable:false,configurable:false})}catch(e){window.open=nOpen}
+      }catch(e){}
+      var sel='[id^="google_ads"],[id^="div-gpt-ad"],ins.adsbygoogle,[class*="adsbygoogle"],[id*="taboola"],[class*="taboola"],[id*="outbrain"],[class*="outbrain"],'+
+        '[class^="ad-"],[class*=" ad-"],[id^="ad-"],[id^="ad_"],[class^="ads-"],[class*=" ads-"],[class*="advert"],[id*="advert"],'+
+        '[class*="banner-ad"],[class*="ad-banner"],[class*="ad-container"],[class*="ad-wrapper"],[class*="adbox"],[class*="ad-slot"],'+
+        '[class*="popunder"],[class*="interstitial"],[id*="interstitial"],[class*="native-ad"],[data-ad-slot],[data-adzone],'+
+        'iframe[src*="doubleclick"],iframe[src*="googlesyndication"],iframe[src*="exoclick"],iframe[src*="juicyads"],iframe[src*="adsterra"],iframe[src*="/ads/"]';
+      function keep(e){
+        try{
+          var t=(e.tagName||'').toLowerCase();
+          if(t==='a'||t==='video'||t==='source'||t==='html'||t==='body'||t==='main')return true;
+          if(e.querySelector('video,a img,a picture,a[href] [style*="background"],[class*="player"],.jwplayer,.video-js,.plyr'))return true;
+          if(e.closest('video,[class*="player"],.jwplayer,.video-js,.plyr'))return true;
+          if(e.querySelectorAll('a[href]').length>3)return true;
+        }catch(x){}
+        return false;
+      }
+      // mesmas regras; mais leve: depois da primeira varredura, olha só o que foi adicionado à página
+      // (varredura completa no máximo a cada 3 s) e só mede estilo de quem pode ser fixo (offsetParent nulo)
+      function hideIn(list){for(var i=0;i<list.length;i++){var e=list[i];if(e.__bptK)continue;e.__bptK=1;if(keep(e))continue;e.style.setProperty('display','none','important')}}
+      function hideAds(root){
+        try{
+          if(!root){hideIn(document.querySelectorAll(sel));return}
+          var l=[];if(root.matches&&root.matches(sel))l.push(root);if(root.querySelectorAll){var q=root.querySelectorAll(sel);for(var i=0;i<q.length;i++)l.push(q[i])}hideIn(l);
+        }catch(x){}
+      }
+      function overlays(els){
+        try{
+          var vw=window.innerWidth,vh=window.innerHeight,host=location.hostname.split('.').slice(-2).join('.');
+          for(var i=0;i<els.length;i++){var e=els[i];
+            if(e.offsetParent!==null||!e.isConnected)continue;
+            var cs=getComputedStyle(e);
+            if(cs.position!=='fixed')continue;
+            if((parseInt(cs.zIndex)||0)<999)continue;
+            var r=e.getBoundingClientRect();if(r.width*r.height<vw*vh*0.5)continue;
+            if(e.querySelector('video,iframe,input,form,img')||e.closest('video'))continue;
+            var links=e.tagName==='A'?[e]:e.querySelectorAll('a[href]');
+            if(links.length!==1)continue;
+            var h='';try{h=new URL(links[0].href).hostname}catch(x){}
+            if(!h||h.split('.').slice(-2).join('.')===host)continue;
+            if((e.innerText||'').trim().length>40)continue;
+            e.remove();
+          }
+        }catch(x){}
+      }
+      var lastFull=0;
+      function sweep(){lastFull=Date.now();hideAds(null);overlays(document.body?document.body.querySelectorAll('a,div'):[])}
+      var added=[],t=0,tf=0;
+      function part(){
+        var nodes=added;added=[];
+        for(var i=0;i<nodes.length;i++){var n=nodes[i];if(n.nodeType!==1||!n.isConnected)continue;hideAds(n);
+          var l=[];var tn=n.tagName;if(tn==='A'||tn==='DIV')l.push(n);var q=n.querySelectorAll('a,div');for(var k=0;k<q.length;k++)l.push(q[k]);overlays(l)}
+      }
+      sweep();
+      try{new MutationObserver(function(ms){
+        for(var i=0;i<ms.length;i++){var a=ms[i].addedNodes;for(var k=0;k<a.length;k++)added.push(a[k])}
+        clearTimeout(t);t=setTimeout(part,300);
+        if(!tf){var wait=Math.max(0,3000-(Date.now()-lastFull));tf=setTimeout(function(){tf=0;sweep()},wait)}
+      }).observe(document.documentElement,{childList:true,subtree:true})}catch(e){}
+      setTimeout(sweep,1500);setTimeout(sweep,4000);
+      return 'ok';
+    })()"""
 }

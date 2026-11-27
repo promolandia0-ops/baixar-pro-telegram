@@ -1,6 +1,7 @@
 package br.geracaoai.baixartg.tg
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.MediaMetadataRetriever
 import kotlinx.coroutines.*
 import org.drinkless.tdlib.TdApi
@@ -27,18 +28,68 @@ object Uploader {
         r.release(); Info(dur, w, h, thumb)
     } catch (_: Throwable) { Info(0, 0, 0, null) }
 
-    /** Envia para Mensagens Salvas. Cancelar a corrotina (Parar) aborta o envio no TDLib. */
-    suspend fun upload(file: File, caption: String, onProgress: (Float) -> Unit): TdApi.Message {
+    /** Envia para Mensagens Salvas. Foto = foto, vídeo = vídeo. Nunca figurinha/arquivo para mídia. */
+    suspend fun upload(file: File, caption: String, asVideo: Boolean = true, onProgress: (Float) -> Unit): TdApi.Message {
+        if (asVideo) {
+            val prepared = withContext(Dispatchers.IO) { br.geracaoai.baixartg.core.VideoSend.prepare(file) }
+            val temps = if (prepared != file) listOf(prepared) else emptyList()
+            try {
+                return upload0(prepared, caption, Kind.VIDEO, onProgress)
+            } finally {
+                temps.forEach { try { if (it.exists() && it != file) it.delete() } catch (_: Exception) {} }
+            }
+        }
+        val prepared = withContext(Dispatchers.IO) { br.geracaoai.baixartg.core.PhotoSend.prepare(file) }
+        try {
+            val kind = if (prepared.mode == br.geracaoai.baixartg.core.PhotoSend.Mode.ANIMATION) Kind.ANIM else Kind.PHOTO
+            return upload0(prepared.file, caption, kind, onProgress, prepared.w, prepared.h)
+        } finally {
+            if (prepared.temp) try { prepared.file.delete() } catch (_: Exception) {}
+        }
+    }
+
+    private enum class Kind { VIDEO, PHOTO, ANIM }
+
+    private suspend fun upload0(file: File, caption: String, kind: Kind, onProgress: (Float) -> Unit, pw: Int = 0, ph: Int = 0): TdApi.Message {
         val chat = savedChat()
-        val isVideo = file.extension.lowercase() in setOf("mp4", "mov", "m4v")
-        val info = if (isVideo) withContext(Dispatchers.IO) { probe(file) } else Info(0, 0, 0, null)
-        val cap = TdApi.FormattedText(caption.take(1000), emptyArray())
+        if (kind == Kind.VIDEO) {
+            val ext = file.extension.lowercase()
+            if (ext in setOf("jpg", "jpeg", "png", "webp", "gif", "bmp")) {
+                throw IllegalStateException("O arquivo não é um vídeo (veio uma imagem (capa)).")
+            }
+        }
+        val info = if (kind == Kind.VIDEO) withContext(Dispatchers.IO) { probe(file) } else Info(0, 0, 0, null)
+        val cap = TdApi.FormattedText(if (br.geracaoai.baixartg.Prefs.sendCaption) caption.take(1000) else "", emptyArray())
         val thumb = info.thumb?.let { t -> TdApi.InputThumbnail().apply { thumbnail = TdApi.InputFileLocal(t.absolutePath); width = 320; height = 320 } }
-        val content: TdApi.InputMessageContent = if (isVideo && info.w > 0) TdApi.InputMessageVideo().apply {
-            video = TdApi.InputVideo().apply { video = TdApi.InputFileLocal(file.absolutePath); thumbnail = thumb; duration = info.dur; width = info.w; height = info.h
-            supportsStreaming = true }; this.caption = cap
-        } else TdApi.InputMessageDocument().apply {
-            document = TdApi.InputDocument().apply { document = TdApi.InputFileLocal(file.absolutePath); thumbnail = thumb }; this.caption = cap
+        val content: TdApi.InputMessageContent = when (kind) {
+            Kind.VIDEO -> TdApi.InputMessageVideo().apply {
+                video = TdApi.InputVideo().apply {
+                    video = TdApi.InputFileLocal(file.absolutePath)
+                    thumbnail = thumb
+                    duration = info.dur
+                    width = info.w
+                    height = info.h
+                    supportsStreaming = true
+                }
+                this.caption = cap
+            }
+            Kind.ANIM -> TdApi.InputMessageAnimation().apply {
+                animation = TdApi.InputAnimation().apply {
+                    animation = TdApi.InputFileLocal(file.absolutePath)
+                    width = pw; height = ph
+                }
+                this.caption = cap
+            }
+            Kind.PHOTO -> {
+                val (w, h) = if (pw > 0 && ph > 0) pw to ph else photoSize(file)
+                TdApi.InputMessagePhoto().apply {
+                    photo = TdApi.InputPhoto().apply {
+                        photo = TdApi.InputFileLocal(file.absolutePath)
+                        width = w; height = h
+                    }
+                    this.caption = cap
+                }
+            }
         }
         try {
             val tmp = Td.send(TdApi.SendMessage().apply { chatId = chat; inputMessageContent = content; options = TdApi.MessageSendOptions().apply { disableNotification = true } })
@@ -53,13 +104,23 @@ object Uploader {
                 }
                 throw e
             } finally { job.cancel() }
-            return res.message ?: throw TdException(res.error?.code ?: 0, res.error?.message ?: "Falha no envio")
+            val msg = res.message ?: throw TdException(res.error?.code ?: 0, res.error?.message ?: "Falha no envio")
+            if (msg.sendingState != null || msg.chatId != chat) throw TdException(0, "Telegram não confirmou o envio")
+            return msg
         } finally { info.thumb?.delete() }
     }
 
     private fun fileOf(m: TdApi.Message): TdApi.File? = when (val c = m.content) {
         is TdApi.MessageVideo -> c.video.video
+        is TdApi.MessagePhoto -> c.photo.sizes.maxByOrNull { it.photo.expectedSize }?.photo
+        is TdApi.MessageAnimation -> c.animation.animation
         is TdApi.MessageDocument -> c.document.document
         else -> null
     }
+
+    private fun photoSize(f: File): Pair<Int, Int> = try {
+        val opt = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(f.absolutePath, opt)
+        (opt.outWidth.coerceAtLeast(0)) to (opt.outHeight.coerceAtLeast(0))
+    } catch (_: Throwable) { 0 to 0 }
 }

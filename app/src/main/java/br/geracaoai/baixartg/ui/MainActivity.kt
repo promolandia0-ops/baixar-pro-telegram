@@ -45,20 +45,49 @@ class MainActivity : ComponentActivity() {
     private val shared = mutableStateOf<String?>(null)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        br.geracaoai.baixartg.core.Jobs.retomarSeInterrompido()
         enableEdgeToEdge()
+        br.geracaoai.baixartg.core.JsRender.bind(this)
+        kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.IO).launch { try { br.geracaoai.baixartg.core.Downloader.warmUp(br.geracaoai.baixartg.Prefs.server) } catch (_: Exception) {} }
         handle(intent)
+        askBackgroundPermissions()
+        br.geracaoai.baixartg.core.Pipeline.start()
+        br.geracaoai.baixartg.core.Dedupe.resumeDelete()   // retoma a fila salva (app aberto = pode iniciar o serviço)
         setContent {
             val dark = isSystemInDarkTheme(); val ctx = LocalContext.current
             AppTheme(dark) { Surface(color = MaterialTheme.colorScheme.background) { Root(shared) } }
         }
     }
-    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handle(intent) }
     override fun onPause() {
-        super.onPause()
         try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
-        try { br.geracaoai.baixartg.web.WebCookies.persist() } catch (_: Exception) {}
+        super.onPause()
     }
+    override fun onStop() {
+        try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
+        super.onStop()
+    }
+    override fun onDestroy() {
+        try { android.webkit.CookieManager.getInstance().flush() } catch (_: Exception) {}
+        br.geracaoai.baixartg.core.JsRender.unbind(this)
+        BrowserRuntime.release()
+        super.onDestroy()
+    }
+    /** Uma vez: notificações (Android 13+) e "não otimizar bateria" — para a fila não ser parada em segundo plano. */
+    private fun askBackgroundPermissions() {
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 41)
+        } catch (_: Exception) {}
+        try {
+            val pm = getSystemService(android.os.PowerManager::class.java)
+            if (!Prefs.askedBattery && !pm.isIgnoringBatteryOptimizations(packageName)) {
+                Prefs.askedBattery = true
+                @android.annotation.SuppressLint("BatteryLife")
+                val i = Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, android.net.Uri.parse("package:$packageName"))
+                startActivity(i)
+            }
+        } catch (_: Exception) {}
+    }
+    override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); handle(intent) }
     private fun handle(i: Intent?) {
         if (i?.action == Intent.ACTION_SEND) i.getStringExtra(Intent.EXTRA_TEXT)?.let { t -> Regex("""https?://\S+""").find(t)?.value?.let { shared.value = it } }
     }
@@ -69,6 +98,7 @@ fun Root(shared: MutableState<String?>) {
     val auth by Td.auth.collectAsState()
     var hasApi by remember { mutableStateOf(Prefs.apiId != 0) }
     val stage = when { !hasApi -> 0; auth !is TdApi.AuthorizationStateReady -> 1; else -> 2 }
+    CrashNotice()
     AnimatedContent(stage, transitionSpec = { fadeIn() togetherWith fadeOut() }, label = "root") { s ->
         when (s) {
             0 -> SetupScreen { hasApi = true }
@@ -76,6 +106,21 @@ fun Root(shared: MutableState<String?>) {
             else -> MainShell(shared)
         }
     }
+}
+
+/** Se o app fechou sozinho da última vez, avisa e deixa copiar o motivo (gerado mesmo com o app fechado). */
+@Composable
+fun CrashNotice() {
+    val rep by CrashLog.pending.collectAsState()
+    val ctx = LocalContext.current
+    val r = rep ?: return
+    AlertDialog(onDismissRequest = { CrashLog.pending.value = null },
+        icon = { Icon(Icons.Rounded.BugReport, null) },
+        title = { Text("O app fechou da última vez") },
+        text = { Text("O motivo foi registrado. Toque em Copiar e cole no chat para a gente corrigir.\n\n" + r.lines().filter { it.contains("FECHOU") || it.contains("QUEDA") || it.contains("WEBVIEW") }.takeLast(3).joinToString("\n").take(400),
+            style = MaterialTheme.typography.bodySmall) },
+        confirmButton = { TextButton({ copy(ctx, r, "Motivo da queda copiado. Cole no chat."); CrashLog.pending.value = null }) { Text("Copiar") } },
+        dismissButton = { TextButton({ CrashLog.pending.value = null }) { Text("Fechar") } })
 }
 
 fun fmtBytes(b: Long): String {
