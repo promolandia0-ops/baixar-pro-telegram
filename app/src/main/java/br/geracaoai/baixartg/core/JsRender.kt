@@ -257,7 +257,9 @@ object JsRender {
         if (!available()) { lastUnavailable = true; return null }
         lastUnavailable = false
         if (!acquire(pool, slotWait)) return null
-        val vis = false
+        // Com o navegador na tela: no máximo 2 páginas ocultas de card ao mesmo tempo (antes 3, todas tocando vídeo
+        // junto com a página que você vê). Se a vaga demorar, segue mesmo assim: nenhum card deixa de ser aberto.
+        val vis = browserVisible && pool !== queueGate && acquire(visibleGate, 6_000)
         // Com o navegador na tela, a fila abre 1 página oculta por vez (antes até 3 juntas disputavam o celular com
         // a página que você está vendo e o navegador engasgava). Se a vaga demorar, segue mesmo assim (nada deixa de ser achado).
         val solo = pool === queueGate && browserVisible && acquire(queueSoloGate, 8_000)

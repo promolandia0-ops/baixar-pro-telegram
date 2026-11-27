@@ -795,6 +795,18 @@ object BrowserDetect {
     fun seenItemsCount(): Int = synchronized(seenCards) { seenCards.size } + list.count { !it.sent }
     fun staticCollectPage(url: String, html: String): JsScripts.Collected? = staticCollect(url, html)
 
+    /**
+     * Examina os links da página numa linha própria, fora da tela. Antes rodava na thread da tela: ao tocar em
+     * Procurar ou carregar "ver mais", milhares de links eram conferidos de uma vez e o navegador travava.
+     * Uma coleta por vez, na ordem em que chegam (o resultado é o mesmo de antes).
+     */
+    private val coleta = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread({ android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND); r.run() }, "coleta").apply { isDaemon = true }
+    }.asCoroutineDispatcher()
+    fun onCollectedAsync(page: String, c: JsScripts.Collected, background: Boolean = false, autoFollow: Boolean = true) {
+        scope.launch(coleta) { try { onCollected(page, c, background, autoFollow) } catch (_: Exception) {} }
+    }
+
     fun onCollected(page: String, c: JsScripts.Collected, background: Boolean = false, autoFollow: Boolean = true) {
         if (!background) browsing = page
         val prevInfo = pageInfo.put(normPage(page), c.bestPageTitle to c.pageText)
@@ -851,7 +863,7 @@ object BrowserDetect {
                 // próxima página: só o HTML (sem página oculta: ela dividia o motor de páginas com o navegador visível)
                 val h = PageResolver.fetch(nx, page)
                 val col = h?.let { staticCollect(nx, it) }
-                if (col != null && col.anchors.isNotEmpty()) withContext(Dispatchers.Main) { onCollected(nx, col, background = true, autoFollow = autoFollow) }
+                if (col != null && col.anchors.isNotEmpty()) onCollectedAsync(nx, col, background = true, autoFollow = autoFollow)
                 // fotos também nas próximas páginas da busca ("Só fotos" / "Vídeos e fotos")
                 if (photosOn.value && h != null) {
                     val ps = Photos.fromHtml(nx, h); val cs = Photos.cardsFromHtml(nx, h)
@@ -1132,7 +1144,7 @@ object BrowserLoadMore {
         val raw = evalMain(web, JsScripts.COLLECT) ?: return
         val col = JsScripts.parseCollected(raw) ?: return
         withContext(Dispatchers.Main) {
-            try { BrowserDetect.onCollected(page, col, background = false, autoFollow = false) } catch (_: Exception) {}
+            BrowserDetect.onCollectedAsync(page, col, background = false, autoFollow = false)
         }
     }
 
@@ -1160,7 +1172,7 @@ object BrowserLoadMore {
         val col = JsScripts.parseCollected(raw) ?: return
         if (!col.same) {
             withContext(Dispatchers.Main) {
-                try { BrowserDetect.onCollected(page, col, background = false, autoFollow = false) } catch (_: Exception) {}
+                BrowserDetect.onCollectedAsync(page, col, background = false, autoFollow = false)
             }
         }
     }

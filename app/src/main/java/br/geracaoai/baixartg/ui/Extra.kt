@@ -276,7 +276,7 @@ fun BrowserScreen(visible: Boolean = true, onLeaveTab: () -> Unit = {}, onUse: (
             collectScope.launch {
                 val c = JsScripts.parseCollected(raw)
                 withContext(kotlinx.coroutines.Dispatchers.Main) {
-                    try { c?.takeIf { !it.same }?.let { BrowserDetect.onCollected(page, it) } } catch (_: Exception) {}
+                    c?.takeIf { !it.same }?.let { BrowserDetect.onCollectedAsync(page, it) }
                     collectState.busy = false
                 }
             }
