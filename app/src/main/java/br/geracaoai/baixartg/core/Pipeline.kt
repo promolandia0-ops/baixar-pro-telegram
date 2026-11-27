@@ -644,7 +644,30 @@ object Pipeline {
             if (cur.st == PS.CANCEL || cur.id in userCancel) cur
             else cur.copy(st = PS.FAIL, msg = msg.take(180), prog = 0f, speed = 0, stalls = cur.stalls + 1).also { toRelease = it }
         }
-        toRelease?.let { releaseQueue(it) }
+        toRelease?.let { releaseQueue(it); autoRetry(it) }
+    }
+
+    /**
+     * Falhou: tenta de novo SOZINHO até 2 vezes, espaçado (≈1 min e ≈3 min, com sorteio para não irem todos juntos).
+     * Vários vídeos da mesma página falhando juntos costuma ser o site recusando pedidos demais de uma vez ou o link
+     * de um vídeo trocando a "senha" dos outros; um pouco depois, sozinho, o mesmo vídeo baixa. O caminho de baixar
+     * é exatamente o mesmo do botão Reenviar.
+     */
+    private val autoTries = java.util.concurrent.ConcurrentHashMap<Long, Int>()
+    private fun autoRetry(t: PItem) {
+        if (t.id in userCancel || t.photo) return
+        val n = (autoTries[t.id] ?: 0) + 1
+        if (n > 2) return
+        autoTries[t.id] = n
+        val espera = (if (n == 1) 60_000L else 180_000L) + kotlin.random.Random.nextLong(0, 45_000L)
+        upd(t.id, persist = false) { it.copy(msg = it.msg.removeSuffix(" Toque em Reenviar.") + " • tento de novo sozinho em ~${(espera / 60_000L).coerceAtLeast(1)} min ($n/2)") }
+        scope.launch {
+            delay(espera)
+            val cur = items.value.firstOrNull { it.id == t.id } ?: return@launch
+            if (cur.st != PS.FAIL || cur.id in userCancel || paused.value) return@launch
+            Trail.add(listOf(cur.f?.url, cur.page), "fila: tentando de novo sozinho", "tentativa automática $n de 2")
+            retry(cur.id)
+        }
     }
     private fun markCancelled(t: PItem, ks: Set<String> = emptySet()) {
         userCancel.add(t.id)
